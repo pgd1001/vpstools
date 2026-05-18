@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package svrtools.v1;
 
+option go_package = "github.com/pgd1001/svrtools/packages/sdk-go/svrtools/v1;svrtoolsv1";
+
 import "google/protobuf/timestamp.proto";
 
 service ServerService {

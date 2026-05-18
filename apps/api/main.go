@@ -4,8 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -17,21 +18,26 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
 	dbPath := envOrDefault("DB_PATH", "svrtools.db")
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)")
 	if err != nil {
-		log.Fatalf("database open failed: %v", err)
+		logger.Error("database open failed", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
 	if err := migrate(ctx, db); err != nil {
-		log.Fatalf("migration failed: %v", err)
+		logger.Error("migration failed", "error", err)
+		os.Exit(1)
 	}
 	if err := seed(ctx, db); err != nil {
-		log.Fatalf("seed failed: %v", err)
+		logger.Error("seed failed", "error", err)
+		os.Exit(1)
 	}
 
-	log.Println("database ready")
+	logger.Info("database ready")
 
 	mux := http.NewServeMux()
 
@@ -103,7 +109,7 @@ func main() {
 			execID, "org_demo", "user_senior", req.Command, hashCmd(req.Command), "queued", req.Reason,
 		)
 		if err != nil {
-			log.Printf("execution create error: %v", err)
+			logger.Error("execution create error", "error", err)
 			writeJSON(w, 500, map[string]string{"error": "failed to create execution"})
 			return
 		}
@@ -221,14 +227,15 @@ func main() {
 	srv := &http.Server{Addr: addr, Handler: mux}
 
 	go func() {
-		log.Printf("API listening on %s", addr)
+		logger.Info("API listening", "addr", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+			logger.Error("server error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	<-ctx.Done()
-	log.Println("shutting down...")
+	logger.Info("shutting down...")
 	shutdownCtx, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
 	srv.Shutdown(shutdownCtx)

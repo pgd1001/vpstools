@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +18,8 @@ import (
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	apiURL := os.Getenv("API_URL")
 	if apiURL == "" {
@@ -32,9 +34,9 @@ func main() {
 	simulate := os.Getenv("SIMULATE") == "true" || os.Getenv("SIMULATE") == "1"
 
 	if simulate {
-		log.Println("runner started in SIMULATE mode (no real SSH)")
+		logger.Info("runner started in SIMULATE mode (no real SSH)")
 	} else {
-		log.Printf("runner started: API=%s, SSH=%s:%s", apiURL, targetHost, targetPort)
+		logger.Info("runner started", "api_url", apiURL, "ssh_host", targetHost, "ssh_port", targetPort)
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -48,7 +50,7 @@ func main() {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("runner shutting down")
+			logger.Info("runner shutting down")
 			return
 		default:
 		}
@@ -63,7 +65,7 @@ func main() {
 			continue
 		}
 
-		log.Printf("claimed job %s: %s", job.ExecutionID, job.Command)
+		logger.Info("claimed job", "execution_id", job.ExecutionID, "command", job.Command)
 
 		var result sshx.Result
 		if simulate {
@@ -72,10 +74,10 @@ func main() {
 			result = executor.Run(ctx, job.Command)
 		}
 
-		log.Printf("job %s completed: exit=%d, duration=%dms", job.ExecutionID, result.ExitCode, result.DurationMs)
+		logger.Info("job completed", "execution_id", job.ExecutionID, "exit_code", result.ExitCode, "duration_ms", result.DurationMs)
 
 		if err := submitResult(ctx, client, apiURL, job.ExecutionID, result); err != nil {
-			log.Printf("failed to submit result for %s: %v", job.ExecutionID, err)
+			logger.Error("failed to submit result", "execution_id", job.ExecutionID, "error", err)
 		}
 	}
 }

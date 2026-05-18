@@ -4,6 +4,8 @@
 
 **Phase 0 (Architecture Spike) is implemented.** The CLI→API→Runner→audit vertical slice works. No Docker or PostgreSQL required for local dev — the spike uses pure-Go SQLite and a simulate mode for the runner.
 
+**Phase 1 (Foundations) is implemented.** Monorepo finalized, CI pipeline, protobuf generation, sqlc queries, Goose migrations, structured logging (slog), Viper config, developer docs.
+
 **Go module:** `github.com/pgd1001/svrtools` (Go 1.26.3)  
 **Build output:** `bin/vps.exe`, `bin/api.exe`, `bin/runner.exe`
 
@@ -86,9 +88,15 @@ go build -o bin/api.exe ./apps/api      # Build API server
 go build -o bin/runner.exe ./apps/runner # Build runner
 go test ./...                            # Run all tests
 go vet ./...                             # Vet all packages
+make build                               # Build all three binaries
+make test                                # Run tests
+make lint                                # golangci-lint
+make generate                            # buf generate + sqlc generate
 ```
 
 **No Docker or PostgreSQL required for local dev.** The API uses embedded SQLite (`svrtools.db`) and auto-migrates/auto-seeds on startup. The runner supports `SIMULATE=true` mode to skip SSH.
+
+**With PostgreSQL:** Set `DATABASE_URL` and run `go run apps/api/cmd/migrate/main.go -- up` for Goose migrations. PostgreSQL required for production target; SQLite for local dev spike.
 
 ### Run the full vertical slice
 
@@ -123,7 +131,7 @@ $env:SIMULATE = "true"
 Phases are intended to be sequential vertical slices (each phase builds a working feature, not a layer):
 
 1. **Phase 0 — Architecture Spike:** ~~Prove CLI→API→Runner→SSH→audit path~~ **DONE**
-2. **Phase 1 — Foundations:** Monorepo, CI, migrations, code generation
+2. **Phase 1 — Foundations:** ~~Monorepo, CI, migrations, code generation~~ **DONE**
 3. **Phase 2 — Inventory and Runner:** Server registration, runner heartbeat, health checks
 4. **Phase 3 — Execution Engine:** Single/group execution, output capture, timeouts
 5. **Phase 4 — RBAC and Policy:** Role enforcement, policy evaluation, deny-by-default

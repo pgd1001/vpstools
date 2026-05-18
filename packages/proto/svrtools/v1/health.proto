@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package svrtools.v1;
 
+option go_package = "github.com/pgd1001/svrtools/packages/sdk-go/svrtools/v1;svrtoolsv1";
+
 service HealthService {
   rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
 }

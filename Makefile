@@ -1,4 +1,4 @@
-.PHONY: dev-up dev-down migrate seed test lint generate cli api runner
+.PHONY: dev-up dev-down build test vet lint generate clean
 
 dev-up:
 	docker compose -f deploy/docker-compose/docker-compose.yml up -d
@@ -6,26 +6,31 @@ dev-up:
 dev-down:
 	docker compose -f deploy/docker-compose/docker-compose.yml down
 
-migrate:
-	go run apps/api/cmd/migrate/main.go -- up
+build: cli api runner
 
-seed:
-	go run apps/api/cmd/seed/main.go
+cli:
+	go build -o bin/vps.exe ./apps/cli
+
+api:
+	go build -o bin/api.exe ./apps/api
+
+runner:
+	go build -o bin/runner.exe ./apps/runner
 
 test:
-	go test ./...
+	go test ./... -count=1 -timeout 30s
+
+vet:
+	go vet ./...
 
 lint:
 	golangci-lint run ./...
 
 generate:
 	buf generate
+	sqlc generate
 
-cli:
-	go build -o bin/vps ./apps/cli
+clean:
+	rm -f svrtools.db vps.exe api.exe runner.exe
 
-api:
-	go build -o bin/api ./apps/api
-
-runner:
-	go build -o bin/runner ./apps/runner
+.PHONY: cli api runner
