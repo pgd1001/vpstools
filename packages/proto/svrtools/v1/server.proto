@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package svrtools.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service ServerService {
+  rpc ListServers(ListServersRequest) returns (ListServersResponse);
+  rpc GetServer(GetServerRequest) returns (GetServerResponse);
+}
+
+message Server {
+  string id = 1;
+  string name = 2;
+  string hostname = 3;
+  string environment = 4;
+  map<string, string> tags = 5;
+  string status = 6;
+  google.protobuf.Timestamp last_seen_at = 7;
+}
+
+message ListServersRequest {
+  string environment = 1;
+  string tag_key = 2;
+  string tag_value = 3;
+}
+
+message ListServersResponse {
+  repeated Server servers = 1;
+}
+
+message GetServerRequest {
+  string server_id = 1;
+}
+
+message GetServerResponse {
+  Server server = 1;
+}

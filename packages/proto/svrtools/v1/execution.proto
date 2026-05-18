@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package svrtools.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service ExecutionService {
+  rpc CreateExecution(CreateExecutionRequest) returns (CreateExecutionResponse);
+  rpc GetExecution(GetExecutionRequest) returns (GetExecutionResponse);
+  rpc StreamExecution(StreamExecutionRequest) returns (stream ExecutionEvent);
+}
+
+message CreateExecutionRequest {
+  string target = 1;
+  string command = 2;
+  string reason = 3;
+  bool dry_run = 4;
+}
+
+message CreateExecutionResponse {
+  string execution_id = 1;
+  ExecutionStatus status = 2;
+  string status_message = 3;
+}
+
+message GetExecutionRequest {
+  string execution_id = 1;
+}
+
+message GetExecutionResponse {
+  string execution_id = 1;
+  ExecutionStatus status = 2;
+  string command = 3;
+  string actor_id = 4;
+  google.protobuf.Timestamp created_at = 5;
+  repeated ExecutionTargetResult results = 6;
+}
+
+message StreamExecutionRequest {
+  string execution_id = 1;
+}
+
+message ExecutionEvent {
+  string execution_id = 1;
+  ExecutionStatus status = 2;
+  optional ExecutionTargetResult target_result = 3;
+}
+
+message ExecutionTargetResult {
+  string server_id = 1;
+  int32 exit_code = 2;
+  string stdout = 3;
+  string stderr = 4;
+  string error = 5;
+  int64 duration_ms = 6;
+}
+
+enum ExecutionStatus {
+  EXECUTION_STATUS_UNSPECIFIED = 0;
+  EXECUTION_STATUS_QUEUED = 1;
+  EXECUTION_STATUS_RUNNING = 2;
+  EXECUTION_STATUS_SUCCEEDED = 3;
+  EXECUTION_STATUS_FAILED = 4;
+  EXECUTION_STATUS_DENIED = 5;
+  EXECUTION_STATUS_CANCELLED = 6;
+}

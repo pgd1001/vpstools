@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: svrtools
+      POSTGRES_PASSWORD: svrtools
+      POSTGRES_DB: svrtools
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  ssh-target:
+    build:
+      context: ./ssh-target
+    ports:
+      - "2222:22"
+    environment:
+      SSH_USER: svrtools
+      SSH_PASSWORD: svrtools
+
+volumes:
+  pgdata:

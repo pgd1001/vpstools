@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package svrtools.v1;
+
+service Auditservice {
+  rpc WriteAuditEvent(WriteAuditEventRequest) returns (WriteAuditEventResponse);
+}
+
+message AuditEvent {
+  string event_id = 1;
+  string organisation_id = 2;
+  string actor_id = 3;
+  string action = 4;
+  string target_type = 5;
+  string target_id = 6;
+  string result = 7;
+  string metadata_json = 8;
+}
+
+message WriteAuditEventRequest {
+  AuditEvent event = 1;
+}
+
+message WriteAuditEventResponse {
+  string event_id = 1;
+}
