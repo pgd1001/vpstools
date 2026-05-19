@@ -37,22 +37,177 @@ func (c *Client) WhoAmI() (*WhoAmIResponse, error) {
 	return &resp, nil
 }
 
+type ServerTag struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 type Server struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Hostname    string            `json:"hostname"`
-	Environment string            `json:"environment"`
-	Tags        map[string]string `json:"tags"`
-	Status      string            `json:"status"`
+	ID          string      `json:"id"`
+	Name        string      `json:"name"`
+	Hostname    string      `json:"hostname"`
+	PublicIP    string      `json:"public_ip"`
+	PrivateIP   string      `json:"private_ip"`
+	SSHPort     int         `json:"ssh_port"`
+	SSHUsername string      `json:"ssh_username"`
+	Environment string      `json:"environment"`
+	Provider    string      `json:"provider"`
+	OSName      string      `json:"os_name"`
+	OSVersion   string      `json:"os_version"`
+	Kernel      string      `json:"kernel_version"`
+	Arch        string      `json:"architecture"`
+	Status      string      `json:"status"`
+	LastSeenAt  string      `json:"last_seen_at"`
+	LastCheckAt string      `json:"last_check_at"`
+	CreatedAt   string      `json:"created_at"`
+	Tags        []ServerTag `json:"tags"`
 }
 
 type ListServersResponse struct {
 	Servers []Server `json:"servers"`
 }
 
-func (c *Client) ListServers() (*ListServersResponse, error) {
+func (c *Client) ListServers(environment, tagKey, tagValue string) (*ListServersResponse, error) {
+	path := "/api/v1/servers"
+	sep := "?"
+	if environment != "" {
+		path += fmt.Sprintf("%senvironment=%s", sep, environment)
+		sep = "&"
+	}
+	if tagKey != "" {
+		path += fmt.Sprintf("%stag_key=%s", sep, tagKey)
+		sep = "&"
+	}
+	if tagValue != "" {
+		path += fmt.Sprintf("%stag_value=%s", sep, tagValue)
+	}
 	var resp ListServersResponse
-	if err := c.get("/api/v1/servers", &resp); err != nil {
+	if err := c.get(path, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+type AddServerRequest struct {
+	Name        string `json:"name"`
+	Hostname    string `json:"hostname"`
+	PublicIP    string `json:"public_ip"`
+	PrivateIP   string `json:"private_ip"`
+	SSHPort     int    `json:"ssh_port"`
+	SSHUsername string `json:"ssh_username"`
+	Environment string `json:"environment"`
+	Provider    string `json:"provider"`
+	Tags        []struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	} `json:"tags"`
+}
+
+type AddServerResponse struct {
+	ServerID string `json:"server_id"`
+	Status   string `json:"status"`
+}
+
+func (c *Client) AddServer(req AddServerRequest) (*AddServerResponse, error) {
+	var resp AddServerResponse
+	if err := c.post("/api/v1/servers", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+type GetServerResponse struct {
+	Server Server `json:"server"`
+}
+
+func (c *Client) GetServer(serverID string) (*GetServerResponse, error) {
+	var resp GetServerResponse
+	if err := c.get("/api/v1/servers/"+serverID, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+type CheckServerResponse struct {
+	Server map[string]any `json:"server"`
+}
+
+func (c *Client) CheckServer(serverID string) (*CheckServerResponse, error) {
+	var resp CheckServerResponse
+	if err := c.post("/api/v1/servers/"+serverID+"/check", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+type Runner struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	RunnerType   string `json:"runner_type"`
+	Status       string `json:"status"`
+	Version      string `json:"version"`
+	Hostname     string `json:"hostname"`
+	Platform     string `json:"platform"`
+	IPAddress    string `json:"ip_address"`
+	LastSeenAt   string `json:"last_seen_at"`
+	RegisteredAt string `json:"registered_at"`
+	RevokedAt    string `json:"revoked_at"`
+	CreatedAt    string `json:"created_at"`
+}
+
+type ListRunnersResponse struct {
+	Runners []Runner `json:"runners"`
+}
+
+func (c *Client) ListRunners() (*ListRunnersResponse, error) {
+	var resp ListRunnersResponse
+	if err := c.get("/api/v1/runners", &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+type RegisterRunnerRequest struct {
+	Name       string `json:"name"`
+	Version    string `json:"version"`
+	Hostname   string `json:"hostname"`
+	Platform   string `json:"platform"`
+	IPAddress  string `json:"ip_address"`
+	RunnerType string `json:"runner_type"`
+}
+
+type RegisterRunnerResponse struct {
+	RunnerID string `json:"runner_id"`
+	Status   string `json:"status"`
+}
+
+func (c *Client) RegisterRunner(req RegisterRunnerRequest) (*RegisterRunnerResponse, error) {
+	var resp RegisterRunnerResponse
+	if err := c.post("/api/v1/runners", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) RunnerHeartbeat(runnerID, hostname, platform, version string) error {
+	body := map[string]string{
+		"runner_id": runnerID,
+		"hostname":  hostname,
+		"platform":  platform,
+		"version":   version,
+	}
+	var resp map[string]string
+	return c.post("/api/v1/runners/heartbeat", body, &resp)
+}
+
+type CreateRegistrationTokenResponse struct {
+	Token     string `json:"registration_token"`
+	ExpiresIn string `json:"expires_in"`
+}
+
+func (c *Client) CreateRegistrationToken() (*CreateRegistrationTokenResponse, error) {
+	var resp CreateRegistrationTokenResponse
+	if err := c.post("/api/v1/runners/registration-token", nil, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -90,7 +245,7 @@ type AuditEvent struct {
 	TargetType     string `json:"target_type"`
 	TargetID       string `json:"target_id"`
 	Result         string `json:"result"`
-	MetadataJSON   string `json:"metadata_json"`
+	Metadata       string `json:"metadata"`
 	CreatedAt      string `json:"created_at"`
 }
 
@@ -119,10 +274,7 @@ func (c *Client) get(path string, out any) error {
 }
 
 func (c *Client) post(path string, body, out any) error {
-	b, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
+	b, _ := json.Marshal(body)
 	resp, err := c.http.Post(c.baseURL+path, "application/json", bytes.NewReader(b))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
@@ -130,6 +282,9 @@ func (c *Client) post(path string, body, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+	if out == nil {
+		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }

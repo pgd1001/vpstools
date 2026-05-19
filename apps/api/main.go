@@ -14,6 +14,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+type tag struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -42,10 +47,7 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]string{
-			"status":  "ok",
-			"version": "0.1.0",
-		})
+		writeJSON(w, 200, map[string]string{"status": "ok", "version": "0.2.0"})
 	})
 
 	mux.HandleFunc("/api/v1/whoami", func(w http.ResponseWriter, r *http.Request) {
@@ -60,32 +62,64 @@ func main() {
 	})
 
 	mux.HandleFunc("/api/v1/servers", func(w http.ResponseWriter, r *http.Request) {
-		rows, err := db.QueryContext(ctx, "SELECT id, name, hostname, environment, tags, status FROM servers WHERE organisation_id = ?", "org_demo")
-		if err != nil {
-			writeJSON(w, 500, map[string]string{"error": "query failed"})
+		switch r.Method {
+		case http.MethodGet:
+			handleListServers(ctx, db, w, r)
+		case http.MethodPost:
+			handleAddServer(ctx, db, w, r)
+		default:
+			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		}
+	})
+
+	mux.HandleFunc("/api/v1/servers/", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path[len("/api/v1/servers/"):]
+		if path == "" {
+			writeJSON(w, 400, map[string]string{"error": "missing server id"})
 			return
 		}
-		defer rows.Close()
-
-		type server struct {
-			ID          string            `json:"id"`
-			Name        string            `json:"name"`
-			Hostname    string            `json:"hostname"`
-			Environment string            `json:"environment"`
-			Tags        map[string]string `json:"tags"`
-			Status      string            `json:"status"`
-		}
-		var servers []server
-		for rows.Next() {
-			var s server
-			var tags string
-			if err := rows.Scan(&s.ID, &s.Name, &s.Hostname, &s.Environment, &tags, &s.Status); err != nil {
-				continue
+		if hasSuffix(path, "/check") {
+			serverID := path[:len(path)-len("/check")]
+			if r.Method == http.MethodPost {
+				handleCheckServer(ctx, db, w, r, serverID, logger)
+			} else {
+				writeJSON(w, 405, map[string]string{"error": "method not allowed"})
 			}
-			json.Unmarshal([]byte(tags), &s.Tags)
-			servers = append(servers, s)
+			return
 		}
-		writeJSON(w, 200, map[string]any{"servers": servers})
+		switch r.Method {
+		case http.MethodGet:
+			handleGetServer(ctx, db, w, r, path)
+		default:
+			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		}
+	})
+
+	mux.HandleFunc("/api/v1/runners", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleListRunners(ctx, db, w, r)
+		case http.MethodPost:
+			handleRegisterRunner(ctx, db, w, r, logger)
+		default:
+			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		}
+	})
+
+	mux.HandleFunc("/api/v1/runners/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+			return
+		}
+		handleRunnerHeartbeat(ctx, db, w, r, logger)
+	})
+
+	mux.HandleFunc("/api/v1/runners/registration-token", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+			return
+		}
+		handleCreateRegistrationToken(ctx, db, w, r, logger)
 	})
 
 	mux.HandleFunc("/api/v1/executions", func(w http.ResponseWriter, r *http.Request) {
@@ -93,51 +127,11 @@ func main() {
 			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
 			return
 		}
-		var req struct {
-			Target  string `json:"target"`
-			Command string `json:"command"`
-			Reason  string `json:"reason"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
-			return
-		}
-
-		execID := newUUID()
-		_, err := db.ExecContext(ctx,
-			"INSERT INTO executions (id, organisation_id, actor_id, command, command_hash, status, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			execID, "org_demo", "user_senior", req.Command, hashCmd(req.Command), "queued", req.Reason,
-		)
-		if err != nil {
-			logger.Error("execution create error", "error", err)
-			writeJSON(w, 500, map[string]string{"error": "failed to create execution"})
-			return
-		}
-
-		writeAuditEvent(ctx, db, "org_demo", "user_senior", "execution.created", "server", req.Target, "queued", map[string]any{
-			"command": req.Command,
-			"reason":  req.Reason,
-			"target":  req.Target,
-		})
-
-		writeJSON(w, 201, map[string]any{"execution_id": execID, "status": "queued"})
+		handleCreateExecution(ctx, db, w, r, logger)
 	})
 
 	mux.HandleFunc("/api/v1/jobs/next", func(w http.ResponseWriter, r *http.Request) {
-		var execID, command string
-		err := db.QueryRowContext(ctx,
-			`UPDATE executions SET status = 'running', started_at = datetime('now')
-			WHERE id = (SELECT id FROM executions WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1)
-			RETURNING id, command`,
-		).Scan(&execID, &command)
-		if err != nil {
-			writeJSON(w, 404, map[string]string{"status": "no_jobs"})
-			return
-		}
-		writeJSON(w, 200, map[string]any{
-			"execution_id": execID,
-			"command":      command,
-		})
+		handleClaimJob(ctx, db, w, r)
 	})
 
 	mux.HandleFunc("/api/v1/jobs/result", func(w http.ResponseWriter, r *http.Request) {
@@ -145,82 +139,11 @@ func main() {
 			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
 			return
 		}
-		var req struct {
-			ExecutionID string `json:"execution_id"`
-			ExitCode    int    `json:"exit_code"`
-			Stdout      string `json:"stdout"`
-			Stderr      string `json:"stderr"`
-			Error       string `json:"error"`
-			DurationMs  int64  `json:"duration_ms"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, 400, map[string]string{"error": "invalid request body"})
-			return
-		}
-
-		status := "succeeded"
-		if req.ExitCode != 0 || req.Error != "" {
-			status = "failed"
-		}
-
-		_, err := db.ExecContext(ctx,
-			"UPDATE executions SET status = ?, finished_at = datetime('now') WHERE id = ?",
-			status, req.ExecutionID)
-		if err != nil {
-			writeJSON(w, 500, map[string]string{"error": "failed to update execution"})
-			return
-		}
-
-		writeAuditEvent(ctx, db, "org_demo", "user_senior", "execution.completed", "execution", req.ExecutionID, status, map[string]any{
-			"exit_code":   req.ExitCode,
-			"duration_ms": req.DurationMs,
-		})
-
-		writeJSON(w, 200, map[string]string{"status": "ok"})
+		handleSubmitResult(ctx, db, w, r, logger)
 	})
 
 	mux.HandleFunc("/api/v1/audit", func(w http.ResponseWriter, r *http.Request) {
-		actor := r.URL.Query().Get("actor")
-		limit := "20"
-		if l := r.URL.Query().Get("limit"); l != "" {
-			limit = l
-		}
-		query := "SELECT id, organisation_id, actor_id, action, target_type, target_id, result, metadata_json, created_at FROM audit_events WHERE 1=1"
-		var args []any
-		if actor != "" {
-			query += " AND actor_id = ?"
-			args = append(args, actor)
-		}
-		query += " ORDER BY created_at DESC LIMIT ?"
-		args = append(args, limit)
-
-		rows, err := db.QueryContext(ctx, query, args...)
-		if err != nil {
-			writeJSON(w, 500, map[string]string{"error": "query failed"})
-			return
-		}
-		defer rows.Close()
-
-		var events []map[string]any
-		for rows.Next() {
-			var id, orgID, actorID, action, targetType, targetID, result, metadataJSON string
-			var createdAt string
-			if err := rows.Scan(&id, &orgID, &actorID, &action, &targetType, &targetID, &result, &metadataJSON, &createdAt); err != nil {
-				continue
-			}
-			events = append(events, map[string]any{
-				"id":              id,
-				"organisation_id": orgID,
-				"actor_id":        actorID,
-				"action":          action,
-				"target_type":     targetType,
-				"target_id":       targetID,
-				"result":          result,
-				"metadata_json":   metadataJSON,
-				"created_at":      createdAt,
-			})
-		}
-		writeJSON(w, 200, map[string]any{"events": events})
+		handleSearchAudit(ctx, db, w, r)
 	})
 
 	addr := ":" + envOrDefault("API_PORT", "8080")
@@ -241,70 +164,496 @@ func main() {
 	srv.Shutdown(shutdownCtx)
 }
 
-func migrate(ctx context.Context, db *sql.DB) error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS organisations (
-		id TEXT PRIMARY KEY, name TEXT NOT NULL,
-		created_at TEXT NOT NULL DEFAULT (datetime('now'))
-	);
-	CREATE TABLE IF NOT EXISTS users (
-		id TEXT PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL,
-		status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL DEFAULT (datetime('now'))
-	);
-	CREATE TABLE IF NOT EXISTS memberships (
-		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
-		user_id TEXT NOT NULL REFERENCES users(id), role TEXT NOT NULL,
-		created_at TEXT NOT NULL DEFAULT (datetime('now'))
-	);
-	CREATE TABLE IF NOT EXISTS servers (
-		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
-		name TEXT NOT NULL, hostname TEXT NOT NULL,
-		environment TEXT NOT NULL DEFAULT 'staging',
-		tags TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'unknown',
-		last_seen_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
-	);
-	CREATE TABLE IF NOT EXISTS executions (
-		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
-		actor_id TEXT NOT NULL REFERENCES users(id),
-		command TEXT NOT NULL, command_hash TEXT NOT NULL,
-		status TEXT NOT NULL DEFAULT 'queued', reason TEXT,
-		dry_run INTEGER NOT NULL DEFAULT 0,
-		created_at TEXT NOT NULL DEFAULT (datetime('now')),
-		started_at TEXT, finished_at TEXT
-	);
-	CREATE TABLE IF NOT EXISTS execution_targets (
-		id TEXT PRIMARY KEY, execution_id TEXT NOT NULL REFERENCES executions(id),
-		server_id TEXT NOT NULL REFERENCES servers(id),
-		status TEXT NOT NULL DEFAULT 'pending', exit_code INTEGER,
-		stdout TEXT, stderr TEXT, error TEXT, duration_ms INTEGER,
-		started_at TEXT, finished_at TEXT
-	);
-	CREATE TABLE IF NOT EXISTS audit_events (
-		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
-		actor_id TEXT, action TEXT NOT NULL, target_type TEXT NOT NULL,
-		target_id TEXT, result TEXT NOT NULL,
-		metadata_json TEXT NOT NULL DEFAULT '{}',
-		created_at TEXT NOT NULL DEFAULT (datetime('now'))
-	);
-	CREATE INDEX IF NOT EXISTS idx_audit_events_org_time ON audit_events(organisation_id, created_at);
-	CREATE INDEX IF NOT EXISTS idx_audit_events_actor ON audit_events(actor_id);
-	CREATE INDEX IF NOT EXISTS idx_audit_events_action ON audit_events(action);
-	CREATE INDEX IF NOT EXISTS idx_executions_org_status ON executions(organisation_id, status);
-	CREATE INDEX IF NOT EXISTS idx_servers_org ON servers(organisation_id);
-	`
-	_, err := db.ExecContext(ctx, schema)
-	return err
+func handleListServers(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	env := r.URL.Query().Get("environment")
+	tagKey := r.URL.Query().Get("tag_key")
+	tagValue := r.URL.Query().Get("tag_value")
+
+	query := `SELECT s.id, s.name, s.hostname, COALESCE(s.public_ip,''), COALESCE(s.private_ip,''),
+		s.ssh_port, COALESCE(s.ssh_username,''), s.environment, COALESCE(s.provider,''),
+		COALESCE(s.os_name,''), COALESCE(s.os_version,''), COALESCE(s.kernel_version,''),
+		COALESCE(s.architecture,''), s.status, COALESCE(s.last_seen_at,''),
+		COALESCE(s.last_check_at,''), s.created_at
+		FROM servers s WHERE s.organisation_id = ?`
+	args := []any{"org_demo"}
+
+	if env != "" {
+		query += " AND s.environment = ?"
+		args = append(args, env)
+	}
+	if tagKey != "" && tagValue != "" {
+		query += ` AND s.id IN (SELECT server_id FROM server_tags WHERE organisation_id = ? AND key = ? AND value = ?)`
+		args = append(args, "org_demo", tagKey, tagValue)
+	} else if tagKey != "" {
+		query += ` AND s.id IN (SELECT server_id FROM server_tags WHERE organisation_id = ? AND key = ?)`
+		args = append(args, "org_demo", tagKey)
+	}
+
+	query += " ORDER BY s.name ASC"
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "query failed"})
+		return
+	}
+	defer rows.Close()
+
+	type server struct {
+		ID           string   `json:"id"`
+		Name         string   `json:"name"`
+		Hostname     string   `json:"hostname"`
+		PublicIP     string   `json:"public_ip"`
+		PrivateIP    string   `json:"private_ip"`
+		SSHPort      int      `json:"ssh_port"`
+		SSHUsername  string   `json:"ssh_username"`
+		Environment  string   `json:"environment"`
+		Provider     string   `json:"provider"`
+		OSName       string   `json:"os_name"`
+		OSVersion    string   `json:"os_version"`
+		Kernel       string   `json:"kernel_version"`
+		Arch         string   `json:"architecture"`
+		Status       string   `json:"status"`
+		LastSeenAt   string   `json:"last_seen_at"`
+		LastCheckAt  string   `json:"last_check_at"`
+		CreatedAt    string   `json:"created_at"`
+		Tags         []tag    `json:"tags"`
+	}
+
+	servers := []server{}
+	for rows.Next() {
+		var s server
+		if err := rows.Scan(&s.ID, &s.Name, &s.Hostname, &s.PublicIP, &s.PrivateIP,
+			&s.SSHPort, &s.SSHUsername, &s.Environment, &s.Provider,
+			&s.OSName, &s.OSVersion, &s.Kernel, &s.Arch,
+			&s.Status, &s.LastSeenAt, &s.LastCheckAt, &s.CreatedAt); err != nil {
+			continue
+		}
+		s.Tags = loadTags(ctx, db, "org_demo", s.ID)
+		servers = append(servers, s)
+	}
+	writeJSON(w, 200, map[string]any{"servers": servers})
 }
 
-func seed(ctx context.Context, db *sql.DB) error {
-	stmt := `
-	INSERT OR IGNORE INTO organisations (id, name) VALUES ('org_demo', 'Demo Org');
-	INSERT OR IGNORE INTO users (id, email, name) VALUES ('user_senior', 'senior@demo.local', 'Senior Engineer');
-	INSERT OR IGNORE INTO users (id, email, name) VALUES ('user_junior', 'junior@demo.local', 'Junior Engineer');
-	INSERT OR IGNORE INTO memberships (id, organisation_id, user_id, role) VALUES ('mem_senior', 'org_demo', 'user_senior', 'senior_engineer');
-	INSERT OR IGNORE INTO memberships (id, organisation_id, user_id, role) VALUES ('mem_junior', 'org_demo', 'user_junior', 'junior_engineer');
-	INSERT OR IGNORE INTO servers (id, organisation_id, name, hostname, environment, tags, status) VALUES ('srv_demo', 'org_demo', 'demo-server', 'localhost', 'development', '{"role":"app"}', 'unknown');
-	`
-	_, err := db.ExecContext(ctx, stmt)
-	return err
+func handleAddServer(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name        string `json:"name"`
+		Hostname    string `json:"hostname"`
+		PublicIP    string `json:"public_ip"`
+		PrivateIP   string `json:"private_ip"`
+		SSHPort     int    `json:"ssh_port"`
+		SSHUsername string `json:"ssh_username"`
+		Environment string `json:"environment"`
+		Provider    string `json:"provider"`
+		Tags        []struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		} `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if req.Name == "" {
+		writeJSON(w, 400, map[string]string{"error": "name is required"})
+		return
+	}
+	if req.SSHPort == 0 {
+		req.SSHPort = 22
+	}
+	if req.Environment == "" {
+		req.Environment = "development"
+	}
+
+	serverID := "srv_" + shortID()
+
+	pubIP := sqlNullString(req.PublicIP)
+	privIP := sqlNullString(req.PrivateIP)
+	sshUser := sqlNullString(req.SSHUsername)
+	host := sqlNullString(req.Hostname)
+	prov := sqlNullString(req.Provider)
+
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO servers (id, organisation_id, name, hostname, public_ip, private_ip, ssh_port, ssh_username, environment, provider)
+		VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		serverID, "org_demo", req.Name, host, pubIP, privIP, req.SSHPort, sshUser, req.Environment, prov)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "failed to create server: " + err.Error()})
+		return
+	}
+
+	for _, t := range req.Tags {
+		if t.Key != "" {
+			db.ExecContext(ctx,
+				"INSERT INTO server_tags (organisation_id, server_id, key, value) VALUES (?,?,?,?)",
+				"org_demo", serverID, t.Key, t.Value)
+		}
+	}
+
+	writeAuditEvent(ctx, db, "org_demo", "user_senior", "server.created", "server", serverID, "success", map[string]any{"name": req.Name, "environment": req.Environment})
+
+	writeJSON(w, 201, map[string]any{"server_id": serverID, "status": "created"})
+}
+
+func handleGetServer(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request, serverID string) {
+	s := struct {
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		Hostname    string `json:"hostname"`
+		PublicIP    string `json:"public_ip"`
+		PrivateIP   string `json:"private_ip"`
+		SSHPort     int    `json:"ssh_port"`
+		SSHUsername string `json:"ssh_username"`
+		Environment string `json:"environment"`
+		Provider    string `json:"provider"`
+		OSName      string `json:"os_name"`
+		OSVersion   string `json:"os_version"`
+		Kernel      string `json:"kernel_version"`
+		Arch        string `json:"architecture"`
+		Status      string `json:"status"`
+		LastSeenAt  string `json:"last_seen_at"`
+		LastCheckAt string `json:"last_check_at"`
+		CreatedAt   string `json:"created_at"`
+		Tags        []tag `json:"tags"`
+	}{
+		Tags: loadTags(ctx, db, "org_demo", serverID),
+	}
+
+	err := db.QueryRowContext(ctx,
+		`SELECT id, name, COALESCE(hostname,''), COALESCE(public_ip,''), COALESCE(private_ip,''),
+		ssh_port, COALESCE(ssh_username,''), environment, COALESCE(provider,''),
+		COALESCE(os_name,''), COALESCE(os_version,''), COALESCE(kernel_version,''),
+		COALESCE(architecture,''), status, COALESCE(last_seen_at,''),
+		COALESCE(last_check_at,''), created_at
+		FROM servers WHERE id = ? AND organisation_id = ?`, serverID, "org_demo",
+	).Scan(&s.ID, &s.Name, &s.Hostname, &s.PublicIP, &s.PrivateIP,
+		&s.SSHPort, &s.SSHUsername, &s.Environment, &s.Provider,
+		&s.OSName, &s.OSVersion, &s.Kernel, &s.Arch,
+		&s.Status, &s.LastSeenAt, &s.LastCheckAt, &s.CreatedAt)
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": "server not found"})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"server": s})
+}
+
+func handleCheckServer(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request, serverID string, logger *slog.Logger) {
+	var host, sshUser string
+	var sshPort int
+	err := db.QueryRowContext(ctx,
+		"SELECT COALESCE(hostname, public_ip, ''), ssh_port, COALESCE(ssh_username,'') FROM servers WHERE id = ? AND organisation_id = ?",
+		serverID, "org_demo").Scan(&host, &sshPort, &sshUser)
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": "server not found"})
+		return
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	_, err = db.ExecContext(ctx,
+		"UPDATE servers SET status = 'active', last_check_at = ?, last_seen_at = ? WHERE id = ?",
+		now, now, serverID)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "failed to update server"})
+		return
+	}
+
+	checkResult := map[string]any{
+		"server_id":  serverID,
+		"status":     "reachable",
+		"hostname":   host,
+		"ssh_port":   sshPort,
+		"checked_at": now,
+	}
+
+	// Simulate OS info if we don't have it yet
+	var osName, osVer, kernel, arch string
+	db.QueryRowContext(ctx,
+		"SELECT COALESCE(os_name,''), COALESCE(os_version,''), COALESCE(kernel_version,''), COALESCE(architecture,'') FROM servers WHERE id = ?",
+		serverID).Scan(&osName, &osVer, &kernel, &arch)
+
+	if osName == "" {
+		osName = "linux"
+		osVer = "unknown"
+		kernel = "unknown"
+		arch = "amd64"
+		db.ExecContext(ctx,
+			"UPDATE servers SET os_name=?, os_version=?, kernel_version=?, architecture=? WHERE id=?",
+			osName, osVer, kernel, arch, serverID)
+	}
+	checkResult["os_name"] = osName
+	checkResult["os_version"] = osVer
+	checkResult["kernel_version"] = kernel
+	checkResult["architecture"] = arch
+	checkResult["uptime"] = "0d 0h 0m (simulated)"
+
+	writeJSON(w, 200, map[string]any{"server": checkResult})
+}
+
+func handleListRunners(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, name, runner_type, status, COALESCE(version,''), COALESCE(hostname,''),
+		COALESCE(platform,''), COALESCE(ip_address,''), COALESCE(last_seen_at,''),
+		COALESCE(registered_at,''), COALESCE(revoked_at,''), created_at
+		FROM runners WHERE organisation_id = ? ORDER BY name ASC`, "org_demo")
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "query failed"})
+		return
+	}
+	defer rows.Close()
+
+	type runner struct {
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		RunnerType   string `json:"runner_type"`
+		Status       string `json:"status"`
+		Version      string `json:"version"`
+		Hostname     string `json:"hostname"`
+		Platform     string `json:"platform"`
+		IPAddress    string `json:"ip_address"`
+		LastSeenAt   string `json:"last_seen_at"`
+		RegisteredAt string `json:"registered_at"`
+		RevokedAt    string `json:"revoked_at"`
+		CreatedAt    string `json:"created_at"`
+	}
+
+	results := []runner{}
+	for rows.Next() {
+		var r runner
+		rows.Scan(&r.ID, &r.Name, &r.RunnerType, &r.Status, &r.Version,
+			&r.Hostname, &r.Platform, &r.IPAddress, &r.LastSeenAt,
+			&r.RegisteredAt, &r.RevokedAt, &r.CreatedAt)
+		results = append(results, r)
+	}
+	writeJSON(w, 200, map[string]any{"runners": results})
+}
+
+func handleRegisterRunner(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
+	var req struct {
+		Name       string `json:"name"`
+		Version    string `json:"version"`
+		Hostname   string `json:"hostname"`
+		Platform   string `json:"platform"`
+		IPAddress  string `json:"ip_address"`
+		RunnerType string `json:"runner_type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if req.Name == "" {
+		writeJSON(w, 400, map[string]string{"error": "name is required"})
+		return
+	}
+	if req.RunnerType == "" {
+		req.RunnerType = "customer_managed"
+	}
+
+	runnerID := "rnr_" + shortID()
+
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO runners (id, organisation_id, name, runner_type, status, version, hostname, platform, ip_address, registered_at)
+		VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))`,
+		runnerID, "org_demo", req.Name, req.RunnerType, "active",
+		sqlNullString(req.Version), sqlNullString(req.Hostname), sqlNullString(req.Platform),
+		sqlNullString(req.IPAddress))
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "failed to register runner: " + err.Error()})
+		return
+	}
+
+	db.ExecContext(ctx,
+		"INSERT INTO runner_scopes (id, organisation_id, runner_id, scope_type, scope_value) VALUES (?,?,?,?,?)",
+		"rsc_"+shortID(), "org_demo", runnerID, "all", "*")
+
+	writeAuditEvent(ctx, db, "org_demo", "user_senior", "runner.registered", "runner", runnerID, "success", map[string]any{"name": req.Name})
+
+	logger.Info("runner registered", "runner_id", runnerID, "name", req.Name)
+	writeJSON(w, 201, map[string]any{"runner_id": runnerID, "status": "active"})
+}
+
+func handleRunnerHeartbeat(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
+	var req struct {
+		RunnerID string `json:"runner_id"`
+		Hostname string `json:"hostname"`
+		Platform string `json:"platform"`
+		Version  string `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	_, err := db.ExecContext(ctx,
+		"UPDATE runners SET status = 'active', last_seen_at = datetime('now'), hostname = COALESCE(NULLIF(?,''), hostname), platform = COALESCE(NULLIF(?,''), platform), version = COALESCE(NULLIF(?,''), version) WHERE id = ? AND organisation_id = ?",
+		req.Hostname, req.Platform, req.Version, req.RunnerID, "org_demo")
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": "runner not found"})
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+func handleCreateRegistrationToken(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
+	token := shortID() + "-regtoken"
+	writeJSON(w, 201, map[string]string{
+		"registration_token": token,
+		"expires_in":         "3600",
+	})
+}
+
+func handleCreateExecution(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		Target  string `json:"target"`
+		Command string `json:"command"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	execID := "exe_" + shortID()
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, execution_type, status, command_preview, command_hash, reason)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		execID, "org_demo", "user_senior", "senior_engineer", "raw_command", "queued", req.Command, hashCmd(req.Command), req.Reason,
+	)
+	if err != nil {
+		logger.Error("execution create error", "error", err)
+		writeJSON(w, 500, map[string]string{"error": "failed to create execution"})
+		return
+	}
+
+	writeAuditEvent(ctx, db, "org_demo", "user_senior", "execution.created", "server", req.Target, "queued", map[string]any{
+		"command": req.Command, "reason": req.Reason, "target": req.Target,
+	})
+
+	writeJSON(w, 201, map[string]any{"execution_id": execID, "status": "queued"})
+}
+
+func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	var execID, command string
+	err := db.QueryRowContext(ctx,
+		`UPDATE executions SET status = 'running', started_at = datetime('now')
+		WHERE id = (SELECT id FROM executions WHERE status = 'queued' AND organisation_id = ? ORDER BY requested_at ASC LIMIT 1)
+		RETURNING id, command_preview`, "org_demo",
+	).Scan(&execID, &command)
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"status": "no_jobs"})
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"execution_id": execID,
+		"command":      command,
+	})
+}
+
+func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
+	var req struct {
+		ExecutionID string `json:"execution_id"`
+		ExitCode    int    `json:"exit_code"`
+		Stdout      string `json:"stdout"`
+		Stderr      string `json:"stderr"`
+		Error       string `json:"error"`
+		DurationMs  int64  `json:"duration_ms"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	status := "succeeded"
+	if req.ExitCode != 0 || req.Error != "" {
+		status = "failed"
+	}
+
+	_, err := db.ExecContext(ctx,
+		"UPDATE executions SET status = ?, finished_at = datetime('now') WHERE id = ?",
+		status, req.ExecutionID)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "failed to update execution"})
+		return
+	}
+
+	writeAuditEvent(ctx, db, "org_demo", "user_senior", "execution.completed", "execution", req.ExecutionID, status, map[string]any{
+		"exit_code": req.ExitCode, "duration_ms": req.DurationMs,
+	})
+
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+func handleSearchAudit(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	actor := r.URL.Query().Get("actor")
+	limit := "20"
+	if l := r.URL.Query().Get("limit"); l != "" {
+		limit = l
+	}
+	query := "SELECT id, organisation_id, actor_user_id, action, target_type, target_id, result, metadata, occurred_at FROM audit_events WHERE 1=1"
+	var args []any
+	if actor != "" {
+		query += " AND actor_user_id = ?"
+		args = append(args, actor)
+	}
+	query += " ORDER BY occurred_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "query failed"})
+		return
+	}
+	defer rows.Close()
+
+	var events []map[string]any
+	for rows.Next() {
+		var id, orgID, actorID, action, targetType, targetID, result, metadata, createdAt string
+		if err := rows.Scan(&id, &orgID, &actorID, &action, &targetType, &targetID, &result, &metadata, &createdAt); err != nil {
+			continue
+		}
+		events = append(events, map[string]any{
+			"id":              id,
+			"organisation_id": orgID,
+			"actor_id":        actorID,
+			"action":          action,
+			"target_type":     targetType,
+			"target_id":       targetID,
+			"result":          result,
+			"metadata":        metadata,
+			"created_at":      createdAt,
+		})
+	}
+	writeJSON(w, 200, map[string]any{"events": events})
+}
+
+func hasSuffix(s, suffix string) bool {
+	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+}
+
+func sqlNullString(v string) sql.NullString {
+	if v == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: v, Valid: true}
+}
+
+func loadTags(ctx context.Context, db *sql.DB, orgID, serverID string) []tag {
+	rows, err := db.QueryContext(ctx,
+		"SELECT key, value FROM server_tags WHERE organisation_id = ? AND server_id = ? ORDER BY key", orgID, serverID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var tags []tag
+	for rows.Next() {
+		var t tag
+		if err := rows.Scan(&t.Key, &t.Value); err != nil {
+			continue
+		}
+		tags = append(tags, t)
+	}
+	return tags
 }

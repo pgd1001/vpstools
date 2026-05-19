@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -26,6 +27,8 @@ func main() {
 		apiURL = "http://localhost:8080"
 	}
 
+	runnerName := envOrDefault("RUNNER_NAME", "default-runner")
+
 	targetHost := envOrDefault("SSH_TARGET_HOST", "localhost")
 	targetPort := envOrDefault("SSH_TARGET_PORT", "2222")
 	sshUser := envOrDefault("SSH_USER", "svrtools")
@@ -39,12 +42,16 @@ func main() {
 		logger.Info("runner started", "api_url", apiURL, "ssh_host", targetHost, "ssh_port", targetPort)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	httpClient := &http.Client{Timeout: 10 * time.Second}
 	var executor *sshx.Executor
 	if !simulate {
 		executor = sshx.NewExecutor(targetHost+":"+targetPort, sshUser, sshPassword)
 	}
 
+	hostname, _ := os.Hostname()
+	runnerID := registerRunner(ctx, httpClient, apiURL, runnerName, hostname, logger)
+
+	lastHeartbeat := time.Now()
 	pollInterval := 2 * time.Second
 
 	for {
@@ -55,7 +62,12 @@ func main() {
 		default:
 		}
 
-		job, err := claimJob(ctx, client, apiURL)
+		if time.Since(lastHeartbeat) > 30*time.Second && runnerID != "" {
+			sendHeartbeat(ctx, httpClient, apiURL, runnerID, hostname, logger)
+			lastHeartbeat = time.Now()
+		}
+
+		job, err := claimJob(ctx, httpClient, apiURL)
 		if err != nil {
 			time.Sleep(pollInterval)
 			continue
@@ -76,10 +88,67 @@ func main() {
 
 		logger.Info("job completed", "execution_id", job.ExecutionID, "exit_code", result.ExitCode, "duration_ms", result.DurationMs)
 
-		if err := submitResult(ctx, client, apiURL, job.ExecutionID, result); err != nil {
+		if err := submitResult(ctx, httpClient, apiURL, job.ExecutionID, result); err != nil {
 			logger.Error("failed to submit result", "execution_id", job.ExecutionID, "error", err)
 		}
 	}
+}
+
+func registerRunner(ctx context.Context, client *http.Client, apiURL, name, hostname string, logger *slog.Logger) string {
+	body := map[string]any{
+		"name":      name,
+		"hostname":  hostname,
+		"platform":  runtime.GOOS,
+		"version":   "0.2.0",
+		"ip_address": getOutboundIP(),
+		"runner_type": "customer_managed",
+	}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, apiURL+"/api/v1/runners", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		logger.Warn("runner registration failed, continuing unregistered", "error", err)
+		return ""
+	}
+	defer resp.Body.Close()
+	var regResp struct {
+		RunnerID string `json:"runner_id"`
+		Status   string `json:"status"`
+	}
+	json.NewDecoder(resp.Body).Decode(&regResp)
+	logger.Info("runner registered with API", "runner_id", regResp.RunnerID)
+	return regResp.RunnerID
+}
+
+func sendHeartbeat(ctx context.Context, client *http.Client, apiURL, runnerID, hostname string, logger *slog.Logger) {
+	body := map[string]string{
+		"runner_id": runnerID,
+		"hostname":  hostname,
+		"platform":  runtime.GOOS,
+		"version":   "0.2.0",
+	}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, apiURL+"/api/v1/runners/heartbeat", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		logger.Warn("heartbeat failed", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+	logger.Info("heartbeat sent", "runner_id", runnerID)
+}
+
+func getOutboundIP() string {
+	resp, err := http.Get("https://api.ipify.org")
+	if err != nil {
+		return "127.0.0.1"
+	}
+	defer resp.Body.Close()
+	var ip string
+	json.NewDecoder(resp.Body).Decode(&ip)
+	return ip
 }
 
 func simulateRun(command string) sshx.Result {
@@ -162,3 +231,4 @@ func envOrDefault(key, def string) string {
 	}
 	return def
 }
+

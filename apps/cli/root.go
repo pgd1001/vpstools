@@ -64,6 +64,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&apiURL, "api-url", "", "Control plane API URL (or set VPS_API_URL env)")
 	rootCmd.AddCommand(whoamiCmd)
 	rootCmd.AddCommand(serverCmd)
+	rootCmd.AddCommand(runnerCmd)
 	rootCmd.AddCommand(execCmd)
 	rootCmd.AddCommand(auditCmd)
 }
