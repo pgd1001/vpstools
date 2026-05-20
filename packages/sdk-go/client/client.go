@@ -222,6 +222,7 @@ type CreateExecutionRequest struct {
 type CreateExecutionResponse struct {
 	ExecutionID string `json:"execution_id"`
 	Status      string `json:"status"`
+	TargetCount int    `json:"target_count"`
 }
 
 func (c *Client) CreateExecution(target, command, reason string) (*CreateExecutionResponse, error) {
@@ -235,6 +236,94 @@ func (c *Client) CreateExecution(target, command, reason string) (*CreateExecuti
 		return nil, err
 	}
 	return &resp, nil
+}
+
+type ExecutionDetail struct {
+	ID              string `json:"id"`
+	ActorUserID     string `json:"actor_user_id"`
+	ActorRole       string `json:"actor_role_at_time"`
+	ExecutionType   string `json:"execution_type"`
+	Status          string `json:"status"`
+	RiskLevel       string `json:"risk_level"`
+	Environment     string `json:"environment"`
+	Reason          string `json:"reason"`
+	CommandPreview  string `json:"command_preview"`
+	CommandHash     string `json:"command_hash"`
+	TimeoutSeconds  int    `json:"timeout_seconds"`
+	RequestedAt     string `json:"requested_at"`
+	StartedAt       string `json:"started_at"`
+	FinishedAt      string `json:"finished_at"`
+	ErrorSummary    string `json:"error_summary"`
+}
+
+type ExecutionTarget struct {
+	ID         string `json:"id"`
+	ServerID   string `json:"server_id"`
+	RunnerID   string `json:"runner_id"`
+	Status     string `json:"status"`
+	ExitCode   int    `json:"exit_code"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	Error      string `json:"error_summary"`
+	StartedAt  string `json:"started_at"`
+	FinishedAt string `json:"finished_at"`
+}
+
+type GetExecutionResponse struct {
+	Execution ExecutionDetail   `json:"execution"`
+	Targets   []ExecutionTarget `json:"targets"`
+}
+
+func (c *Client) GetExecution(executionID string) (*GetExecutionResponse, error) {
+	var resp GetExecutionResponse
+	if err := c.get("/api/v1/executions/"+executionID, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+type ExecutionListItem struct {
+	ID              string `json:"id"`
+	ActorUserID     string `json:"actor_user_id"`
+	ActorRole       string `json:"actor_role_at_time"`
+	ExecutionType   string `json:"execution_type"`
+	Status          string `json:"status"`
+	CommandPreview  string `json:"command_preview"`
+	TargetCount     int    `json:"target_count"`
+	SucceededCount  int    `json:"succeeded_count"`
+	FailedCount     int    `json:"failed_count"`
+	RequestedAt     string `json:"requested_at"`
+	StartedAt       string `json:"started_at"`
+	FinishedAt      string `json:"finished_at"`
+}
+
+type ListExecutionsResponse struct {
+	Executions []ExecutionListItem `json:"executions"`
+}
+
+func (c *Client) ListExecutions(status, limit string) (*ListExecutionsResponse, error) {
+	path := "/api/v1/executions"
+	sep := "?"
+	if status != "" {
+		path += fmt.Sprintf("%sstatus=%s", sep, status)
+		sep = "&"
+	}
+	if limit != "" {
+		path += fmt.Sprintf("%slimit=%s", sep, limit)
+	}
+	var resp ListExecutionsResponse
+	if err := c.get(path, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) CancelExecution(executionID string) (map[string]string, error) {
+	var resp map[string]string
+	if err := c.post("/api/v1/executions/"+executionID+"/cancel", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 type AuditEvent struct {

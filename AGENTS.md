@@ -4,7 +4,7 @@
 
 **Phase 0 (Architecture Spike) is implemented.** The CLI→API→Runner→audit vertical slice works. No Docker or PostgreSQL required for local dev — the spike uses pure-Go SQLite and a simulate mode for the runner.
 
-**Phase 2 (Inventory and Runner) is implemented.** Full server schema (matching data model spec), server add/list/inspect/check, server_tags table, runner registration/heartbeat/registration-token, environment/tag filtering.
+**Phase 3 (Execution Engine) is implemented.** Target resolution (server:id, tag:key=value), execution_targets per target, GET execution status, list executions, cancel execution, execution audit events (requested/started/completed/cancelled), exec --wait polling.
 
 **Go module:** `github.com/pgd1001/svrtools` (Go 1.26.3)  
 **Build output:** `bin/vps.exe`, `bin/api.exe`, `bin/runner.exe`
@@ -133,7 +133,7 @@ Phases are intended to be sequential vertical slices (each phase builds a workin
 1. **Phase 0 — Architecture Spike:** ~~Prove CLI→API→Runner→SSH→audit path~~ **DONE**
 2. **Phase 1 — Foundations:** ~~Monorepo, CI, migrations, code generation~~ **DONE**
 3. **Phase 2 — Inventory and Runner:** ~~Server registration, runner heartbeat, health checks~~ **DONE**
-4. **Phase 3 — Execution Engine:** Single/group execution, output capture, timeouts
+4. **Phase 3 — Execution Engine:** ~~Single/group execution, output capture, timeouts~~ **DONE**
 5. **Phase 4 — RBAC and Policy:** Role enforcement, policy evaluation, deny-by-default
 6. **Phase 5 — Runbooks and Approvals:** Delegated runbook creation and approval workflow
 7. **Phase 6 — TUI and Web Console:** Interactive operator UX

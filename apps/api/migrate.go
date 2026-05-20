@@ -130,7 +130,7 @@ func seed(ctx context.Context, db *sql.DB) error {
 	INSERT OR IGNORE INTO memberships (id, organisation_id, user_id, role) VALUES ('mem_senior', 'org_demo', 'user_senior', 'senior_engineer');
 	INSERT OR IGNORE INTO memberships (id, organisation_id, user_id, role) VALUES ('mem_junior', 'org_demo', 'user_junior', 'junior_engineer');
 	INSERT OR IGNORE INTO memberships (id, organisation_id, user_id, role) VALUES ('mem_auditor', 'org_demo', 'user_auditor', 'auditor');
-	INSERT OR IGNORE INTO servers (id, organisation_id, name, hostname, environment, status) VALUES ('srv_demo', 'org_demo', 'demo-server', 'localhost', 'development', 'active');
+	INSERT OR IGNORE INTO servers (id, organisation_id, name, hostname, environment, status) VALUES ('srv_demo', 'org_demo', 'demo', 'localhost', 'development', 'active');
 	INSERT OR IGNORE INTO server_tags (organisation_id, server_id, key, value) VALUES ('org_demo', 'srv_demo', 'role', 'app');
 	INSERT OR IGNORE INTO server_tags (organisation_id, server_id, key, value) VALUES ('org_demo', 'srv_demo', 'env', 'development');
 	INSERT OR IGNORE INTO runners (id, organisation_id, name, runner_type, status, last_seen_at, registered_at) VALUES ('rnr_local', 'org_demo', 'local-runner', 'customer_managed', 'active', datetime('now'), datetime('now'));

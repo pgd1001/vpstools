@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -123,11 +124,36 @@ func main() {
 	})
 
 	mux.HandleFunc("/api/v1/executions", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
+		switch r.Method {
+		case http.MethodGet:
+			handleListExecutions(ctx, db, w, r)
+		case http.MethodPost:
+			handleCreateExecution(ctx, db, w, r, logger)
+		default:
 			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		}
+	})
+
+	mux.HandleFunc("/api/v1/executions/", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path[len("/api/v1/executions/"):]
+		if path == "" {
+			writeJSON(w, 400, map[string]string{"error": "missing execution id"})
 			return
 		}
-		handleCreateExecution(ctx, db, w, r, logger)
+		if hasSuffix(path, "/cancel") {
+			execID := path[:len(path)-len("/cancel")]
+			if r.Method == http.MethodPost {
+				handleCancelExecution(ctx, db, w, r, execID, logger)
+			} else {
+				writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+			}
+			return
+		}
+		if r.Method == http.MethodGet {
+			handleGetExecution(ctx, db, w, r, path)
+			return
+		}
+		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
 	})
 
 	mux.HandleFunc("/api/v1/jobs/next", func(w http.ResponseWriter, r *http.Request) {
@@ -501,11 +527,129 @@ func handleCreateRegistrationToken(ctx context.Context, db *sql.DB, w http.Respo
 	})
 }
 
-func handleCreateExecution(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+func handleListExecutions(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	limit := "20"
+	if l := r.URL.Query().Get("limit"); l != "" {
+		limit = l
+	}
+
+	query := `SELECT e.id, e.actor_user_id, e.actor_role_at_time, e.execution_type, e.status,
+		e.risk_level, e.environment, e.reason, e.command_preview, e.command_hash,
+		e.timeout_seconds, e.requested_at, e.started_at, e.finished_at
+		FROM executions e WHERE e.organisation_id = ?`
+	args := []any{"org_demo"}
+	if status != "" {
+		query += " AND e.status = ?"
+		args = append(args, status)
+	}
+	query += " ORDER BY e.requested_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "query failed"})
 		return
 	}
+	defer rows.Close()
+
+	type execution struct {
+		ID              string `json:"id"`
+		ActorUserID     string `json:"actor_user_id"`
+		ActorRole       string `json:"actor_role_at_time"`
+		ExecutionType   string `json:"execution_type"`
+		Status          string `json:"status"`
+		RiskLevel       string `json:"risk_level"`
+		Environment     string `json:"environment"`
+		Reason          string `json:"reason"`
+		CommandPreview  string `json:"command_preview"`
+		CommandHash     string `json:"command_hash"`
+		TimeoutSeconds  int    `json:"timeout_seconds"`
+		RequestedAt     string `json:"requested_at"`
+		StartedAt       string `json:"started_at"`
+		FinishedAt      string `json:"finished_at"`
+		TargetCount     int    `json:"target_count"`
+		SucceededCount  int    `json:"succeeded_count"`
+		FailedCount     int    `json:"failed_count"`
+	}
+	var results []execution
+	for rows.Next() {
+		var e execution
+		rows.Scan(&e.ID, &e.ActorUserID, &e.ActorRole, &e.ExecutionType, &e.Status,
+			&e.RiskLevel, &e.Environment, &e.Reason, &e.CommandPreview, &e.CommandHash,
+			&e.TimeoutSeconds, &e.RequestedAt, &e.StartedAt, &e.FinishedAt)
+		db.QueryRowContext(ctx,
+			"SELECT COUNT(*), SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END), SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) FROM execution_targets WHERE execution_id = ?",
+			e.ID).Scan(&e.TargetCount, &e.SucceededCount, &e.FailedCount)
+		results = append(results, e)
+	}
+	writeJSON(w, 200, map[string]any{"executions": results})
+}
+
+func handleGetExecution(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request, execID string) {
+	var e struct {
+		ID              string `json:"id"`
+		ActorUserID     string `json:"actor_user_id"`
+		ActorRole       string `json:"actor_role_at_time"`
+		ExecutionType   string `json:"execution_type"`
+		Status          string `json:"status"`
+		RiskLevel       string `json:"risk_level"`
+		Environment     string `json:"environment"`
+		Reason          string `json:"reason"`
+		CommandPreview  string `json:"command_preview"`
+		CommandHash     string `json:"command_hash"`
+		TimeoutSeconds  int    `json:"timeout_seconds"`
+		RequestedAt     string `json:"requested_at"`
+		StartedAt       string `json:"started_at"`
+		FinishedAt      string `json:"finished_at"`
+		ErrorSummary    string `json:"error_summary"`
+	}
+	err := db.QueryRowContext(ctx,
+		`SELECT id, actor_user_id, actor_role_at_time, execution_type, status,
+		risk_level, environment, reason, command_preview, command_hash,
+		timeout_seconds, COALESCE(requested_at,''), COALESCE(started_at,''), COALESCE(finished_at,''), COALESCE(error_summary,'')
+		FROM executions WHERE id = ? AND organisation_id = ?`, execID, "org_demo",
+	).Scan(&e.ID, &e.ActorUserID, &e.ActorRole, &e.ExecutionType, &e.Status,
+		&e.RiskLevel, &e.Environment, &e.Reason, &e.CommandPreview, &e.CommandHash,
+		&e.TimeoutSeconds, &e.RequestedAt, &e.StartedAt, &e.FinishedAt, &e.ErrorSummary)
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": "execution not found"})
+		return
+	}
+
+	type targetResult struct {
+		ID         string `json:"id"`
+		ServerID   string `json:"server_id"`
+		RunnerID   string `json:"runner_id"`
+		Status     string `json:"status"`
+		ExitCode   int    `json:"exit_code"`
+		Stdout     string `json:"stdout"`
+		Stderr     string `json:"stderr"`
+		Error      string `json:"error_summary"`
+		StartedAt  string `json:"started_at"`
+		FinishedAt string `json:"finished_at"`
+	}
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, server_id, COALESCE(runner_id,''), status, COALESCE(exit_code,0),
+		'', '', COALESCE(error_summary,''),
+		COALESCE(started_at,''), COALESCE(finished_at,'')
+		FROM execution_targets WHERE execution_id = ? ORDER BY server_id`, execID)
+	var targets []targetResult
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var t targetResult
+			rows.Scan(&t.ID, &t.ServerID, &t.RunnerID, &t.Status,
+				&t.ExitCode, &t.Stdout, &t.Stderr, &t.Error,
+				&t.StartedAt, &t.FinishedAt)
+			targets = append(targets, t)
+		}
+	}
+
+	writeJSON(w, 200, map[string]any{"execution": e, "targets": targets})
+}
+
+func handleCreateExecution(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
 	var req struct {
 		Target  string `json:"target"`
 		Command string `json:"command"`
@@ -515,12 +659,24 @@ func handleCreateExecution(ctx context.Context, db *sql.DB, w http.ResponseWrite
 		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 		return
 	}
+	if req.Target == "" || req.Command == "" {
+		writeJSON(w, 400, map[string]string{"error": "target and command are required"})
+		return
+	}
+
+	targets := resolveTargets(ctx, db, req.Target)
+	if len(targets) == 0 {
+		writeJSON(w, 400, map[string]string{"error": "no servers found for target: " + req.Target})
+		return
+	}
 
 	execID := "exe_" + shortID()
+	env := detectEnvironment(ctx, db, targets)
+
 	_, err := db.ExecContext(ctx,
-		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, execution_type, status, command_preview, command_hash, reason)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		execID, "org_demo", "user_senior", "senior_engineer", "raw_command", "queued", req.Command, hashCmd(req.Command), req.Reason,
+		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, execution_type, status, environment, command_preview, command_hash, reason, timeout_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		execID, "org_demo", "user_senior", "senior_engineer", "raw_command", "queued", env, req.Command, hashCmd(req.Command), req.Reason, 300,
 	)
 	if err != nil {
 		logger.Error("execution create error", "error", err)
@@ -528,11 +684,93 @@ func handleCreateExecution(ctx context.Context, db *sql.DB, w http.ResponseWrite
 		return
 	}
 
-	writeAuditEvent(ctx, db, "org_demo", "user_senior", "execution.created", "server", req.Target, "queued", map[string]any{
-		"command": req.Command, "reason": req.Reason, "target": req.Target,
+	for _, srvID := range targets {
+		db.ExecContext(ctx,
+			`INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot)
+			VALUES (?, ?, ?, ?, 'pending', '{}')`,
+			"ext_"+shortID(), "org_demo", execID, srvID)
+	}
+
+	writeAuditEvent(ctx, db, "org_demo", "user_senior", "execution.requested", "execution", execID, "queued", map[string]any{
+		"command":      req.Command,
+		"reason":       req.Reason,
+		"target":       req.Target,
+		"target_count": len(targets),
 	})
 
-	writeJSON(w, 201, map[string]any{"execution_id": execID, "status": "queued"})
+	logger.Info("execution created", "execution_id", execID, "targets", len(targets))
+	writeJSON(w, 201, map[string]any{
+		"execution_id": execID,
+		"status":       "queued",
+		"target_count": len(targets),
+	})
+}
+
+func resolveTargets(ctx context.Context, db *sql.DB, target string) []string {
+	if strings.HasPrefix(target, "server:") {
+		serverID := target[len("server:"):]
+		var exists string
+		err := db.QueryRowContext(ctx, "SELECT id FROM servers WHERE (id = ? OR name = ?) AND organisation_id = ? AND status != 'archived'",
+			serverID, serverID, "org_demo").Scan(&exists)
+		if err != nil {
+			return nil
+		}
+		return []string{exists}
+	}
+	if strings.HasPrefix(target, "tag:") {
+		parts := strings.SplitN(target[len("tag:"):], "=", 2)
+		if len(parts) != 2 {
+			return nil
+		}
+		rows, err := db.QueryContext(ctx,
+			"SELECT server_id FROM server_tags WHERE organisation_id = ? AND key = ? AND value = ?", "org_demo", parts[0], parts[1])
+		if err != nil {
+			return nil
+		}
+		defer rows.Close()
+		var ids []string
+		for rows.Next() {
+			var id string
+			rows.Scan(&id)
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	// Default: try as direct server name
+	var exists string
+	err := db.QueryRowContext(ctx, "SELECT id FROM servers WHERE name = ? AND organisation_id = ? AND status != 'archived'",
+		target, "org_demo").Scan(&exists)
+	if err != nil {
+		return nil
+	}
+	return []string{exists}
+}
+
+func detectEnvironment(ctx context.Context, db *sql.DB, serverIDs []string) string {
+	if len(serverIDs) == 0 {
+		return ""
+	}
+	var env string
+	db.QueryRowContext(ctx, "SELECT environment FROM servers WHERE id = ? AND organisation_id = ?", serverIDs[0], "org_demo").Scan(&env)
+	return env
+}
+
+func handleCancelExecution(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request, execID string, logger *slog.Logger) {
+	result, err := db.ExecContext(ctx,
+		"UPDATE executions SET status = 'cancelled', finished_at = datetime('now') WHERE id = ? AND organisation_id = ? AND status IN ('created','queued')",
+		execID, "org_demo")
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "failed to cancel"})
+		return
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		writeJSON(w, 400, map[string]string{"error": "execution not cancellable"})
+		return
+	}
+	db.ExecContext(ctx, "UPDATE execution_targets SET status = 'cancelled' WHERE execution_id = ?", execID)
+	writeAuditEvent(ctx, db, "org_demo", "user_senior", "execution.cancelled", "execution", execID, "cancelled", nil)
+	writeJSON(w, 200, map[string]string{"status": "cancelled"})
 }
 
 func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
@@ -546,6 +784,10 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		writeJSON(w, 404, map[string]string{"status": "no_jobs"})
 		return
 	}
+
+	db.ExecContext(ctx,
+		"UPDATE execution_targets SET status = 'running', started_at = datetime('now') WHERE execution_id = ? AND status = 'pending'", execID)
+
 	writeJSON(w, 200, map[string]any{
 		"execution_id": execID,
 		"command":      command,
@@ -572,12 +814,15 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 	}
 
 	_, err := db.ExecContext(ctx,
-		"UPDATE executions SET status = ?, finished_at = datetime('now') WHERE id = ?",
-		status, req.ExecutionID)
+		"UPDATE executions SET status = ?, finished_at = datetime('now'), error_summary = ? WHERE id = ?",
+		status, sqlNullString(req.Error), req.ExecutionID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to update execution"})
 		return
 	}
+
+	db.ExecContext(ctx, "UPDATE execution_targets SET status = ?, exit_code = ?, error_summary = ?, finished_at = datetime('now') WHERE execution_id = ? AND status = 'running'",
+		status, req.ExitCode, sqlNullString(req.Error), req.ExecutionID)
 
 	writeAuditEvent(ctx, db, "org_demo", "user_senior", "execution.completed", "execution", req.ExecutionID, status, map[string]any{
 		"exit_code": req.ExitCode, "duration_ms": req.DurationMs,
