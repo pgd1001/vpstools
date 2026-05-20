@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pgd1001/svrtools/packages/sdk-go/client"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -14,6 +15,19 @@ var (
 	apiURL    string
 	cfgFile   string
 )
+
+var tuiCmd = &cobra.Command{
+	Use:   "tui",
+	Short: "Launch the interactive terminal UI",
+	Run: func(cmd *cobra.Command, args []string) {
+		m := newTUIModel(apiClient)
+		p := tea.NewProgram(m, tea.WithAltScreen())
+		if _, err := p.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "tui error: %v\n", err)
+			os.Exit(1)
+		}
+	},
+}
 
 var rootCmd = &cobra.Command{
 	Use:   "vps",
@@ -75,4 +89,5 @@ func init() {
 	rootCmd.AddCommand(runbookCmd)
 	rootCmd.AddCommand(approvalCmd)
 	rootCmd.AddCommand(auditCmd)
+	rootCmd.AddCommand(tuiCmd)
 }
