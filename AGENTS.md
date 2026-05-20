@@ -4,7 +4,7 @@
 
 **Phase 0 (Architecture Spike) is implemented.** The CLI→API→Runner→audit vertical slice works. No Docker or PostgreSQL required for local dev — the spike uses pure-Go SQLite and a simulate mode for the runner.
 
-**Phase 3 (Execution Engine) is implemented.** Target resolution (server:id, tag:key=value), execution_targets per target, GET execution status, list executions, cancel execution, execution audit events (requested/started/completed/cancelled), exec --wait polling.
+**Phase 4 (RBAC and Policy) is implemented.** Dev auth model (X-VPS-User header), role-based access (owner/admin/senior/junior/auditor), policy evaluator (role+environment+risk), production reason requirement, command risk classification, denial audit events, clear CLI denial UX.
 
 **Go module:** `github.com/pgd1001/svrtools` (Go 1.26.3)  
 **Build output:** `bin/vps.exe`, `bin/api.exe`, `bin/runner.exe`
@@ -134,7 +134,7 @@ Phases are intended to be sequential vertical slices (each phase builds a workin
 2. **Phase 1 — Foundations:** ~~Monorepo, CI, migrations, code generation~~ **DONE**
 3. **Phase 2 — Inventory and Runner:** ~~Server registration, runner heartbeat, health checks~~ **DONE**
 4. **Phase 3 — Execution Engine:** ~~Single/group execution, output capture, timeouts~~ **DONE**
-5. **Phase 4 — RBAC and Policy:** Role enforcement, policy evaluation, deny-by-default
+5. **Phase 4 — RBAC and Policy:** ~~Role enforcement, policy evaluation, deny-by-default~~ **DONE**
 6. **Phase 5 — Runbooks and Approvals:** Delegated runbook creation and approval workflow
 7. **Phase 6 — TUI and Web Console:** Interactive operator UX
 8. **Phase 7 — Hardening and Beta:** Security review, redaction, docs, packaging

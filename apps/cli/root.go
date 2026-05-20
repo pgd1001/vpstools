@@ -47,6 +47,12 @@ var rootCmd = &cobra.Command{
 		}
 
 		apiClient = client.New(apiURL)
+		if user := os.Getenv("VPS_USER"); user != "" {
+			apiClient.SetUser(user)
+		}
+		if user := viper.GetString("user"); user != "" {
+			apiClient.SetUser(user)
+		}
 		return nil
 	},
 }

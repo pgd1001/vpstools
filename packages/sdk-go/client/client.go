@@ -10,14 +10,20 @@ import (
 
 type Client struct {
 	baseURL string
+	userID  string
 	http    *http.Client
 }
 
 func New(baseURL string) *Client {
 	return &Client{
 		baseURL: baseURL,
+		userID:  "user_senior",
 		http:    &http.Client{Timeout: 30 * time.Second},
 	}
+}
+
+func (c *Client) SetUser(userID string) {
+	c.userID = userID
 }
 
 type WhoAmIResponse struct {
@@ -351,29 +357,50 @@ func (c *Client) ListAudit(limit string) (*ListAuditResponse, error) {
 }
 
 func (c *Client) get(path string, out any) error {
-	resp, err := c.http.Get(c.baseURL + path)
+	req, _ := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+	req.Header.Set("X-VPS-User", c.userID)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		return c.parseError(resp)
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 func (c *Client) post(path string, body, out any) error {
 	b, _ := json.Marshal(body)
-	resp, err := c.http.Post(c.baseURL+path, "application/json", bytes.NewReader(b))
+	req, _ := http.NewRequest(http.MethodPost, c.baseURL+path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-VPS-User", c.userID)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		return c.parseError(resp)
 	}
 	if out == nil {
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *Client) parseError(resp *http.Response) error {
+	var apiErr struct {
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
+		Next   string `json:"next"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err == nil && apiErr.Error != "" {
+		msg := apiErr.Error
+		if apiErr.Next != "" {
+			msg += "\n" + apiErr.Next
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	return fmt.Errorf("unexpected status: %d", resp.StatusCode)
 }
