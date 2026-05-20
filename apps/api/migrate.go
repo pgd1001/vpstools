@@ -101,6 +101,44 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		command_hash TEXT, command_preview TEXT,
 		metadata TEXT NOT NULL DEFAULT '{}'
 	);
+	CREATE TABLE IF NOT EXISTS runbooks (
+		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
+		name TEXT NOT NULL, title TEXT NOT NULL, description TEXT,
+		status TEXT NOT NULL DEFAULT 'draft', current_version_id TEXT,
+		created_by_user_id TEXT NOT NULL REFERENCES users(id),
+		created_at TEXT NOT NULL DEFAULT (datetime('now')),
+		updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+		UNIQUE(organisation_id, name)
+	);
+	CREATE TABLE IF NOT EXISTS runbook_versions (
+		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
+		runbook_id TEXT NOT NULL REFERENCES runbooks(id) ON DELETE CASCADE,
+		version INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'draft',
+		risk_level TEXT NOT NULL DEFAULT 'medium',
+		definition_yaml TEXT NOT NULL, definition_json TEXT NOT NULL,
+		parameter_schema TEXT NOT NULL DEFAULT '{}',
+		target_constraints TEXT NOT NULL DEFAULT '{}',
+		approval_rules TEXT NOT NULL DEFAULT '{}',
+		command_preview TEXT, command_hash TEXT,
+		created_by_user_id TEXT NOT NULL REFERENCES users(id),
+		published_by_user_id TEXT REFERENCES users(id),
+		published_at TEXT,
+		created_at TEXT NOT NULL DEFAULT (datetime('now')),
+		UNIQUE(runbook_id, version)
+	);
+	CREATE TABLE IF NOT EXISTS approval_requests (
+		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
+		requester_user_id TEXT NOT NULL REFERENCES users(id),
+		approver_user_id TEXT REFERENCES users(id),
+		action_type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+		risk_level TEXT NOT NULL DEFAULT 'medium', reason TEXT NOT NULL,
+		target_type TEXT NOT NULL, target_id TEXT,
+		target_snapshot TEXT NOT NULL DEFAULT '{}',
+		request_payload TEXT NOT NULL DEFAULT '{}',
+		expires_at TEXT NOT NULL,
+		decided_at TEXT, decision_note TEXT,
+		created_at TEXT NOT NULL DEFAULT (datetime('now'))
+	);
 	CREATE INDEX IF NOT EXISTS idx_servers_org_status ON servers(organisation_id, status);
 	CREATE INDEX IF NOT EXISTS idx_servers_org_env ON servers(organisation_id, environment);
 	CREATE INDEX IF NOT EXISTS idx_server_tags_org_kv ON server_tags(organisation_id, key, value);
@@ -116,6 +154,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_audit_events_actor ON audit_events(organisation_id, actor_user_id, occurred_at);
 	CREATE INDEX IF NOT EXISTS idx_audit_events_action ON audit_events(organisation_id, action, occurred_at);
 	CREATE INDEX IF NOT EXISTS idx_audit_events_target ON audit_events(organisation_id, target_type, target_id, occurred_at);
+	CREATE INDEX IF NOT EXISTS idx_runbooks_org_status ON runbooks(organisation_id, status);
+	CREATE INDEX IF NOT EXISTS idx_runbook_versions_runbook ON runbook_versions(runbook_id, version);
+	CREATE INDEX IF NOT EXISTS idx_approvals_org_status ON approval_requests(organisation_id, status);
+	CREATE INDEX IF NOT EXISTS idx_approvals_requester ON approval_requests(requester_user_id, created_at);
 	`
 	_, err := db.ExecContext(ctx, schema)
 	return err
@@ -135,6 +177,8 @@ func seed(ctx context.Context, db *sql.DB) error {
 	INSERT OR IGNORE INTO server_tags (organisation_id, server_id, key, value) VALUES ('org_demo', 'srv_demo', 'env', 'development');
 	INSERT OR IGNORE INTO runners (id, organisation_id, name, runner_type, status, last_seen_at, registered_at) VALUES ('rnr_local', 'org_demo', 'local-runner', 'customer_managed', 'active', datetime('now'), datetime('now'));
 	INSERT OR IGNORE INTO runner_scopes (id, organisation_id, runner_id, scope_type, scope_value) VALUES ('rsc_local', 'org_demo', 'rnr_local', 'all', '*');
+	INSERT OR IGNORE INTO runbooks (id, organisation_id, name, title, description, status, current_version_id, created_by_user_id) VALUES ('rbk_demo', 'org_demo', 'check-uptime', 'Check Uptime', 'Check server uptime and load', 'published', 'rbv_demo_v1', 'user_senior');
+	INSERT OR IGNORE INTO runbook_versions (id, organisation_id, runbook_id, version, status, risk_level, definition_yaml, definition_json, command_preview, command_hash, target_constraints, created_by_user_id, published_by_user_id, published_at) VALUES ('rbv_demo_v1', 'org_demo', 'rbk_demo', 1, 'published', 'low', '{}', '{"apiVersion":"vps-tools.io/v1","kind":"Runbook","spec":{"execution":{"command":"uptime"}}}', 'uptime', '', '{"allowedEnvironments":["development","staging"]}', 'user_senior', 'user_senior', datetime('now'));
 	`
 	_, err := db.ExecContext(ctx, stmt)
 	return err

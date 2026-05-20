@@ -404,3 +404,143 @@ func (c *Client) parseError(resp *http.Response) error {
 	}
 	return fmt.Errorf("unexpected status: %d", resp.StatusCode)
 }
+
+type RunbookItem struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	Risk        string `json:"risk_level"`
+	Command     string `json:"command_preview"`
+	CreatedAt   string `json:"created_at"`
+	Permitted   bool   `json:"permitted"`
+}
+
+type ListRunbooksResponse struct {
+	Runbooks []RunbookItem `json:"runbooks"`
+}
+
+func (c *Client) ListRunbooks() (*ListRunbooksResponse, error) {
+	var resp ListRunbooksResponse
+	if err := c.get("/api/v1/runbooks", &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+type RunbookDetail struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	Version     int    `json:"version"`
+	Risk        string `json:"risk_level"`
+	Command     string `json:"command"`
+	Definition  string `json:"definition_json"`
+	CreatedAt   string `json:"created_at"`
+}
+
+type GetRunbookResponse struct {
+	Runbook RunbookDetail `json:"runbook"`
+}
+
+func (c *Client) GetRunbook(name string) (*GetRunbookResponse, error) {
+	var resp GetRunbookResponse
+	if err := c.get("/api/v1/runbooks/"+name, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+type CreateRunbookRequest struct {
+	Name        string `json:"name"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Risk        string `json:"risk"`
+	Command     string `json:"command"`
+	Timeout     int    `json:"timeout"`
+	Environment string `json:"environment"`
+	YAML        string `json:"yaml"`
+}
+
+type CreateRunbookResponse struct {
+	RunbookID string `json:"runbook_id"`
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+}
+
+func (c *Client) CreateRunbook(req CreateRunbookRequest) (*CreateRunbookResponse, error) {
+	var resp CreateRunbookResponse
+	if err := c.post("/api/v1/runbooks", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) PublishRunbook(name string) (map[string]string, error) {
+	var resp map[string]string
+	if err := c.post("/api/v1/runbooks/"+name+"/publish", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (c *Client) RunRunbook(name, target, reason string, params map[string]string) (map[string]any, error) {
+	body := map[string]any{
+		"target": target,
+		"reason": reason,
+		"params": params,
+	}
+	var resp map[string]any
+	if err := c.post("/api/v1/runbooks/"+name+"/run", body, &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+type ApprovalItem struct {
+	ID            string `json:"id"`
+	RequesterName string `json:"requester_name"`
+	ActionType    string `json:"action_type"`
+	Status        string `json:"status"`
+	RiskLevel     string `json:"risk_level"`
+	Reason        string `json:"reason"`
+	TargetType    string `json:"target_type"`
+	TargetID      string `json:"target_id"`
+	ExpiresAt     string `json:"expires_at"`
+	CreatedAt     string `json:"created_at"`
+}
+
+type ListApprovalsResponse struct {
+	Approvals []ApprovalItem `json:"approvals"`
+}
+
+func (c *Client) ListApprovals(status string) (*ListApprovalsResponse, error) {
+	path := "/api/v1/approvals"
+	if status != "" {
+		path += "?status=" + status
+	}
+	var resp ListApprovalsResponse
+	if err := c.get(path, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) ApproveApproval(approvalID string) (map[string]string, error) {
+	var resp map[string]string
+	if err := c.post("/api/v1/approvals/"+approvalID+"/approve", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (c *Client) DenyApproval(approvalID string) (map[string]string, error) {
+	var resp map[string]string
+	if err := c.post("/api/v1/approvals/"+approvalID+"/deny", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}

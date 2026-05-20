@@ -72,5 +72,7 @@ func init() {
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(runnerCmd)
 	rootCmd.AddCommand(execCmd)
+	rootCmd.AddCommand(runbookCmd)
+	rootCmd.AddCommand(approvalCmd)
 	rootCmd.AddCommand(auditCmd)
 }

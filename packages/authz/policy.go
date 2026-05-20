@@ -81,6 +81,31 @@ func (p *Policy) CheckRunnerManagement(actor *Actor) Decision {
 	return Allow()
 }
 
+// CheckRunbookExecution evaluates whether an actor can execute a runbook.
+func (p *Policy) CheckRunbookExecution(actor *Actor, environment Env, risk RiskLevel, reason string, rbDef map[string]any) Decision {
+	if actor.IsAuditor() {
+		return Deny("auditor_cannot_execute", "Auditors cannot execute operations.")
+	}
+
+	if risk == RiskCritical && !actor.HasRole(RoleOwner, RoleAdmin) {
+		return Deny("critical_requires_admin", "Critical-risk runbooks require Owner or Admin role.")
+	}
+
+	if risk == RiskHigh && !actor.IsSenior() {
+		return Deny("high_risk_requires_senior", "High-risk runbooks require senior engineer or above.")
+	}
+
+	if environment == EnvProduction && reason == "" {
+		return Deny("production_requires_reason", "Production environment actions require a reason.")
+	}
+
+	if environment == EnvProduction && !actor.IsSenior() {
+		return Deny("junior_production_denied", "Junior engineers cannot target production environments directly.")
+	}
+
+	return Allow()
+}
+
 func (p *Policy) DenyMessage(decision Decision) string {
 	if decision.Message != "" {
 		return decision.Message

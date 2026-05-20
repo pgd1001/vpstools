@@ -167,6 +167,80 @@ func main() {
 		handleSearchAudit(w, r)
 	}))
 
+	mux.HandleFunc("/api/v1/runbooks", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleListRunbooks(w, r)
+		case http.MethodPost:
+			handleCreateRunbook(w, r)
+		default:
+			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		}
+	}))
+
+	mux.HandleFunc("/api/v1/runbooks/", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path[len("/api/v1/runbooks/"):]
+		if path == "" {
+			writeJSON(w, 400, map[string]string{"error": "missing runbook name"})
+			return
+		}
+		if hasSuffix(path, "/run") {
+			name := path[:len(path)-len("/run")]
+			if r.Method == http.MethodPost {
+				handleRunRunbook(w, r, name)
+			} else {
+				writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+			}
+			return
+		}
+		if hasSuffix(path, "/publish") {
+			name := path[:len(path)-len("/publish")]
+			if r.Method == http.MethodPost {
+				handlePublishRunbook(w, r, name)
+			} else {
+				writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+			}
+			return
+		}
+		if r.Method == http.MethodGet {
+			handleGetRunbook(w, r, path)
+			return
+		}
+		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+	}))
+
+	mux.HandleFunc("/api/v1/approvals", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleListApprovals(w, r)
+		default:
+			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		}
+	}))
+
+	mux.HandleFunc("/api/v1/approvals/", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path[len("/api/v1/approvals/"):]
+		if hasSuffix(path, "/approve") {
+			approvalID := path[:len(path)-len("/approve")]
+			if r.Method == http.MethodPost {
+				handleApprove(w, r, approvalID)
+			} else {
+				writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+			}
+			return
+		}
+		if hasSuffix(path, "/deny") {
+			approvalID := path[:len(path)-len("/deny")]
+			if r.Method == http.MethodPost {
+				handleDeny(w, r, approvalID)
+			} else {
+				writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+			}
+			return
+		}
+		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+	}))
+
 	addr := ":" + envOrDefault("API_PORT", "8080")
 	srv := &http.Server{Addr: addr, Handler: mux}
 
