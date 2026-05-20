@@ -28,13 +28,20 @@ export type Execution = {
   requested_at: string; finished_at: string;
 };
 
-let user = 'user_senior';
-if (typeof window !== 'undefined') {
-  user = localStorage.getItem('vps_user') || 'user_senior';
+let user = '';
+
+function getUser(): string {
+  if (user) return user;
+  if (typeof window !== 'undefined') {
+    user = localStorage.getItem('vps_user') || 'user_senior';
+  } else {
+    user = 'user_senior';
+  }
+  return user;
 }
 
 function headers(): Record<string, string> {
-  return { 'X-VPS-User': user, 'Content-Type': 'application/json' };
+  return { 'X-VPS-User': getUser(), 'Content-Type': 'application/json' };
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -62,5 +69,5 @@ export const api = {
   approve: (id:string) => post(`/api/v1/approvals/${id}/approve`),
   deny: (id:string) => post(`/api/v1/approvals/${id}/deny`),
   setUser: (u:string) => { user = u; if (typeof window !== 'undefined') localStorage.setItem('vps_user', u); },
-  getUser: () => user,
+  getUser: () => getUser(),
 };

@@ -12,12 +12,14 @@ import (
 )
 
 var (
-	tuiAppStyle    = lipgloss.NewStyle().Padding(0, 1)
-	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10")).MarginBottom(1)
-	helpStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	selectedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
-	dimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	errorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	tuiAppStyle     = lipgloss.NewStyle().Padding(0, 1)
+	titleStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10")).MarginBottom(1)
+	helpStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	selectedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+	dimStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	errorStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	tableKeyMap     = table.DefaultKeyMap()
+	listKeyMap      = list.DefaultKeyMap()
 )
 
 type screen int
@@ -145,7 +147,23 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if m.screen == screenAudit {
-			m.auditInput, _ = m.auditInput.Update(msg)
+			var cmd tea.Cmd
+			m.auditInput, cmd = m.auditInput.Update(msg)
+			return m, cmd
+		}
+
+		// Delegate navigation to active component
+		if m.screen == screenServers {
+			m.serverTable, _ = m.serverTable.Update(msg)
+		}
+		if m.screen == screenExecutions {
+			m.execTable, _ = m.execTable.Update(msg)
+		}
+		if m.screen == screenApprovals {
+			m.approvalTable, _ = m.approvalTable.Update(msg)
+		}
+		if m.screen == screenRunbooks {
+			m.runbookList, _ = m.runbookList.Update(msg)
 		}
 
 		switch msg.String() {
@@ -163,11 +181,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			servers, _ := m.client.ListServers("", "", "")
 			if servers != nil {
 				m.servers = servers.Servers
-				rows := []table.Row{}
-				for _, s := range servers.Servers {
-					rows = append(rows, table.Row{s.ID, s.Name, s.Hostname, s.Environment, s.Status})
-				}
-				m.serverTable.SetRows(rows)
+				m.serverTable.SetRows(serverRows(servers.Servers))
 			}
 			return m, nil
 		case "2":
@@ -189,12 +203,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			execs, _ := m.client.ListExecutions("", "50")
 			if execs != nil {
 				m.executions = execs.Executions
-				rows := []table.Row{}
-				for _, e := range execs.Executions {
-					targets := fmt.Sprintf("%d/%d/%d", e.SucceededCount, e.FailedCount, e.TargetCount)
-					rows = append(rows, table.Row{e.ID, e.Status, targets, truncate(e.CommandPreview, 40)})
-				}
-				m.execTable.SetRows(rows)
+				m.execTable.SetRows(execRows(execs.Executions))
 			}
 			return m, nil
 		case "4":
@@ -203,11 +212,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			approvals, _ := m.client.ListApprovals("")
 			if approvals != nil {
 				m.approvals = approvals.Approvals
-				rows := []table.Row{}
-				for _, a := range approvals.Approvals {
-					rows = append(rows, table.Row{a.ID, a.RequesterName, a.ActionType, a.Status, a.Reason})
-				}
-				m.approvalTable.SetRows(rows)
+				m.approvalTable.SetRows(approvalRows(approvals.Approvals))
 			}
 			return m, nil
 		case "5":
@@ -217,6 +222,60 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(textinput.Blink)
 		case "h":
 			m.screen = screenHelp
+			return m, nil
+		case "r":
+			switch m.screen {
+			case screenServers:
+				s, _ := m.client.ListServers("", "", "")
+				if s != nil {
+					m.servers = s.Servers
+					m.serverTable.SetRows(serverRows(s.Servers))
+				}
+			case screenExecutions:
+				e, _ := m.client.ListExecutions("", "50")
+				if e != nil {
+					m.executions = e.Executions
+					m.execTable.SetRows(execRows(e.Executions))
+				}
+			case screenApprovals:
+				a, _ := m.client.ListApprovals("")
+				if a != nil {
+					m.approvals = a.Approvals
+					m.approvalTable.SetRows(approvalRows(a.Approvals))
+				}
+			case screenRunbooks:
+				r, _ := m.client.ListRunbooks()
+				if r != nil {
+					m.runbooks = r.Runbooks
+					items := []list.Item{}
+					for _, rb := range r.Runbooks {
+						items = append(items, runbookListItem{rb})
+					}
+					m.runbookList.SetItems(items)
+				}
+			case screenAudit:
+				a, _ := m.client.ListAudit("50")
+				if a != nil {
+					m.auditEvents = a.Events
+				}
+			}
+			return m, nil
+		case "enter":
+			if m.screen == screenAudit {
+				actor := m.auditInput.Value()
+				events, _ := m.client.ListAudit("50")
+				if events != nil && actor != "" {
+					filtered := []client.AuditEvent{}
+					for _, e := range events.Events {
+						if e.ActorID == actor || e.Action == actor {
+							filtered = append(filtered, e)
+						}
+					}
+					m.auditEvents = filtered
+				} else if events != nil {
+					m.auditEvents = events.Events
+				}
+			}
 			return m, nil
 		}
 	}
@@ -356,4 +415,29 @@ func (i runbookListItem) Description() string {
 }
 func (i runbookListItem) FilterValue() string {
 	return i.rb.Name + " " + i.rb.Title + " " + i.rb.Command
+}
+
+func serverRows(servers []client.Server) []table.Row {
+	rows := []table.Row{}
+	for _, s := range servers {
+		rows = append(rows, table.Row{s.ID, s.Name, s.Hostname, s.Environment, s.Status})
+	}
+	return rows
+}
+
+func execRows(executions []client.ExecutionListItem) []table.Row {
+	rows := []table.Row{}
+	for _, e := range executions {
+		targets := fmt.Sprintf("%d/%d/%d", e.SucceededCount, e.FailedCount, e.TargetCount)
+		rows = append(rows, table.Row{e.ID, e.Status, targets, truncate(e.CommandPreview, 40)})
+	}
+	return rows
+}
+
+func approvalRows(approvals []client.ApprovalItem) []table.Row {
+	rows := []table.Row{}
+	for _, a := range approvals {
+		rows = append(rows, table.Row{a.ID, a.RequesterName, a.ActionType, a.Status, a.Reason})
+	}
+	return rows
 }

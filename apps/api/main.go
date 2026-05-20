@@ -242,7 +242,7 @@ func main() {
 	}))
 
 	addr := ":" + envOrDefault("API_PORT", "8080")
-	srv := &http.Server{Addr: addr, Handler: mux}
+	srv := &http.Server{Addr: addr, Handler: corsMiddleware(mux)}
 
 	go func() {
 		logger.Info("API listening", "addr", addr)
@@ -657,6 +657,20 @@ func handleCreateRegistrationToken(w http.ResponseWriter, r *http.Request) {
 		"expires_in":         "3600",
 	})
 }
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-VPS-User")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 
 func handleListExecutions(w http.ResponseWriter, r *http.Request) {
 	actor, _ := authz.RequireActor(r.Context())
