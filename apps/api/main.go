@@ -998,11 +998,16 @@ func loadTags(ctx context.Context, db *sql.DB, orgID, serverID string) []tag {
 }
 
 func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	runnerOrg := r.URL.Query().Get("organisation_id")
+	if runnerOrg == "" {
+		runnerOrg = "org_demo"
+	}
+
 	var execID, command string
 	err := db.QueryRowContext(ctx,
 		`UPDATE executions SET status = 'running', started_at = datetime('now')
-		WHERE id = (SELECT id FROM executions WHERE status = 'queued' ORDER BY requested_at ASC LIMIT 1)
-		RETURNING id, command_preview`,
+		WHERE id = (SELECT id FROM executions WHERE status = 'queued' AND organisation_id = ? ORDER BY requested_at ASC LIMIT 1)
+		RETURNING id, command_preview`, runnerOrg,
 	).Scan(&execID, &command)
 	if err != nil {
 		writeJSON(w, 404, map[string]string{"status": "no_jobs"})

@@ -4,7 +4,7 @@
 
 **Phase 0 (Architecture Spike) is implemented.** The CLI→API→Runner→audit vertical slice works. No Docker or PostgreSQL required for local dev — the spike uses pure-Go SQLite and a simulate mode for the runner.
 
-**Phase 6 (TUI and Web Console) is implemented.** Bubble Tea TUI with 6 screens (home, servers, runbooks, executions, approvals, audit), keyboard navigation, Next.js web console with 5 tabs (servers, runbooks, approvals, executions, audit), user switcher.
+**Phase 7 (Hardening and Beta) is implemented.** Secret redaction, runner scope checks, 10 security tests (RBAC, audit completeness, tenant isolation, cross-org job claims), known limitations doc, operator guide, GoReleaser config.
 
 **Go module:** `github.com/pgd1001/svrtools` (Go 1.26.3)  
 **Build output:** `bin/vps.exe`, `bin/api.exe`, `bin/runner.exe`
@@ -137,7 +137,7 @@ Phases are intended to be sequential vertical slices (each phase builds a workin
 5. **Phase 4 — RBAC and Policy:** ~~Role enforcement, policy evaluation, deny-by-default~~ **DONE**
 6. **Phase 5 — Runbooks and Approvals:** ~~Delegated runbook creation and approval workflow~~ **DONE**
 7. **Phase 6 — TUI and Web Console:** ~~Interactive operator UX~~ **DONE**
-8. **Phase 7 — Hardening and Beta:** Security review, redaction, docs, packaging
+8. **Phase 7 — Hardening and Beta:** ~~Security review, redaction, docs, packaging~~ **DONE**
 
 ## Security gates before private beta (reference only)
 

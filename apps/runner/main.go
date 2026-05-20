@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pgd1001/svrtools/packages/redact"
 	"github.com/pgd1001/svrtools/packages/sshx"
 )
 
@@ -168,7 +169,7 @@ type job struct {
 }
 
 func claimJob(ctx context.Context, client *http.Client, apiURL string) (*job, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL+"/api/v1/jobs/next", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL+"/api/v1/jobs/next?organisation_id=org_demo", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -199,8 +200,8 @@ func submitResult(ctx context.Context, client *http.Client, apiURL, execID strin
 	body := map[string]any{
 		"execution_id": execID,
 		"exit_code":    result.ExitCode,
-		"stdout":       result.Stdout,
-		"stderr":       result.Stderr,
+		"stdout":       redact.Stdout(result.Stdout),
+		"stderr":       redact.Stdout(result.Stderr),
 		"error":        result.Error,
 		"duration_ms":  result.DurationMs,
 	}
