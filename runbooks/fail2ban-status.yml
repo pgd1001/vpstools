@@ -1,0 +1,96 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: fail2ban-status
+  title: Fail2Ban Status Report
+  description: |
+    Reports Fail2Ban jail status, banned IPs per jail, total bans
+    over time, ban history, and currently active bans. Also reports
+    fail2ban service health and log tail for recent events.
+  risk: low
+  tags: ["security", "fail2ban", "monitor", "brute-force"]
+  version: 1
+spec:
+  parameters:
+    - name: healthcheck_url
+      type: string
+      default: ""
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "daily"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 30
+    concurrency: 10
+    command: |
+      set -euo pipefail
+
+      echo "=========================================="
+      echo "  FAIL2BAN STATUS REPORT"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Host: $(hostname)"
+      echo "=========================================="
+      echo ""
+
+      if ! command -v fail2ban-client &>/dev/null; then
+        echo "fail2ban is not installed."
+        exit 0
+      fi
+
+      echo "--- SERVICE STATUS ---"
+      systemctl is-active fail2ban 2>/dev/null && echo "  Service: ACTIVE" || echo "  Service: INACTIVE/FAILED"
+      echo ""
+
+      echo "--- OVERALL STATUS ---"
+      fail2ban-client status 2>/dev/null | head -20
+      echo ""
+
+      echo "--- JAIL DETAIL ---"
+      jails=$(fail2ban-client status 2>/dev/null | grep "Jail list:" | cut -d: -f2 | tr ',' ' ' | xargs)
+      if [ -z "$jails" ]; then
+        echo "  No jails configured."
+      else
+        for jail in $jails; do
+          echo "=== Jail: $jail ==="
+          fail2ban-client status "$jail" 2>/dev/null
+          echo ""
+        done
+      fi
+
+      echo "--- RECENT EVENTS (fail2ban log, last 10) ---"
+      if [ -f /var/log/fail2ban.log ]; then
+        tail -10 /var/log/fail2ban.log 2>/dev/null || echo "(cannot read log)"
+      elif command -v journalctl &>/dev/null; then
+        journalctl -u fail2ban --since "1 hour ago" 2>/dev/null | tail -10 || true
+      fi
+      echo ""
+
+      echo "--- SUMMARY ---"
+      total_bans=0
+      total_active=0
+      for jail in $jails; do
+        bans=$(fail2ban-client status "$jail" 2>/dev/null | grep "Total banned:" | awk '{print $NF}')
+        active=$(fail2ban-client status "$jail" 2>/dev/null | grep "Currently banned:" | awk '{print $NF}')
+        total_bans=$((total_bans + (bans + 0)))
+        total_active=$((total_active + (active + 0)))
+      done
+      echo "  Jails:     $(echo "$jails" | wc -w)"
+      echo "  Total bans: $total_bans"
+      echo "  Active bans: $total_active"
+
+      echo ""
+      echo "Report complete."
+  output:
+    store: inline
+    redact: []

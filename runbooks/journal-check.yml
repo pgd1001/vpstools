@@ -1,0 +1,121 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: journal-check
+  title: System Journal Error Check
+  description: |
+    Scans systemd journal for ERROR, WARNING, and FATAL messages
+    across all services, per-service error counts, and recent kernel
+    messages. Reports services with the most errors. Good for
+    proactive issue detection.
+  risk: low
+  tags: ["diagnostic", "journal", "logging", "errors", "health"]
+  version: 1
+spec:
+  parameters:
+    - name: timeframe_hours
+      type: string
+      default: "24"
+      description: Hours of journal history to scan
+    - name: top_n_services
+      type: string
+      default: "10"
+      description: Number of top error services to show
+    - name: priority
+      type: string
+      default: "3"
+      description: "Journal priority level (0=emerg,1=alert,2=crit,3=err,4=warning)"
+    - name: healthcheck_url
+      type: string
+      default: ""
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "daily"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 30
+    concurrency: 10
+    command: |
+      set -euo pipefail
+
+      HOURS="${TIMEFRAME_HOURS:-24}"
+      TOP="${TOP_N_SERVICES:-10}"
+      PRIO="${PRIORITY:-3}"
+
+      echo "=========================================="
+      echo "  SYSTEM JOURNAL ERROR CHECK"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Timeframe: last $HOURS hours, priority <= $PRIO"
+      echo "=========================================="
+      echo ""
+
+      if ! command -v journalctl &>/dev/null; then
+        echo "journalctl not available (not a systemd system?)"
+        echo "Falling back to syslog..."
+        if [ -f /var/log/syslog ]; then
+          grep -i 'error\|fail\|critical' /var/log/syslog 2>/dev/null | tail -20
+        fi
+        exit 0
+      fi
+
+      SINCE_ARG="-$HOURS hours"
+
+      echo "--- ERROR COUNT BY SERVICE ---"
+      total_errors=$(journalctl -p "$PRIO" --since "$SINCE_ARG" -q 2>/dev/null | wc -l || echo 0)
+      echo "Total messages (priority ≤$PRIO): $total_errors"
+      echo ""
+      echo "Top $TOP services by error count:"
+      journalctl -p "$PRIO" --since "$SINCE_ARG" -q 2>/dev/null | \
+        grep -oP '(?<=\[)[^]]+(?=\])' | sort | uniq -c | sort -rn | head -"$TOP" || \
+      journalctl -p "$PRIO" --since "$SINCE_ARG" -q 2>/dev/null | \
+        sed 's/.*]//' | grep -oP '^\s*\S+' | sort | uniq -c | sort -rn | head -"$TOP" || \
+        echo "(could not parse service names)"
+      echo ""
+
+      echo "--- RECENT KERNEL MESSAGES ---"
+      journalctl -k -p "$PRIO" --since "$SINCE_ARG" 2>/dev/null | tail -15 || \
+      dmesg -T -l err 2>/dev/null | tail -15 || \
+        echo "(no kernel messages)"
+      echo ""
+
+      echo "--- SERVICES WITH MOST RECENT ERRORS ---"
+      journalctl -p "$PRIO" --since "$SINCE_ARG" --no-pager 2>/dev/null | \
+        awk '{
+          for(i=5;i<=NF;i++) {
+            if ($i ~ /^\[/) { sub(/^\[/,"",$i); sub(/\].*/,"",$i); svc=$i; break }
+            if ($i ~ /^[a-zA-Z]/ && $i !~ /^[0-9]/ && length($i) < 40) { svc=$i; break }
+          }
+        }
+        svc && !seen[svc]++ { count[svc]++ }
+        END { for(s in count) print count[s], s }' 2>/dev/null | \
+        sort -rn | head -"$TOP" || echo "(parsing failed)"
+      echo ""
+
+      echo "--- CRITICAL EVENTS (priority 0-2) ---"
+      crit_count=$(journalctl -p 2 --since "$SINCE_ARG" -q 2>/dev/null | wc -l)
+      echo "Critical events (emerg/alert/crit): $crit_count"
+      if [ "$crit_count" -gt 0 ]; then
+        journalctl -p 2 --since "$SINCE_ARG" --no-pager 2>/dev/null | tail -20
+      fi
+      echo ""
+
+      echo "--- DISK SPACE USED BY JOURNAL ---"
+      journalctl --disk-usage 2>/dev/null || echo "(not available)"
+
+      if [ "$total_errors" -gt 100 ]; then
+        echo "!! High error count ($total_errors in $HOURS hours) -- investigate !!"
+      fi
+  output:
+    store: inline
+    redact: []

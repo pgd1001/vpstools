@@ -1,0 +1,99 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: system-info
+  title: System Information Report
+  description: |
+    Collects full system inventory: kernel version, CPU cores/arch/model,
+    RAM total and usage, mounted filesystems, network interfaces with IPs,
+    running containers, and system uptime. Safe to run on any server.
+  risk: low
+  tags: ["diagnostic", "system", "inventory", "info"]
+  version: 1
+spec:
+  parameters:
+    - name: healthcheck_url
+      type: string
+      default: ""
+      description: Health endpoint to verify pre/post (empty = skip)
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "on-demand"
+      description: Recommended cadence (daily/weekly/monthly/on-demand)
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 30
+    concurrency: 10
+    command: |
+      set -euo pipefail
+
+      echo "=========================================="
+      echo "  SYSTEM INFORMATION REPORT"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "=========================================="
+      echo ""
+
+      echo "--- KERNEL ---"
+      uname -a
+      echo ""
+
+      echo "--- CPU ---"
+      nproc=$(nproc)
+      model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ //')
+      arch=$(uname -m)
+      echo "Cores:  $nproc"
+      echo "Model:  $model"
+      echo "Arch:   $arch"
+      echo "Load:   $(uptime | grep -oP 'load average:.*')"
+      echo ""
+
+      echo "--- MEMORY ---"
+      free -h
+      echo ""
+
+      echo "--- FILESYSTEMS ---"
+      df -hT --exclude-type=tmpfs --exclude-type=devtmpfs 2>/dev/null || df -h
+      echo ""
+
+      echo "--- NETWORK ---"
+      ip -brief addr 2>/dev/null || ifconfig 2>/dev/null || echo "No network info"
+      echo ""
+
+      echo "--- DNS ---"
+      cat /etc/resolv.conf 2>/dev/null || echo "No resolv.conf"
+      echo ""
+
+      echo "--- CONTAINERS ---"
+      if command -v docker &>/dev/null; then
+        docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "Docker not accessible"
+      else
+        echo "(no Docker)"
+      fi
+      echo ""
+
+      echo "--- UPTIME ---"
+      uptime
+      echo "Last boot: $(who -b 2>/dev/null | awk '{print $3, $4}')"
+      echo ""
+
+      echo "--- OS ---"
+      cat /etc/os-release 2>/dev/null | grep -E '^(NAME|VERSION|VERSION_ID)=' || cat /etc/*release 2>/dev/null | head -3
+      echo ""
+
+      echo "--- PACKAGES ---"
+      if command -v dpkg &>/dev/null; then
+        echo "Deb packages: $(dpkg --get-selections | wc -l)"
+        echo "Upgradable:   $(apt list --upgradable 2>/dev/null | grep -c upgradable || echo 0)"
+      fi
+  output:
+    store: inline
+    redact: []

@@ -1,0 +1,17 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: check-memory
+  title: Check Memory Usage
+  description: Check memory usage with free -m
+  risk: low
+  tags: ["diagnostic", "memory"]
+spec:
+  execution:
+    command: free -m
+    timeoutSeconds: 30
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  output:
+    store: inline
+    redact: []

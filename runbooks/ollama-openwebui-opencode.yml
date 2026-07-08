@@ -1,0 +1,129 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: ollama-openwebui-opencode
+  title: Ollama + Open WebUI + OpenCode
+  description: |
+    Installs a complete local AI development stack:
+    - Ollama: local LLM runner (llama3, qwen, etc.)
+    - Open WebUI: ChatGPT-like interface for Ollama
+    - OpenCode: AI coding agent CLI
+    All behind Docker, with GPU acceleration auto-detected.
+  risk: medium
+  tags: ["provisioning", "ai", "ollama", "openwebui", "opencode", "llm"]
+  version: 1
+spec:
+  parameters:
+    - name: ollama_port
+      type: string
+      default: "11434"
+      description: Ollama API port
+    - name: openwebui_port
+      type: string
+      default: "3000"
+      description: Open WebUI port
+    - name: default_model
+      type: string
+      default: "llama3.2:3b"
+      description: Default model to pull on install
+    - name: data_dir
+      type: string
+      default: "/opt/ai-stack"
+      description: Data directory for volumes
+  targets:
+    allowedTags:
+      os: ubuntu
+    allowedEnvironments: ["development", "staging"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 600
+    concurrency: 1
+    command: |
+      set -euo pipefail
+
+      OLLAMA_PORT="${OLLAMA_PORT:-11434}"
+      OWUI_PORT="${OPENWEBUI_PORT:-3000}"
+      MODEL="${DEFAULT_MODEL:-llama3.2:3b}"
+      DATA_DIR="${DATA_DIR:-/opt/ai-stack}"
+
+      echo "=== [1/5] System dependencies ==="
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq curl ca-certificates gnupg ufw
+
+      if ! command -v docker &>/dev/null; then
+        curl -fsSL https://get.docker.com | bash
+      fi
+      systemctl enable --now docker
+
+      echo "=== [2/5] Ollama ==="
+      mkdir -p "$DATA_DIR/ollama"
+      docker rm -f ollama 2>/dev/null || true
+      if lspci 2>/dev/null | grep -qi nvidia; then
+        docker run -d \
+          --name ollama --restart always \
+          -p "$OLLAMA_PORT":11434 \
+          -v "$DATA_DIR/ollama:/root/.ollama" \
+          --gpus all \
+          ollama/ollama:latest
+      else
+        docker run -d \
+          --name ollama --restart always \
+          -p "$OLLAMA_PORT":11434 \
+          -v "$DATA_DIR/ollama:/root/.ollama" \
+          ollama/ollama:latest
+      fi
+
+      echo "--- Waiting for Ollama to be ready ---"
+      for i in $(seq 1 30); do
+        curl -s http://127.0.0.1:$OLLAMA_PORT >/dev/null 2>&1 && break
+        sleep 2
+      done
+
+      echo "--- Pulling model: $MODEL ---"
+      docker exec ollama ollama pull "$MODEL"
+
+      echo "=== [3/5] Open WebUI ==="
+      mkdir -p "$DATA_DIR/open-webui"
+      docker rm -f open-webui 2>/dev/null || true
+      docker run -d \
+        --name open-webui --restart always \
+        -p "$OWUI_PORT":8080 \
+        -v "$DATA_DIR/open-webui:/app/backend/data" \
+        -e OLLAMA_BASE_URL="http://host.docker.internal:$OLLAMA_PORT" \
+        -e WEBUI_AUTH=false \
+        ghcr.io/open-webui/open-webui:main 2>/dev/null || \
+      docker run -d \
+        --name open-webui --restart always \
+        -p "$OWUI_PORT":8080 \
+        -v "$DATA_DIR/open-webui:/app/backend/data" \
+        -e OLLAMA_BASE_URL="http://172.17.0.1:$OLLAMA_PORT" \
+        -e WEBUI_AUTH=false \
+        ghcr.io/open-webui/open-webui:main
+
+      echo "=== [4/5] UFW rules ==="
+      ufw allow "$OLLAMA_PORT/tcp" comment 'Ollama'
+      ufw allow "$OWUI_PORT/tcp" comment 'Open WebUI'
+      ufw --force enable
+
+      echo "=== [5/5] OpenCode CLI ==="
+      if ! command -v opencode &>/dev/null; then
+        curl -fsSL https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-amd64 \
+          -o /usr/local/bin/opencode 2>/dev/null && chmod +x /usr/local/bin/opencode || \
+          echo "OpenCode binary download skipped (not available for this arch)"
+      fi
+
+      echo ""
+      echo "=== AI STACK READY ==="
+      echo "Ollama:     http://$(hostname -I | awk '{print $1}'):$OLLAMA_PORT"
+      echo "Open WebUI: http://$(hostname -I | awk '{print $1}'):$OWUI_PORT"
+      echo "OpenCode:   $(command -v opencode || echo 'not installed')"
+      echo "Model:      $MODEL"
+      echo ""
+      echo "Try: curl http://127.0.0.1:$OLLAMA_PORT/api/generate -d '{\"model\":\"$MODEL\",\"prompt\":\"Hello\"}'"
+  output:
+    store: inline
+    redact: []

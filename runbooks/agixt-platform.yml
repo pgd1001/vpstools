@@ -1,0 +1,178 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: agixt-platform
+  title: AGiXT AI Agent Platform
+  description: |
+    AGiXT is a comprehensive AI automation platform with 40+ built-in
+    extensions, multi-provider support (OpenAI, Anthropic, Ollama, local),
+    and enterprise features. Deploys via Docker Compose with ezLocalai
+    for fully local inference. Includes interactive Streamlit UI + REST API.
+    Repo: https://github.com/Josh-XT/AGiXT
+  risk: high
+  tags: ["provisioning", "ai", "agents", "automation", "agixt", "llm"]
+  version: 1
+spec:
+  parameters:
+    - name: domain
+      type: string
+      default: ""
+      description: Public domain for reverse proxy (blank = local IP)
+    - name: agixt_port
+      type: string
+      default: "7437"
+      description: AGiXT REST API port
+    - name: streamlit_port
+      type: string
+      default: "8501"
+      description: AGiXT Streamlit UI port
+    - name: api_key
+      type: string
+      default: ""
+      description: AGiXT API key (auto-generated if empty)
+    - name: with_local_ai
+      type: string
+      default: "true"
+      description: Enable ezLocalai integration (true/false)
+    - name: gpu_layers
+      type: string
+      default: "-1"
+      description: GPU layers for local models (-1 = all)
+  targets:
+    allowedTags:
+      os: ubuntu
+    allowedEnvironments: ["development", "staging"]
+  approval:
+    required: true
+    environment: production
+    requiredRole: admin
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 1200
+    concurrency: 1
+    command: |
+      set -euo pipefail
+
+      DOMAIN="${DOMAIN:-}"
+      AGIXT_PORT="${AGIXT_PORT:-7437}"
+      STREAMLIT_PORT="${STREAMLIT_PORT:-8501}"
+      API_KEY="${API_KEY:-$(openssl rand -hex 32)}"
+      LOCAL_AI="${WITH_LOCAL_AI:-true}"
+      GPU_LAYERS="${GPU_LAYERS:--1}"
+      INSTALL_DIR="/opt/agixt"
+
+      echo "=== [1/5] System deps & Docker ==="
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq curl git ca-certificates python3 python3-pip ufw
+
+      if ! command -v docker &>/dev/null; then
+        curl -fsSL https://get.docker.com | bash
+      fi
+      systemctl enable --now docker
+
+      if lspci 2>/dev/null | grep -qi nvidia; then
+        echo "=== NVIDIA GPU detected - installing container toolkit ==="
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null || true
+        distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+        curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+          sed "s#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g" > /etc/apt/sources.list.d/nvidia-container-toolkit.list 2>/dev/null || true
+        apt-get update -qq 2>/dev/null && apt-get install -y -qq nvidia-container-toolkit 2>/dev/null || true
+      fi
+
+      echo "=== [2/5] Clone AGiXT ==="
+      if [ -d "$INSTALL_DIR" ]; then
+        cd "$INSTALL_DIR" && git pull
+      else
+        git clone https://github.com/Josh-XT/AGiXT.git "$INSTALL_DIR"
+      fi
+      cd "$INSTALL_DIR"
+
+      echo "=== [3/5] Configure AGiXT ==="
+      mkdir -p models agixt/agents
+      cat > .env << AGIXTENV
+      AGIXT_API_KEY=$API_KEY
+      AGIXT_URI=http://0.0.0.0:$AGIXT_PORT
+      AGIXT_MAIN_URI=http://0.0.0.0:$AGIXT_PORT
+      STREAMLIT_PORT=$STREAMLIT_PORT
+      STREAMLIT_SERVER_PORT=$STREAMLIT_PORT
+      AGIXT_PORT=$AGIXT_PORT
+      AGIXT_AUTO_UPDATE=false
+      LOG_LEVEL=INFO
+      AGIXT_LOG_LEVEL=INFO
+      DATABASE_TYPE=sqlite
+      DATABASE_NAME=models/agixt
+      AGIXT_HTTPS=false
+      ALLOW_EMAIL_SIGN_IN=true
+      TZ=$(cat /etc/timezone 2>/dev/null || echo UTC)
+      AGIXTENV
+
+      if [ "$LOCAL_AI" = "true" ]; then
+        echo "" >> .env
+        echo "# ezLocalai settings" >> .env
+        echo "EZLOCALAI_URI=http://ezlocalai:8091" >> .env
+        echo "DEFAULT_MODEL=QuantFactory/dolphin-2.9.2-qwen2-7b-GGUF" >> .env
+        echo "GPU_LAYERS=$GPU_LAYERS" >> .env
+        cat > docker-compose.override.yml << OVERRIDEEOF
+      version: "3"
+      services:
+        agixt:
+          depends_on:
+            - ezlocalai
+        ezlocalai:
+          image: joshxt/ezlocalai:latest
+          restart: always
+          ports:
+            - "8091:8091"
+          volumes:
+            - ./models:/app/models
+            - ezlocalai_data:/app/data
+          environment:
+            - GPU_LAYERS=$GPU_LAYERS
+          deploy:
+            resources:
+              reservations:
+                devices:
+                  - driver: nvidia
+                    count: all
+                    capabilities: [gpu]
+        agixt-streamlit:
+          depends_on:
+            - ezlocalai
+      volumes:
+        ezlocalai_data:
+      OVERRIDEEOF
+      fi
+
+      echo "=== [4/5] UFW rules ==="
+      ufw allow "$AGIXT_PORT/tcp" comment 'AGiXT API'
+      ufw allow "$STREAMLIT_PORT/tcp" comment 'AGiXT Streamlit'
+      if [ "$LOCAL_AI" = "true" ]; then
+        ufw allow 8091/tcp comment 'ezLocalai'
+      fi
+      ufw --force enable
+
+      echo "=== [5/5] Deploy ==="
+      if [ -f docker-compose.override.yml ]; then
+        docker compose -f docker-compose.yml -f docker-compose.override.yml pull
+        docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
+      else
+        docker compose pull && docker compose up -d
+      fi
+
+      IP=$(hostname -I | awk '{print $1}')
+      echo ""
+      echo "=== AGiXT DEPLOYED ==="
+      echo "API:         http://$IP:$AGIXT_PORT"
+      echo "Streamlit:   http://$IP:$STREAMLIT_PORT"
+      echo "ezLocalai:   http://$IP:8091 (if enabled)"
+      echo ""
+      echo "API Key:     $API_KEY"
+      echo "Directory:   $INSTALL_DIR"
+      echo ""
+      echo "Swagger:     http://$IP:$AGIXT_PORT/docs"
+      echo "Dashboard:   http://$IP:$STREAMLIT_PORT"
+  output:
+    store: inline
+    redact: ["${API_KEY}"]

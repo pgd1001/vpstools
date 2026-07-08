@@ -1,0 +1,134 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: service-restart
+  title: Emergency Service Restart
+  description: |
+    Force-restarts a failed or hanging systemd service with health
+    verification. Captures pre-restart state (logs, status, coredump)
+    for debugging. Supports force-kill if normal stop fails.
+    High-risk -- may cause brief service interruption.
+  risk: high
+  tags: ["recovery", "service", "restart", "emergency", "systemd"]
+  version: 1
+spec:
+  parameters:
+    - name: service_name
+      type: string
+      default: ""
+      description: Systemd service name to restart (required)
+    - name: force_kill
+      type: string
+      default: "false"
+      description: Use SIGKILL if normal stop fails (true/false)
+    - name: healthcheck_url
+      type: string
+      default: "http://localhost/health"
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Required reason for this action
+    - name: schedule
+      type: string
+      default: "on-demand"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: true
+    requiredRoles: ["admin", "senior_engineer"]
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 120
+    concurrency: 5
+    command: |
+      set -euo pipefail
+
+      SERVICE="${SERVICE_NAME:-}"
+      FORCE="${FORCE_KILL:-false}"
+      HEALTHCHECK="${HEALTHCHECK_URL:-http://localhost/health}"
+
+      if [ -z "$SERVICE" ]; then
+        echo "ERROR: service_name parameter is required."
+        echo "Usage: Set --service_name <service-name>"
+        exit 1
+      fi
+
+      echo "=========================================="
+      echo "  EMERGENCY SERVICE RESTART"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Service: $SERVICE"
+      echo "  Host: $(hostname)"
+      echo "=========================================="
+      echo ""
+
+      echo "--- PRE-RESTART STATE ---"
+      echo "Service status:"
+      systemctl status "$SERVICE" --no-pager 2>/dev/null | head -15 || true
+      echo ""
+
+      echo "Recent journal (last 20 lines):"
+      journalctl -u "$SERVICE" --since "1 hour ago" --no-pager 2>/dev/null | tail -20 || true
+      echo ""
+
+      echo "Coredump check:"
+      coredumpctl info "$SERVICE" 2>/dev/null | tail -5 || echo "  (no coredumps)"
+      echo ""
+
+      echo "--- STOPPING SERVICE ---"
+      if [ "$FORCE" = "true" ]; then
+        echo "Force mode enabled. Attempting normal stop first..."
+        systemctl stop "$SERVICE" 2>/dev/null || true
+        sleep 2
+        if systemctl is-active "$SERVICE" &>/dev/null; then
+          echo "Normal stop failed. Sending SIGKILL..."
+          pkill -9 -f "$SERVICE" 2>/dev/null || true
+          sleep 1
+        fi
+      else
+        systemctl stop "$SERVICE" 2>&1
+      fi
+
+      sleep 2
+
+      echo ""
+
+      echo "--- STARTING SERVICE ---"
+      systemctl start "$SERVICE" 2>&1
+      START_EXIT=$?
+
+      sleep 3
+
+      echo ""
+
+      echo "--- POST-RESTART VERIFICATION ---"
+      if systemctl is-active "$SERVICE" &>/dev/null; then
+        echo "Service: ACTIVE"
+      else
+        echo "Service: FAILED"
+        systemctl status "$SERVICE" --no-pager 2>/dev/null | head -20
+        journalctl -u "$SERVICE" --since "5 minutes ago" --no-pager 2>/dev/null | tail -15
+        exit 1
+      fi
+
+      echo ""
+
+      echo "--- HEALTH CHECK ---"
+      echo "Testing: $HEALTHCHECK"
+      for i in 1 2 3 4 5; do
+        code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 -m 5 "$HEALTHCHECK" 2>/dev/null || echo "FAIL")
+        if [ "$code" != "FAIL" ] && [ "$code" != "000" ]; then
+          echo "  HTTP $code (attempt $i)"
+          echo "Health check passed."
+          break
+        fi
+        [ "$i" -lt 5 ] && echo "  HTTP $code, retrying..." && sleep 3
+      done
+
+      echo ""
+      echo "Restart of $SERVICE complete (exit: $START_EXIT)."
+  output:
+    store: inline
+    redact: []

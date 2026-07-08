@@ -1,0 +1,134 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: seafile-install
+  title: SeaFile File Sync Server
+  description: |
+    Installs SeaFile open-source file sync and share platform using Docker.
+    Includes MariaDB, Memcached, and SeaFile server behind a shared network.
+    Minimum: 2 GB RAM, 20 GB disk. Designed for Ubuntu 22.04+.
+  risk: critical
+  tags: ["provisioning", "seafile", "file-sync", "cloud", "docker"]
+  version: 1
+spec:
+  parameters:
+    - name: domain
+      type: string
+      default: ""
+      required: true
+      description: Domain pointed at this server
+    - name: email
+      type: string
+      default: ""
+      required: true
+      description: Email for Let's Encrypt
+    - name: seafile_version
+      type: string
+      default: "latest"
+      description: SeaFile Docker image tag
+    - name: admin_email
+      type: string
+      default: "admin@example.com"
+      description: Initial admin email
+  targets:
+    allowedTags:
+      os: ubuntu
+    allowedEnvironments: ["staging"]
+  approval:
+    required: true
+    environment: staging
+    requiredRole: admin
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 600
+    concurrency: 1
+    command: |
+      set -euo pipefail
+
+      DOMAIN="${DOMAIN:?domain is required}"
+      EMAIL="${EMAIL:?email is required}"
+      SEAFILE_VER="${SEAFILE_VERSION:-latest}"
+      ADMIN_EMAIL="${ADMIN_EMAIL:-admin@example.com}"
+      ADMIN_PASS="$(openssl rand -base64 16)"
+      SECRET_KEY="$(openssl rand -base64 32)"
+      DB_ROOT_PASS="$(openssl rand -base64 24)"
+      SEAFILE_DIR=/opt/seafile
+
+      echo "=== [1/4] System dependencies ==="
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq docker.io docker-compose-plugin ufw curl
+
+      systemctl enable --now docker
+
+      echo "=== [2/4] UFW ==="
+      ufw allow 80/tcp comment 'HTTP'
+      ufw allow 443/tcp comment 'HTTPS'
+      ufw --force enable
+
+      echo "=== [3/4] SeaFile Docker Compose ==="
+      mkdir -p "$SEAFILE_DIR"
+      cat > "$SEAFILE_DIR/docker-compose.yml" << COMPOSEEOF
+      version: "3"
+      services:
+        db:
+          image: mariadb:10.11
+          restart: always
+          environment:
+            - MYSQL_ROOT_PASSWORD=$DB_ROOT_PASS
+            - MYSQL_LOG_CONSOLE=true
+          volumes:
+            - db_data:/var/lib/mysql
+          networks:
+            - seafile-net
+
+        memcached:
+          image: memcached:1.6
+          restart: always
+          entrypoint: memcached -m 256
+          networks:
+            - seafile-net
+
+        seafile:
+          image: seafileltd/seafile-mc:${SEAFILE_VER}
+          restart: always
+          ports:
+            - "80:80"
+            - "443:443"
+          environment:
+            - DB_HOST=db
+            - DB_ROOT_PASSWD=$DB_ROOT_PASS
+            - SEAFILE_ADMIN_EMAIL=$ADMIN_EMAIL
+            - SEAFILE_ADMIN_PASSWORD=$ADMIN_PASS
+            - SEAFILE_SERVER_LETSENCRYPT=true
+            - SEAFILE_SERVER_HOSTNAME=$DOMAIN
+            - FORCE_HTTPS_REDIRECT=true
+          volumes:
+            - seafile_data:/shared
+            - /etc/ssl:/etc/ssl:ro
+          depends_on:
+            - db
+            - memcached
+          networks:
+            - seafile-net
+
+      volumes:
+        db_data:
+        seafile_data:
+      networks:
+        seafile-net:
+      COMPOSEEOF
+
+      echo "=== [4/4] Deploy SeaFile ==="
+      cd "$SEAFILE_DIR" && docker compose pull && docker compose up -d
+
+      echo "=== SEAFILE SETUP COMPLETE ==="
+      echo "URL:      https://$DOMAIN"
+      echo "Admin:    $ADMIN_EMAIL"
+      echo "Password: $ADMIN_PASS"
+      echo ""
+      echo "Save the password above. You can change it after first login."
+  output:
+    store: inline
+    redact: ["${DOMAIN}", "${EMAIL}", "${ADMIN_PASS}", "${DB_ROOT_PASS}"]

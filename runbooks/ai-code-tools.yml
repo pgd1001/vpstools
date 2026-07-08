@@ -1,0 +1,145 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: ai-code-tools
+  title: AI Coding Tools (Claude Code + OpenCode)
+  description: |
+    Installs a complete AI-assisted development environment on any Ubuntu
+    server or dev VM. Includes:
+    - Node.js 22 + npm
+    - Go 1.26+
+    - Claude Code (Anthropic CLI)
+    - OpenCode (AI coding agent)
+    - Git, lazygit, tmux, ripgrep, fd-find, fzf
+    - Docker CLI (if not present)
+    Configures SSH key, git identity, and shell aliases.
+  risk: medium
+  tags: ["provisioning", "ai", "development", "coding", "claude", "opencode"]
+  version: 1
+spec:
+  parameters:
+    - name: github_user
+      type: string
+      default: ""
+      description: GitHub username for git config
+    - name: github_email
+      type: string
+      default: ""
+      description: Email for git config and SSH key
+    - name: node_version
+      type: string
+      default: "22"
+      description: Node.js major version
+    - name: go_version
+      type: string
+      default: "1.26"
+      description: Go version to install
+  targets:
+    allowedTags:
+      os: ubuntu
+    allowedEnvironments: ["development", "staging"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 300
+    concurrency: 1
+    command: |
+      set -euo pipefail
+
+      GIT_USER="${GITHUB_USER:-}"
+      GIT_EMAIL="${GITHUB_EMAIL:-}"
+      NODE_VER="${NODE_VERSION:-22}"
+      GO_VER="${GO_VERSION:-1.26}"
+      TARGET_USER="${SUDO_USER:-$USER}"
+
+      echo "=== [1/6] System packages ==="
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq \
+        build-essential curl wget git \
+        tmux ripgrep fd-find fzf bat \
+        unzip xz-utils jq tree \
+        ca-certificates gnupg lsb-release \
+        python3 python3-pip
+
+      if ! command -v lazygit &>/dev/null; then
+        LAZYGIT_VERSION=$(curl -s https://api.github.com/repos/jesseduffield/lazygit/releases/latest | grep tag_name | cut -d'"' -f4 | sed 's/v//')
+        curl -fsSL "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz" \
+          | tar xz -C /usr/local/bin lazygit
+      fi
+
+      echo "=== [2/6] Node.js $NODE_VER via NodeSource ==="
+      if ! command -v node &>/dev/null; then
+        curl -fsSL https://deb.nodesource.com/setup_$NODE_VER.x | bash -
+        apt-get install -y -qq nodejs
+      fi
+      corepack enable 2>/dev/null || true
+      npm install -g npm@latest
+
+      echo "=== [3/6] Go $GO_VER ==="
+      if ! command -v go &>/dev/null || [ "$(go version | grep -oP 'go\K[0-9.]+' | head -1)" != "$GO_VER" ]; then
+        curl -fsSL "https://go.dev/dl/go${GO_VER}.linux-amd64.tar.gz" \
+          | tar -C /usr/local -xz
+        ln -sf /usr/local/go/bin/go /usr/local/bin/go
+      fi
+
+      echo "=== [4/6] Claude Code ==="
+      npm install -g @anthropic-ai/claude-code 2>/dev/null || npm install -g @anthropic-ai/claude-code --ignore-scripts
+
+      echo "=== [5/6] OpenCode ==="
+      if command -v npm &>/dev/null; then
+        npm install -g @opencode-ai/cli 2>/dev/null || true
+      fi
+      if ! command -v opencode &>/dev/null; then
+        curl -fsSL https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-amd64 \
+          -o /usr/local/bin/opencode 2>/dev/null && chmod +x /usr/local/bin/opencode || true
+      fi
+
+      echo "=== [6/6] User config ==="
+      HOME_DIR=$(eval echo "~$TARGET_USER")
+
+      if [ -n "$GIT_EMAIL" ]; then
+        sudo -u "$TARGET_USER" git config --global user.email "$GIT_EMAIL"
+      fi
+      if [ -n "$GIT_USER" ]; then
+        sudo -u "$TARGET_USER" git config --global user.name "$GIT_USER"
+      fi
+      sudo -u "$TARGET_USER" git config --global init.defaultBranch main
+      sudo -u "$TARGET_USER" git config --global pull.rebase true
+
+      if [ -n "$GIT_EMAIL" ] && [ ! -f "$HOME_DIR/.ssh/id_ed25519" ]; then
+        sudo -u "$TARGET_USER" mkdir -p "$HOME_DIR/.ssh"
+        sudo -u "$TARGET_USER" ssh-keygen -t ed25519 -C "$GIT_EMAIL" -f "$HOME_DIR/.ssh/id_ed25519" -N ""
+      fi
+
+      cat >> "$HOME_DIR/.bashrc" << BASHEOF
+      alias ll='ls -la'
+      alias la='ls -A'
+      alias l='ls -CF'
+      alias g='git'
+      alias lg='lazygit'
+      alias c='code'
+      alias cc='claude'
+      export EDITOR=vim
+      if command -v fzf &>/dev/null; then eval "\$(fzf --bash)"; fi
+      if command -v batcat &>/dev/null; then alias cat='batcat'; fi
+      if command -v bat &>/dev/null; then alias cat='bat'; fi
+      BASHEOF
+
+      echo ""
+      echo "=== AI CODE TOOLS INSTALLED ==="
+      echo "Node:   $(node --version 2>/dev/null || echo '?')"
+      echo "Go:     $(go version 2>/dev/null || echo '?')"
+      echo "Git:    $(git --version 2>/dev/null || echo '?')"
+      echo "Claude: $(claude --version 2>/dev/null || echo 'not found')"
+      echo "Home:   $HOME_DIR"
+      if [ -f "$HOME_DIR/.ssh/id_ed25519.pub" ]; then
+        echo "SSH key: $(cat "$HOME_DIR/.ssh/id_ed25519.pub")"
+      fi
+      echo ""
+      echo "Restart shell or run: source ~/.bashrc"
+  output:
+    store: inline
+    redact: []

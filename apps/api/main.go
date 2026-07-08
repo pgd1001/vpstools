@@ -675,6 +675,8 @@ func corsMiddleware(next http.Handler) http.Handler {
 func handleListExecutions(w http.ResponseWriter, r *http.Request) {
 	actor, _ := authz.RequireActor(r.Context())
 	status := r.URL.Query().Get("status")
+	mineFilter := r.URL.Query().Get("mine")
+	delegatedBy := r.URL.Query().Get("delegated_by")
 	limit := "20"
 	if l := r.URL.Query().Get("limit"); l != "" {
 		limit = l
@@ -682,12 +684,21 @@ func handleListExecutions(w http.ResponseWriter, r *http.Request) {
 
 	query := `SELECT e.id, e.actor_user_id, e.actor_role_at_time, e.execution_type, e.status,
 		e.risk_level, e.environment, e.reason, e.command_preview, e.command_hash,
-		e.timeout_seconds, e.requested_at, e.started_at, e.finished_at
+		e.timeout_seconds, e.requested_at, e.started_at, e.finished_at,
+		COALESCE(e.delegated_by_user_id,''), COALESCE(e.approval_id,'')
 		FROM executions e WHERE e.organisation_id = ?`
 	args := []any{actor.OrganisationID}
 	if status != "" {
 		query += " AND e.status = ?"
 		args = append(args, status)
+	}
+	if mineFilter == "true" || mineFilter == "1" {
+		query += " AND e.actor_user_id = ?"
+		args = append(args, actor.UserID)
+	}
+	if delegatedBy != "" {
+		query += " AND e.delegated_by_user_id = ?"
+		args = append(args, delegatedBy)
 	}
 	query += " ORDER BY e.requested_at DESC LIMIT ?"
 	args = append(args, limit)
@@ -700,30 +711,33 @@ func handleListExecutions(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type execution struct {
-		ID             string `json:"id"`
-		ActorUserID    string `json:"actor_user_id"`
-		ActorRole      string `json:"actor_role_at_time"`
-		ExecutionType  string `json:"execution_type"`
-		Status         string `json:"status"`
-		RiskLevel      string `json:"risk_level"`
-		Environment    string `json:"environment"`
-		Reason         string `json:"reason"`
-		CommandPreview string `json:"command_preview"`
-		CommandHash    string `json:"command_hash"`
-		TimeoutSeconds int    `json:"timeout_seconds"`
-		RequestedAt    string `json:"requested_at"`
-		StartedAt      string `json:"started_at"`
-		FinishedAt     string `json:"finished_at"`
-		TargetCount    int    `json:"target_count"`
-		SucceededCount int    `json:"succeeded_count"`
-		FailedCount    int    `json:"failed_count"`
+		ID              string `json:"id"`
+		ActorUserID     string `json:"actor_user_id"`
+		ActorRole       string `json:"actor_role_at_time"`
+		ExecutionType   string `json:"execution_type"`
+		Status          string `json:"status"`
+		RiskLevel       string `json:"risk_level"`
+		Environment     string `json:"environment"`
+		Reason          string `json:"reason"`
+		CommandPreview  string `json:"command_preview"`
+		CommandHash     string `json:"command_hash"`
+		TimeoutSeconds  int    `json:"timeout_seconds"`
+		RequestedAt     string `json:"requested_at"`
+		StartedAt       string `json:"started_at"`
+		FinishedAt      string `json:"finished_at"`
+		TargetCount     int    `json:"target_count"`
+		SucceededCount  int    `json:"succeeded_count"`
+		FailedCount     int    `json:"failed_count"`
+		DelegatedBy     string `json:"delegated_by_user_id"`
+		ApprovalID      string `json:"approval_id"`
 	}
 	var results []execution
 	for rows.Next() {
 		var e execution
 		rows.Scan(&e.ID, &e.ActorUserID, &e.ActorRole, &e.ExecutionType, &e.Status,
 			&e.RiskLevel, &e.Environment, &e.Reason, &e.CommandPreview, &e.CommandHash,
-			&e.TimeoutSeconds, &e.RequestedAt, &e.StartedAt, &e.FinishedAt)
+			&e.TimeoutSeconds, &e.RequestedAt, &e.StartedAt, &e.FinishedAt,
+			&e.DelegatedBy, &e.ApprovalID)
 		dbFrom(r).QueryRowContext(r.Context(),
 			"SELECT COUNT(*), SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END), SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) FROM execution_targets WHERE execution_id = ?",
 			e.ID).Scan(&e.TargetCount, &e.SucceededCount, &e.FailedCount)
@@ -751,15 +765,19 @@ func handleGetExecution(w http.ResponseWriter, r *http.Request, execID string) {
 		StartedAt      string `json:"started_at"`
 		FinishedAt     string `json:"finished_at"`
 		ErrorSummary   string `json:"error_summary"`
+		DelegatedBy    string `json:"delegated_by_user_id"`
+		ApprovalID     string `json:"approval_id"`
 	}
 	err := db.QueryRowContext(r.Context(),
 		`SELECT id, actor_user_id, actor_role_at_time, execution_type, status,
 		risk_level, environment, reason, command_preview, command_hash,
-		timeout_seconds, COALESCE(requested_at,''), COALESCE(started_at,''), COALESCE(finished_at,''), COALESCE(error_summary,'')
+		timeout_seconds, COALESCE(requested_at,''), COALESCE(started_at,''), COALESCE(finished_at,''),
+		COALESCE(error_summary,''), COALESCE(delegated_by_user_id,''), COALESCE(approval_id,'')
 		FROM executions WHERE id = ? AND organisation_id = ?`, execID, actor.OrganisationID,
 	).Scan(&e.ID, &e.ActorUserID, &e.ActorRole, &e.ExecutionType, &e.Status,
 		&e.RiskLevel, &e.Environment, &e.Reason, &e.CommandPreview, &e.CommandHash,
-		&e.TimeoutSeconds, &e.RequestedAt, &e.StartedAt, &e.FinishedAt, &e.ErrorSummary)
+		&e.TimeoutSeconds, &e.RequestedAt, &e.StartedAt, &e.FinishedAt, &e.ErrorSummary,
+		&e.DelegatedBy, &e.ApprovalID)
 	if err != nil {
 		writeJSON(w, 404, map[string]string{"error": "execution not found"})
 		return
@@ -771,13 +789,15 @@ func handleGetExecution(w http.ResponseWriter, r *http.Request, execID string) {
 		RunnerID   string `json:"runner_id"`
 		Status     string `json:"status"`
 		ExitCode   int    `json:"exit_code"`
+		Stdout     string `json:"stdout"`
+		Stderr     string `json:"stderr"`
 		StartedAt  string `json:"started_at"`
 		FinishedAt string `json:"finished_at"`
 		Error      string `json:"error_summary"`
 	}
 	rows, err := db.QueryContext(r.Context(),
 		`SELECT id, server_id, COALESCE(runner_id,''), status, COALESCE(exit_code,0),
-		COALESCE(started_at,''), COALESCE(finished_at,''), COALESCE(error_summary,'')
+		stdout, stderr, COALESCE(started_at,''), COALESCE(finished_at,''), COALESCE(error_summary,'')
 		FROM execution_targets WHERE execution_id = ? ORDER BY server_id`, execID)
 	var targets []targetResult
 	if err == nil {
@@ -785,7 +805,7 @@ func handleGetExecution(w http.ResponseWriter, r *http.Request, execID string) {
 		for rows.Next() {
 			var t targetResult
 			rows.Scan(&t.ID, &t.ServerID, &t.RunnerID, &t.Status,
-				&t.ExitCode, &t.StartedAt, &t.FinishedAt, &t.Error)
+				&t.ExitCode, &t.Stdout, &t.Stderr, &t.StartedAt, &t.FinishedAt, &t.Error)
 			targets = append(targets, t)
 		}
 	}
@@ -798,9 +818,10 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 	db := dbFrom(r)
 
 	var req struct {
-		Target  string `json:"target"`
-		Command string `json:"command"`
-		Reason  string `json:"reason"`
+		Target       string `json:"target"`
+		Command      string `json:"command"`
+		Reason       string `json:"reason"`
+		DelegatedBy  string `json:"delegated_by_user_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
@@ -829,9 +850,9 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 	execID := "exe_" + shortID()
 
 	_, err := db.ExecContext(r.Context(),
-		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, execution_type, status, environment, risk_level, command_preview, command_hash, reason, timeout_seconds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		execID, actor.OrganisationID, actor.UserID, actor.Role, "raw_command", "queued", env, string(risk), req.Command, hashCmd(req.Command), req.Reason, 300,
+		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, delegated_by_user_id, execution_type, status, environment, risk_level, command_preview, command_hash, reason, timeout_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		execID, actor.OrganisationID, actor.UserID, actor.Role, sqlNullString(req.DelegatedBy), "raw_command", "queued", env, string(risk), req.Command, hashCmd(req.Command), req.Reason, 300,
 	)
 	if err != nil {
 		slog.Error("execution create error", "error", err)
@@ -1064,8 +1085,8 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 		return
 	}
 
-	db.ExecContext(ctx, "UPDATE execution_targets SET status = ?, exit_code = ?, error_summary = ?, finished_at = datetime('now') WHERE execution_id = ? AND status = 'running'",
-		status, req.ExitCode, sqlNullString(req.Error), req.ExecutionID)
+	db.ExecContext(ctx, "UPDATE execution_targets SET status = ?, exit_code = ?, error_summary = ?, stdout = ?, stderr = ?, finished_at = datetime('now') WHERE execution_id = ? AND status = 'running'",
+		status, req.ExitCode, sqlNullString(req.Error), req.Stdout, req.Stderr, req.ExecutionID)
 
 	var orgID string
 	db.QueryRowContext(ctx, "SELECT organisation_id FROM executions WHERE id = ?", req.ExecutionID).Scan(&orgID)

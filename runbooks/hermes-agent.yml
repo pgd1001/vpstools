@@ -1,0 +1,139 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: hermes-agent
+  title: Hermes Monitoring Agent
+  description: |
+    Installs and registers the Hermes monitoring agent. Sets up systemd
+    service, heartbeat health checks, metric collection, and log forwarding.
+    Connects to the Hermes control plane for centralized monitoring.
+  risk: medium
+  tags: ["provisioning", "monitoring", "agent", "observability"]
+  version: 1
+spec:
+  parameters:
+    - name: control_plane_url
+      type: string
+      default: "https://hermes.example.com"
+      required: true
+      description: Hermes control plane API URL
+    - name: agent_token
+      type: string
+      default: ""
+      required: true
+      description: Agent registration token from control plane
+    - name: agent_version
+      type: string
+      default: "latest"
+      description: Hermes agent release version
+    - name: agent_port
+      type: string
+      default: "9100"
+      description: Agent metrics HTTP port
+    - name: server_role
+      type: string
+      default: "worker"
+      description: Server role label (worker, gateway, database, etc.)
+    - name: environment
+      type: string
+      default: "production"
+      description: Environment label for metrics
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 180
+    concurrency: 5
+    command: |
+      set -euo pipefail
+
+      CONTROL_PLANE="${CONTROL_PLANE_URL:?control_plane_url is required}"
+      AGENT_TOKEN="${AGENT_TOKEN:?agent_token is required}"
+      AGENT_VER="${AGENT_VERSION:-latest}"
+      AGENT_PORT="${AGENT_PORT:-9100}"
+      ROLE="${SERVER_ROLE:-worker}"
+      ENV_LABEL="${ENVIRONMENT:-production}"
+
+      HOSTNAME="$(hostname)"
+      AGENT_DIR="/opt/hermes-agent"
+      BIN_DIR="/usr/local/bin"
+      DATA_DIR="/var/lib/hermes-agent"
+      LOG_DIR="/var/log/hermes-agent"
+
+      echo "=== [1/4] Create directories ==="
+      mkdir -p "$AGENT_DIR" "$DATA_DIR" "$LOG_DIR"
+
+      echo "=== [2/4] Install agent binary ==="
+      if [ "$AGENT_VER" = "latest" ]; then
+        DOWNLOAD_URL="$CONTROL_PLANE/api/v1/agents/latest/linux-amd64"
+      else
+        DOWNLOAD_URL="$CONTROL_PLANE/api/v1/agents/$AGENT_VER/linux-amd64"
+      fi
+
+      curl -fsSL -H "Authorization: Bearer $AGENT_TOKEN" \
+        "$DOWNLOAD_URL" -o "$BIN_DIR/hermes-agent"
+      chmod +x "$BIN_DIR/hermes-agent"
+
+      echo "=== [3/4] Configure agent ==="
+      cat > "$AGENT_DIR/config.yml" << CONFEOF
+      ---
+      agent:
+        hostname: $HOSTNAME
+        port: $AGENT_PORT
+        labels:
+          role: $ROLE
+          environment: $ENV_LABEL
+        heartbeat_interval: 30s
+        metrics_enabled: true
+        log_collection: true
+      control_plane:
+        url: $CONTROL_PLANE
+        token: $AGENT_TOKEN
+        registration_endpoint: /api/v1/agents/register
+        heartbeat_endpoint: /api/v1/agents/heartbeat
+      data_dir: $DATA_DIR
+      log_dir: $LOG_DIR
+      CONFEOF
+
+      echo "=== [4/4] Install systemd service ==="
+      cat > /etc/systemd/system/hermes-agent.service << SVDEOF
+      [Unit]
+      Description=Hermes Monitoring Agent
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      ExecStart=$BIN_DIR/hermes-agent --config $AGENT_DIR/config.yml
+      Restart=always
+      RestartSec=10
+      User=root
+      Group=root
+      WorkingDirectory=$AGENT_DIR
+      AmbientCapabilities=CAP_NET_BIND_SERVICE
+      ReadWritePaths=$DATA_DIR $LOG_DIR
+      LimitNOFILE=65536
+
+      [Install]
+      WantedBy=multi-user.target
+      SVDEOF
+
+      systemctl daemon-reload
+      systemctl enable hermes-agent
+      systemctl restart hermes-agent
+
+      sleep 3
+      if systemctl is-active --quiet hermes-agent; then
+        echo "=== HERMES AGENT INSTALLED & RUNNING ==="
+      else
+        echo "WARNING: Agent installed but not running. Check: journalctl -u hermes-agent"
+      fi
+      echo "Hostname: $HOSTNAME"
+      echo "Role:     $ROLE"
+      echo "Config:   $AGENT_DIR/config.yml"
+  output:
+    store: inline
+    redact: ["${AGENT_TOKEN}"]

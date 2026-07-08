@@ -1,0 +1,139 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: base-hardened-ubuntu
+  title: Hardened Ubuntu Server
+  description: |
+    Full server baseline: unattended upgrades, UFW firewall, SSH hardening,
+    Fail2Ban, sysctl hardening, swap, admin tools, and security scanning.
+    Safe to re-run idempotently on any Ubuntu 22.04+ system.
+  risk: high
+  tags: ["provisioning", "security", "ubuntu", "hardening", "baseline"]
+  version: 1
+spec:
+  parameters:
+    - name: ssh_port
+      type: string
+      default: "22"
+      description: SSH port for UFW rule and SSHd config
+    - name: timezone
+      type: string
+      default: UTC
+      description: System timezone
+    - name: swap_size_mb
+      type: string
+      default: "2048"
+      description: Swap file size in MB
+  targets:
+    allowedTags:
+      os: ubuntu
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: true
+    environment: production
+    requiredRole: senior_engineer
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 600
+    concurrency: 1
+    command: |
+      set -euo pipefail
+
+      SSH_PORT="${SSH_PORT:-22}"
+      TZ="${TZ:-UTC}"
+      SWAP_MB="${SWAP_MB:-2048}"
+
+      echo "=== [1/8] System update & packages ==="
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get upgrade -y -qq
+      apt-get install -y -qq \
+        ufw fail2ban unattended-upgrades apt-listchanges \
+        curl wget vim htop net-tools nmap \
+        gnupg software-properties-common ca-certificates \
+        apt-transport-https tmux rsync git tree jq \
+        logwatch rkhunter chkrootkit
+
+      echo "=== [2/8] Timezone ==="
+      timedatectl set-timezone "$TZ" 2>/dev/null || ln -sf "/usr/share/zoneinfo/$TZ" /etc/localtime
+
+      echo "=== [3/8] Swap ==="
+      if [ ! -f /swapfile ]; then
+        fallocate -l "${SWAP_MB}M" /swapfile
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+        grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+      fi
+
+      echo "=== [4/8] UFW firewall ==="
+      ufw --force reset
+      ufw default deny incoming
+      ufw default allow outgoing
+      ufw allow "$SSH_PORT"/tcp comment 'SSH'
+      ufw --force enable
+
+      echo "=== [5/8] SSH hardening ==="
+      sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+      sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+      sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+      sed -i 's/^#*MaxAuthTries.*/MaxAuthTries 3/' /etc/ssh/sshd_config
+      sed -i 's/^#*ClientAliveInterval.*/ClientAliveInterval 300/' /etc/ssh/sshd_config
+      sed -i 's/^#*ClientAliveCountMax.*/ClientAliveCountMax 2/' /etc/ssh/sshd_config
+      if [ "$SSH_PORT" != "22" ]; then
+        grep -q "^Port $SSH_PORT" /etc/ssh/sshd_config || echo "Port $SSH_PORT" >> /etc/ssh/sshd_config
+      fi
+      systemctl restart sshd
+
+      echo "=== [6/8] Fail2Ban ==="
+      cat > /etc/fail2ban/jail.local << F2BEOF
+      [DEFAULT]
+      bantime = 3600
+      findtime = 600
+      maxretry = 5
+      [sshd]
+      enabled = true
+      port = $SSH_PORT
+      F2BEOF
+      systemctl restart fail2ban
+
+      echo "=== [7/8] Unattended upgrades ==="
+      cat > /etc/apt/apt.conf.d/20auto-upgrades << UAEOF
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Download-Upgradeable-Packages "1";
+      APT::Periodic::AutocleanInterval "7";
+      APT::Periodic::Unattended-Upgrade "1";
+      UAEOF
+
+      echo "=== [8/8] Sysctl hardening ==="
+      cat > /etc/sysctl.d/99-hardening.conf << SYSCTLEOF
+      net.ipv4.tcp_syncookies = 1
+      net.ipv4.conf.all.rp_filter = 1
+      net.ipv4.conf.default.rp_filter = 1
+      net.ipv4.conf.all.accept_source_route = 0
+      net.ipv4.conf.default.accept_source_route = 0
+      net.ipv4.conf.all.accept_redirects = 0
+      net.ipv4.conf.default.accept_redirects = 0
+      net.ipv4.conf.all.secure_redirects = 0
+      net.ipv4.conf.default.secure_redirects = 0
+      net.ipv6.conf.all.accept_redirects = 0
+      net.ipv6.conf.default.accept_redirects = 0
+      net.ipv4.conf.all.send_redirects = 0
+      net.ipv4.conf.default.send_redirects = 0
+      net.ipv4.icmp_echo_ignore_broadcasts = 1
+      net.ipv4.icmp_ignore_bogus_error_responses = 1
+      net.ipv4.conf.all.log_martians = 1
+      net.ipv4.conf.default.log_martians = 1
+      kernel.randomize_va_space = 2
+      SYSCTLEOF
+      sysctl -p /etc/sysctl.d/99-hardening.conf
+
+      if [ -x /usr/bin/rkhunter ]; then
+        rkhunter --propupd 2>/dev/null || true
+      fi
+
+      echo "=== BASE HARDENING COMPLETE ==="
+  output:
+    store: inline
+    redact: []

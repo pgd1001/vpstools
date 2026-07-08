@@ -1,0 +1,138 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: swap-manage
+  title: Swap Management
+  description: |
+    Creates, resizes, or removes swap space. Reports current swap
+    usage and recommends size based on system RAM. Safe for systems
+    without swap or with existing swap. Idempotent -- will not
+    shrink swap without `force_resize=true`.
+  risk: high
+  tags: ["recovery", "swap", "memory", "performance", "system"]
+  version: 1
+spec:
+  parameters:
+    - name: action
+      type: string
+      default: "report"
+      description: "Action: report, create, resize, remove"
+    - name: swap_size_mb
+      type: string
+      default: "2048"
+      description: Swap file size in MB
+    - name: swap_path
+      type: string
+      default: "/swapfile"
+      description: Swap file path
+    - name: force_resize
+      type: string
+      default: "false"
+      description: Allow shrinking swap (true/false)
+    - name: healthcheck_url
+      type: string
+      default: "http://localhost/health"
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Required reason for this action
+    - name: schedule
+      type: string
+      default: "on-demand"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: true
+    requiredRoles: ["admin", "senior_engineer"]
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 120
+    concurrency: 5
+    command: |
+      set -euo pipefail
+
+      ACTION="${ACTION:-report}"
+      SWAP_SIZE="${SWAP_SIZE_MB:-2048}"
+      SWAP_PATH="${SWAP_PATH:-/swapfile}"
+      FORCE="${FORCE_RESIZE:-false}"
+
+      echo "=========================================="
+      echo "  SWAP MANAGEMENT"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Action: $ACTION"
+      echo "  Host: $(hostname)"
+      echo "=========================================="
+      echo ""
+
+      echo "--- CURRENT SWAP STATE ---"
+      swapon --show 2>/dev/null || swapon -s 2>/dev/null || echo "(no active swap)"
+      echo ""
+
+      echo "--- MEMORY CONTEXT ---"
+      total_ram=$(awk '/MemTotal/ {printf "%.0f", $2/1024}' /proc/meminfo)
+      recommended=$((total_ram > 8192 ? 4096 : total_ram))
+      echo "Total RAM:  ${total_ram}MB"
+      echo "Swap size:  ${SWAP_SIZE}MB"
+      echo "Recommended: ${recommended}MB (for ${total_ram}MB RAM)"
+      echo ""
+
+      case "$ACTION" in
+        report)
+          echo "Report mode. No changes made."
+          free -h
+          ;;
+        create|resize)
+          if [ -f "$SWAP_PATH" ]; then
+            current_size=$(stat --format=%s "$SWAP_PATH" 2>/dev/null || echo 0)
+            current_mb=$((current_size / 1024 / 1024))
+            echo "Existing swap file: ${current_mb}MB"
+
+            if [ "$current_mb" -ge "$SWAP_SIZE" ] && [ "$FORCE" != "true" ]; then
+              echo "Current swap (${current_mb}MB) >= requested (${SWAP_SIZE}MB)."
+              echo "Use force_resize=true or smaller --swap_size_mb to override."
+              exit 0
+            fi
+
+            echo "Disabling old swap..."
+            swapoff "$SWAP_PATH" 2>/dev/null || true
+            rm -f "$SWAP_PATH"
+          fi
+
+          echo "Creating ${SWAP_SIZE}MB swap at $SWAP_PATH..."
+          fallocate -l "${SWAP_SIZE}M" "$SWAP_PATH" || dd if=/dev/zero of="$SWAP_PATH" bs=1M count="$SWAP_SIZE" status=progress
+          chmod 600 "$SWAP_PATH"
+          mkswap "$SWAP_PATH"
+          swapon "$SWAP_PATH"
+          grep -q "$SWAP_PATH" /etc/fstab || echo "$SWAP_PATH none swap sw 0 0" >> /etc/fstab
+          echo "Swap created and activated."
+          echo ""
+          free -h
+          ;;
+        remove)
+          if [ -f "$SWAP_PATH" ]; then
+            echo "Disabling and removing $SWAP_PATH..."
+            swapoff "$SWAP_PATH" 2>/dev/null || true
+            rm -f "$SWAP_PATH"
+            sed -i "\|$SWAP_PATH|d" /etc/fstab 2>/dev/null || true
+            echo "Swap removed."
+          else
+            echo "No swap file found at $SWAP_PATH."
+          fi
+          echo ""
+          free -h
+          ;;
+        *)
+          echo "Unknown action: $ACTION"
+          echo "Valid actions: report, create, resize, remove"
+          exit 1
+          ;;
+      esac
+
+      echo ""
+      echo "Swap management complete."
+  output:
+    store: inline
+    redact: []

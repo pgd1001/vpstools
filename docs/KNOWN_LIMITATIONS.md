@@ -24,6 +24,7 @@
 
 ## Runbooks & Approvals
 
+- **41 runbook templates** included across diagnostics (7), maintenance (6), security & performance (7), recovery (4), provisioning (7), AI stack (6), and examples (4).
 - **Flat YAML.** Runbooks are single-command with parameter substitution. No branching, no multi-step workflows.
 - **No Git sync.** Runbooks live in the database only. Git-backed runbooks planned.
 - **Approval expiry is 1 hour hardcoded.** Configurable expiry deferred.
@@ -39,6 +40,7 @@
 ## CLI & TUI
 
 - **TUI is read-only.** The TUI displays data but does not support in-screen operations (approve/deny works in web console).
+- **Runbook search is client-side only.** The TUI runbook list supports `/` key filtering on name/title/description/risk. The API supports `?search=` query for server-side matching.
 - **No shell completion.** Autocomplete not generated.
 - **Windows CRLF warnings.** Cosmetic git warnings, no functional impact.
 
@@ -66,4 +68,4 @@ Despite these limitations, the MVP delivers the core value proposition:
 - Require reasons for production actions
 - Require approvals for high-risk production runbooks
 - Full audit trail of all sensitive actions
-- CLI, TUI, and web console access
+- CLI, TUI (with `/` runbook search), and web console access

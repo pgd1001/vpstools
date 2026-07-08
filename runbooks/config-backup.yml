@@ -1,0 +1,150 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: config-backup
+  title: Configuration Backup
+  description: |
+    Creates a timestamped tar.gz backup of /etc and common config
+    directories, uploads to S3-compatible storage (optional), and
+    reports backup size. Retains last N local backups. Config-only
+    -- no database dumps. Safe, idempotent, low risk.
+  risk: low
+  tags: ["maintenance", "backup", "configuration", "restore"]
+  version: 1
+spec:
+  parameters:
+    - name: backup_dirs
+      type: string
+      default: "/etc,/var/lib/nginx/certs,/var/lib/docker/volumes/*/_data/*.env"
+      description: Comma-separated dirs to back up
+    - name: retain_local_count
+      type: string
+      default: "7"
+      description: Number of backups to keep locally
+    - name: s3_bucket
+      type: string
+      default: ""
+      description: S3 bucket URL (empty = local only)
+    - name: s3_access_key
+      type: string
+      default: ""
+      description: S3 access key
+    - name: s3_secret_key
+      type: string
+      default: ""
+      description: S3 secret key
+    - name: healthcheck_url
+      type: string
+      default: "http://localhost/health"
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "daily"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 180
+    concurrency: 3
+    command: |
+      set -euo pipefail
+
+      DIRS="${BACKUP_DIRS:-/etc}"
+      RETAIN="${RETAIN_LOCAL_COUNT:-7}"
+      BACKUP_ROOT="/var/backups/config"
+      TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
+      BACKUP_FILE="${BACKUP_ROOT}/config-${HOSTNAME}-${TIMESTAMP}.tar.gz"
+      S3_BUCKET="${S3_BUCKET:-}"
+
+      echo "=========================================="
+      echo "  CONFIGURATION BACKUP"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Host: $(hostname)"
+      echo "=========================================="
+      echo ""
+
+      mkdir -p "$BACKUP_ROOT"
+
+      echo "--- BUILDING INCLUDE LIST ---"
+      INCLUDE_FILE=$(mktemp)
+      IFS=',' read -ra PATHS <<< "$DIRS"
+      for p in "${PATHS[@]}"; do
+        p=$(echo "$p" | xargs)
+        if [ -d "$p" ] || [ -f "$p" ]; then
+          echo "$p" >> "$INCLUDE_FILE"
+          echo "  + $p"
+        else
+          echo "  - $p (not found, skipping)"
+        fi
+      done
+      echo ""
+
+      TOTAL_SIZE=0
+      while IFS= read -r p; do
+        if [ -d "$p" ]; then
+          sz=$(du -sm "$p" 2>/dev/null | awk '{print $1}' || echo 0)
+        elif [ -f "$p" ]; then
+          sz=$(du -sm "$(dirname "$p")" 2>/dev/null | awk '{print $1}' || echo 0)
+        fi
+        TOTAL_SIZE=$((TOTAL_SIZE + sz))
+      done < "$INCLUDE_FILE"
+
+      echo "Estimated uncompressed size: ${TOTAL_SIZE}M"
+
+      if [ "$TOTAL_SIZE" -gt 5120 ]; then
+        echo "WARNING: Backup set is large (${TOTAL_SIZE}M). Consider narrower paths."
+      fi
+
+      echo ""
+
+      echo "--- CREATING BACKUP ---"
+      tar -czf "$BACKUP_FILE" -T "$INCLUDE_FILE" 2>&1
+      rm -f "$INCLUDE_FILE"
+
+      backup_size=$(du -h "$BACKUP_FILE" 2>/dev/null | awk '{print $1}')
+      echo "Backup created: $BACKUP_FILE"
+      echo "Size:           $backup_size"
+
+      echo ""
+
+      echo "--- ROTATION (keep last $RETAIN) ---"
+      count=$(ls -1 "$BACKUP_ROOT"/config-*.tar.gz 2>/dev/null | wc -l)
+      if [ "$count" -gt "$RETAIN" ]; then
+        to_remove=$((count - RETAIN))
+        ls -1t "$BACKUP_ROOT"/config-*.tar.gz 2>/dev/null | tail -"$to_remove" | while IFS= read -r old; do
+          rm -f "$old"
+          echo "  Removed: $(basename "$old")"
+        done
+      else
+        echo "  $count backups exist (max $RETAIN)"
+      fi
+
+      echo ""
+
+      echo "--- S3 UPLOAD ---"
+      if [ -n "$S3_BUCKET" ]; then
+        if command -v aws &>/dev/null; then
+          aws s3 cp "$BACKUP_FILE" "${S3_BUCKET}/config-backups/" --only-show-errors 2>&1 || echo "S3 upload failed"
+          echo "Uploaded to $S3_BUCKET"
+        elif command -v s3cmd &>/dev/null; then
+          s3cmd put "$BACKUP_FILE" "${S3_BUCKET}/config-backups/" 2>&1 || echo "S3 upload via s3cmd failed"
+        else
+          echo "No S3 client found (aws or s3cmd). Skipping upload."
+        fi
+      else
+        echo "No S3 bucket configured. Local backup only."
+      fi
+
+      echo ""
+      echo "Backup complete: $BACKUP_FILE ($backup_size)"
+  output:
+    store: inline
+    redact: ["s3_access_key", "s3_secret_key"]

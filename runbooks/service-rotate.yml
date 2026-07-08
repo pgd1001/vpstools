@@ -1,0 +1,151 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: service-rotate
+  title: Service Rolling Restart
+  description: |
+    Performs a rolling restart of specified systemd services with
+    health checks between each restart. Waits for each service to
+    come back healthy before proceeding. Supports load-balanced groups
+    for zero-downtime rotation. High-risk -- requires senior approval.
+  risk: high
+  tags: ["maintenance", "service", "restart", "rolling", "health"]
+  version: 1
+spec:
+  parameters:
+    - name: services
+      type: string
+      default: "nginx"
+      description: Comma-separated service names to restart
+    - name: restart_delay_seconds
+      type: string
+      default: "10"
+      description: Delay between service restarts
+    - name: healthcheck_timeout_seconds
+      type: string
+      default: "30"
+      description: Max seconds to wait for health after each restart
+    - name: healthcheck_url
+      type: string
+      default: "http://localhost/health"
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Required reason for this action
+    - name: schedule
+      type: string
+      default: "monthly"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["staging", "production"]
+  approval:
+    required: true
+    requiredRoles: ["admin", "senior_engineer"]
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 300
+    concurrency: 1
+    command: |
+      set -euo pipefail
+
+      SERVICES="${SERVICES:-nginx}"
+      DELAY="${RESTART_DELAY_SECONDS:-10}"
+      TIMEOUT="${HEALTHCHECK_TIMEOUT_SECONDS:-30}"
+      HEALTHCHECK="${HEALTHCHECK_URL:-http://localhost/health}"
+
+      echo "=========================================="
+      echo "  SERVICE ROLLING RESTART"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Host: $(hostname)"
+      echo "=========================================="
+      echo ""
+
+      IFS=',' read -ra SVC_LIST <<< "$SERVICES"
+      TOTAL=${#SVC_LIST[@]}
+      SUCCESS=0
+      FAILED=0
+
+      echo "Services to restart: $TOTAL"
+      echo "Delay between:       ${DELAY}s"
+      echo "Health timeout:      ${TIMEOUT}s"
+      echo ""
+
+      for svc in "${SVC_LIST[@]}"; do
+        svc=$(echo "$svc" | xargs)
+        idx=$((idx + 1))
+
+        echo "--- [$idx/$TOTAL] $svc ---"
+
+        # Check if service exists
+        if ! systemctl list-units --type=service --all 2>/dev/null | grep -q "$svc"; then
+          echo "  SKIP: Service $svc not found"
+          continue
+        fi
+
+        # Pre-check health
+        echo "  Pre-restart health check..."
+        pre_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 -m 5 "$HEALTHCHECK" 2>/dev/null || echo "SKIP")
+        echo "  Pre: HTTP $pre_code"
+
+        # Restart
+        echo "  Restarting..."
+        systemctl restart "$svc" 2>&1 || true
+
+        # Wait for service to be active
+        sleep 2
+        for attempt in $(seq 1 "$TIMEOUT"); do
+          active=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
+          if [ "$active" = "active" ]; then
+            echo "  Service state: active (after ${attempt}s)"
+            break
+          fi
+          sleep 1
+        done
+
+        # Post-restart health check
+        echo "  Post-restart health check..."
+        healthy=false
+        for attempt in $(seq 1 "$TIMEOUT"); do
+          code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 -m 5 "$HEALTHCHECK" 2>/dev/null || echo "FAIL")
+          first_char=$(echo "$code" | cut -c1)
+          if [ "$first_char" = "2" ] || [ "$first_char" = "3" ]; then
+            echo "  Health: HTTP $code (after ${attempt}s)"
+            healthy=true
+            SUCCESS=$((SUCCESS + 1))
+            break
+          fi
+          sleep 2
+        done
+
+        if [ "$healthy" = false ]; then
+          FAILED=$((FAILED + 1))
+          echo "  WARNING: Health check failed for $svc"
+          systemctl status "$svc" --no-pager 2>/dev/null | head -10 || true
+        fi
+
+        echo ""
+
+        # Inter-service delay
+        if [ "$idx" -lt "$TOTAL" ]; then
+          echo "  Waiting ${DELAY}s before next service..."
+          sleep "$DELAY"
+        fi
+      done
+
+      echo "--- SUMMARY ---"
+      echo "Total:  $TOTAL"
+      echo "OK:     $SUCCESS"
+      echo "Failed: $FAILED"
+
+      if [ "$FAILED" -gt 0 ]; then
+        echo "!! ACTION REQUIRED: $FAILED service(s) failed health check !!"
+        exit 1
+      fi
+
+      echo ""
+      echo "Rolling restart complete."
+  output:
+    store: inline
+    redact: []

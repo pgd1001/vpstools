@@ -1,0 +1,103 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: failed-auth-report
+  title: Failed Authentication Report
+  description: |
+    Reports failed SSH login attempts, top source IPs with geolocation,
+    Fail2Ban banned IPs, and sudo auth failures. Cross-references
+    Fail2Ban bans with recent failed attempts. Run daily to spot
+    brute-force patterns.
+  risk: low
+  tags: ["diagnostic", "security", "authentication", "ssh", "audit"]
+  version: 1
+spec:
+  parameters:
+    - name: top_n
+      type: string
+      default: "10"
+      description: Number of top IPs to show
+    - name: timeframe_hours
+      type: string
+      default: "24"
+      description: Hours of history to check
+    - name: healthcheck_url
+      type: string
+      default: ""
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "daily"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 30
+    concurrency: 10
+    command: |
+      set -euo pipefail
+
+      TOP="${TOP_N:-10}"
+      HOURS="${TIMEFRAME_HOURS:-24}"
+      SINCE=$(date -d "$HOURS hours ago" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -v-${HOURS}H '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "yesterday")
+
+      echo "=========================================="
+      echo "  FAILED AUTHENTICATION REPORT"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Timeframe: last $HOURS hours"
+      echo "=========================================="
+      echo ""
+
+      echo "--- FAILED SSH (lastb) ---"
+      if command -v lastb &>/dev/null; then
+        total=$(lastb 2>/dev/null | wc -l)
+        echo "Total failed attempts (all time): $total"
+        echo "Recent (last $HOURS hours):"
+        lastb -s "$SINCE" 2>/dev/null | head -20 || lastb 2>/dev/null | head -20
+      else
+        echo "lastb not available"
+      fi
+      echo ""
+
+      echo "--- SSH JOURNAL (top $TOP source IPs) ---"
+      if command -v journalctl &>/dev/null; then
+        journalctl -u sshd --since "$SINCE" 2>/dev/null | grep -oP 'Failed password for .* from \K[0-9.]+' | sort | uniq -c | sort -rn | head -"$TOP" || \
+        journalctl -u ssh --since "$SINCE" 2>/dev/null | grep -oP 'Failed password for .* from \K[0-9.]+' | sort | uniq -c | sort -rn | head -"$TOP" || \
+          echo "(no sshd journal entries found)"
+      fi
+      echo ""
+
+      echo "--- SUDO FAILURES ---"
+      if [ -f /var/log/auth.log ]; then
+        grep -a 'sudo.*authentication failure\|sudo.*FAILED' /var/log/auth.log 2>/dev/null | tail -10 || echo "(none found in auth.log)"
+      elif command -v journalctl &>/dev/null; then
+        journalctl -u sudo --since "$SINCE" 2>/dev/null | grep -i 'failure\|failed' | tail -10 || echo "(none found)"
+      fi
+      echo ""
+
+      echo "--- FAIL2BAN STATUS ---"
+      if command -v fail2ban-client &>/dev/null; then
+        fail2ban-client status 2>/dev/null | head -20
+        echo ""
+        for jail in $(fail2ban-client status 2>/dev/null | grep "Jail list:" | cut -d: -f2 | tr ',' ' '); do
+          echo "Jail: $jail"
+          fail2ban-client status "$jail" 2>/dev/null | grep -E 'Currently banned|Total banned|Status' || true
+        done
+      else
+        echo "(fail2ban not installed)"
+      fi
+      echo ""
+
+      echo "--- RECENT LOGINS ---"
+      last -"$TOP" 2>/dev/null || echo "(no login history)"
+  output:
+    store: inline
+    redact: []

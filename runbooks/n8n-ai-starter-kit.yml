@@ -1,0 +1,116 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: n8n-ai-starter-kit
+  title: n8n Self-Hosted AI Starter Kit
+  description: |
+    Official n8n AI Starter Kit: low-code AI workflow automation with
+    n8n, Ollama (local LLMs), Qdrant (vector store), and PostgreSQL.
+    GPU acceleration auto-detected (NVIDIA/AMD/Apple Silicon).
+    Clone from https://github.com/n8n-io/self-hosted-ai-starter-kit.
+  risk: medium
+  tags: ["provisioning", "ai", "n8n", "automation", "workflow", "ollama", "vector"]
+  version: 1
+spec:
+  parameters:
+    - name: domain
+      type: string
+      default: ""
+      description: Public domain for n8n (empty = localhost only)
+    - name: n8n_port
+      type: string
+      default: "5678"
+      description: n8n web UI port
+    - name: postgres_password
+      type: string
+      default: ""
+      description: PostgreSQL password (auto-generated if empty)
+    - name: encryption_key
+      type: string
+      default: ""
+      description: n8n encryption key (auto-generated if empty)
+  targets:
+    allowedTags:
+      os: ubuntu
+    allowedEnvironments: ["development", "staging"]
+  approval:
+    required: true
+    environment: production
+    requiredRole: senior_engineer
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 900
+    concurrency: 1
+    command: |
+      set -euo pipefail
+
+      DOMAIN="${DOMAIN:-}"
+      N8N_PORT="${N8N_PORT:-5678}"
+      PG_PASS="${POSTGRES_PASSWORD:-$(openssl rand -base64 24)}"
+      ENC_KEY="${ENCRYPTION_KEY:-$(openssl rand -hex 24)}"
+      JWT_SECRET="$(openssl rand -hex 24)"
+      INSTALL_DIR="/opt/n8n-ai-starter"
+
+      echo "=== [1/4] System deps & Docker ==="
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq curl git ca-certificates ufw
+
+      if ! command -v docker &>/dev/null; then
+        curl -fsSL https://get.docker.com | bash
+      fi
+      systemctl enable --now docker
+
+      echo "=== [2/4] Clone AI Starter Kit ==="
+      if [ -d "$INSTALL_DIR" ]; then
+        cd "$INSTALL_DIR" && git pull
+      else
+        git clone https://github.com/n8n-io/self-hosted-ai-starter-kit.git "$INSTALL_DIR"
+      fi
+      cd "$INSTALL_DIR"
+
+      echo "=== [3/4] Configure .env ==="
+      cp -n .env.example .env 2>/dev/null || true
+      cat > .env << ENVEOF
+      POSTGRES_USER=n8n
+      POSTGRES_PASSWORD=$PG_PASS
+      POSTGRES_DB=n8n
+      N8N_ENCRYPTION_KEY=$ENC_KEY
+      N8N_USER_MANAGEMENT_JWT_SECRET=$JWT_SECRET
+      N8N_HOST=${DOMAIN:-localhost}
+      N8N_PORT=$N8N_PORT
+      N8N_PROTOCOL=${DOMAIN:+https}${DOMAIN:-http}
+      OLLAMA_HOST=ollama:11434
+      QDRANT_HOST=qdrant:6333
+      ENVEOF
+
+      echo "=== [4/4] Deploy with Docker Compose ==="
+      if lspci 2>/dev/null | grep -qi nvidia; then
+        PROFILE="--profile gpu-nvidia"
+      elif lspci 2>/dev/null | grep -qi "advanced micro devices"; then
+        PROFILE="--profile gpu-amd"
+      else
+        PROFILE="--profile cpu"
+      fi
+
+      docker compose $PROFILE pull
+      docker compose $PROFILE up -d
+
+      echo "--- Pulling default model ---"
+      docker exec ollama ollama pull llama3.2 2>/dev/null || true
+
+      echo ""
+      echo "=== N8N AI STARTER KIT READY ==="
+      echo "n8n:         http://$(hostname -I | awk '{print $1}'):$N8N_PORT"
+      echo "Ollama:      http://$(hostname -I | awk '{print $1}'):11434"
+      echo "Qdrant:      http://$(hostname -I | awk '{print $1}'):6333"
+      echo "Directory:   $INSTALL_DIR"
+      echo ""
+      echo "First run:   open http://localhost:$N8N_PORT in browser"
+      echo "Workflows:   http://localhost:$N8N_PORT/workflow/srOnR8PAY3u4RSwb"
+      echo ""
+      echo "GPU profile: ${PROFILE#--profile }"
+  output:
+    store: inline
+    redact: ["${PG_PASS}", "${ENC_KEY}", "${JWT_SECRET}"]

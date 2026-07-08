@@ -1,0 +1,117 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: log-cleanup
+  title: Log File Rotation and Cleanup
+  description: |
+    Rotates logs using logrotate, prunes journald logs older than
+    N days, clears archived journal, and reports reclaimed space.
+    Will not delete logs newer than the retention window. Safe to
+    re-run -- idempotent on journald, stateless on logrotate.
+  risk: medium
+  tags: ["maintenance", "logging", "disk", "journald", "logrotate"]
+  version: 1
+spec:
+  parameters:
+    - name: journal_retention_days
+      type: string
+      default: "14"
+      description: Keep journald logs for N days
+    - name: log_dir_size_warn_mb
+      type: string
+      default: "500"
+      description: Warn if /var/log exceeds this MB
+    - name: healthcheck_url
+      type: string
+      default: "http://localhost/health"
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "weekly"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: true
+    requiredRoles: ["admin", "senior_engineer"]
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 60
+    concurrency: 5
+    command: |
+      set -euo pipefail
+
+      JOURNAL_DAYS="${JOURNAL_RETENTION_DAYS:-14}"
+      WARN_MB="${LOG_DIR_SIZE_WARN_MB:-500}"
+      HEALTHCHECK="${HEALTHCHECK_URL:-http://localhost/health}"
+
+      echo "=========================================="
+      echo "  LOG FILE ROTATION AND CLEANUP"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Journal retention: $JOURNAL_DAYS days"
+      echo "=========================================="
+      echo ""
+
+      echo "--- /var/log SIZE BEFORE ---"
+      log_size_mb=$(du -sm /var/log 2>/dev/null | awk '{print $1}' || echo 0)
+      echo "${log_size_mb}M"
+
+      echo ""
+      echo "--- LOGROTATE ---"
+      if command -v logrotate &>/dev/null; then
+        logrotate -f /etc/logrotate.conf 2>&1 || logrotate /etc/logrotate.conf 2>&1 || echo "logrotate default config failed (non-fatal)"
+        echo "Logrotate run complete."
+      else
+        echo "logrotate not installed."
+      fi
+
+      echo ""
+
+      echo "--- JOURNALD CLEANUP (retention: ${JOURNAL_DAYS}d) ---"
+      if command -v journalctl &>/dev/null; then
+        before_journal=$(journalctl --disk-usage 2>/dev/null || echo "?")
+        echo "Before: $before_journal"
+
+        journalctl --vacuum-time="${JOURNAL_DAYS}d" 2>&1 || true
+
+        after_journal=$(journalctl --disk-usage 2>/dev/null || echo "?")
+        echo "After:  $after_journal"
+      else
+        echo "journalctl not available."
+      fi
+
+      echo ""
+
+      echo "--- OLD LOG FILES (> ${JOURNAL_DAYS}d, compressed or rotated) ---"
+      # Old rotated .gz logs beyond retention
+      old_logs=$(find /var/log -name '*.gz' -type f -mtime +"$JOURNAL_DAYS" 2>/dev/null | wc -l)
+      echo "Compressed logs older than ${JOURNAL_DAYS}d: $old_logs"
+
+      echo ""
+
+      echo "--- /var/log SIZE AFTER ---"
+      new_log_size_mb=$(du -sm /var/log 2>/dev/null | awk '{print $1}' || echo 0)
+      echo "${new_log_size_mb}M"
+      freed=$((log_size_mb - new_log_size_mb))
+      if [ "$freed" -gt 0 ]; then
+        echo "Freed: ${freed}M"
+      fi
+
+      if [ "$new_log_size_mb" -gt "$WARN_MB" ]; then
+        echo "!! WARNING: /var/log is ${new_log_size_mb}M (threshold: ${WARN_MB}M) -- still large !!"
+      fi
+
+      echo ""
+      echo "--- HEALTH CHECK ---"
+      curl -s -o /dev/null -w "HTTP %{http_code}\n" --connect-timeout 5 "$HEALTHCHECK" 2>/dev/null || echo "Health check skipped (unreachable)"
+
+      echo ""
+      echo "Log cleanup complete."
+  output:
+    store: inline
+    redact: []

@@ -1,0 +1,114 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: memory-report
+  title: Memory Usage Report
+  description: |
+    Reports total memory breakdown: used vs cached vs buffers vs
+    available, swap usage, per-process memory ranking, hugepages,
+    NUMA stats, and OOM score distribution. Read-only diagnostic.
+  risk: low
+  tags: ["performance", "memory", "monitor", "diagnostic", "oom"]
+  version: 1
+spec:
+  parameters:
+    - name: top_n
+      type: string
+      default: "15"
+      description: Number of top memory processes to show
+    - name: healthcheck_url
+      type: string
+      default: ""
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "weekly"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 30
+    concurrency: 10
+    command: |
+      set -euo pipefail
+
+      TOP_N="${TOP_N:-15}"
+
+      echo "=========================================="
+      echo "  MEMORY USAGE REPORT"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Host: $(hostname)"
+      echo "=========================================="
+      echo ""
+
+      echo "--- MEMORY OVERVIEW ---"
+      free -h
+      echo ""
+
+      echo "--- /proc/meminfo DETAIL ---"
+      grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|SwapTotal|SwapFree|SwapCached|AnonPages|Mapped|Dirty|Writeback|HugePages_Total|HugePages_Free|Hugepagesize)' /proc/meminfo 2>/dev/null
+      echo ""
+
+      echo "--- TOP $TOP_N PROCESSES BY RSS ---"
+      ps aux --sort=-%mem 2>/dev/null | head -$((TOP_N + 1))
+      echo ""
+
+      echo "--- TOP $TOP_N PROCESSES BY VMEM ---"
+      ps aux --sort=-vsize 2>/dev/null | awk '{printf "%-10s %-8s %-8s %-8s %s\n", $1, $2, $5, $6, $11}' | head -$((TOP_N + 1))
+      echo ""
+
+      echo "--- OOM SCORE DISTRIBUTION ---"
+      if command -v oom_score &>/dev/null || [ -d /proc/*/oom_score ]; then
+        echo "Highest OOM scores:"
+        for d in /proc/[0-9]*/oom_score; do
+          pid=$(echo "$d" | cut -d/ -f3)
+          score=$(cat "$d" 2>/dev/null || echo 0)
+          name=$(cat "/proc/$pid/comm" 2>/dev/null || echo "?")
+          echo "$score $pid $name"
+        done 2>/dev/null | sort -rn | head -10 || echo "(oom_score not accessible)"
+      fi
+      echo ""
+
+      echo "--- SLAB ALLOCATION ---"
+      grep -E '(slab|kernel_stack|page_tables)' /proc/meminfo 2>/dev/null
+      echo ""
+
+      echo "--- NUMA STATUS ---"
+      if command -v numactl &>/dev/null; then
+        numactl --hardware 2>/dev/null | head -10 || true
+        echo ""
+        echo "NUMA memory usage:"
+        numastat 2>/dev/null | head -10 || true
+      else
+        if [ -d /sys/devices/system/node ]; then
+          for n in /sys/devices/system/node/node*; do
+            node=$(basename "$n")
+            mem=$(cat "$n/meminfo" 2>/dev/null | grep 'MemTotal' | awk '{print $2, $3}' || echo "?")
+            echo "  $node: $mem"
+          done
+        fi
+      fi
+
+      echo ""
+      echo "--- MEMORY PRESSURE ---"
+      if [ -f /proc/pressure/memory ]; then
+        cat /proc/pressure/memory 2>/dev/null
+      fi
+      echo ""
+
+      echo "--- ZONE WATERMARKS ---"
+      grep -E '^Node.*zone.*|min|low|high|managed' /proc/zoneinfo 2>/dev/null | head -20 || true
+
+      echo ""
+      echo "Report complete."
+  output:
+    store: inline
+    redact: []

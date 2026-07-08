@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -260,6 +261,8 @@ type ExecutionDetail struct {
 	StartedAt       string `json:"started_at"`
 	FinishedAt      string `json:"finished_at"`
 	ErrorSummary    string `json:"error_summary"`
+	DelegatedBy     string `json:"delegated_by_user_id"`
+	ApprovalID      string `json:"approval_id"`
 }
 
 type ExecutionTarget struct {
@@ -301,6 +304,8 @@ type ExecutionListItem struct {
 	RequestedAt     string `json:"requested_at"`
 	StartedAt       string `json:"started_at"`
 	FinishedAt      string `json:"finished_at"`
+	DelegatedBy     string `json:"delegated_by_user_id"`
+	ApprovalID      string `json:"approval_id"`
 }
 
 type ListExecutionsResponse struct {
@@ -316,6 +321,36 @@ func (c *Client) ListExecutions(status, limit string) (*ListExecutionsResponse, 
 	}
 	if limit != "" {
 		path += fmt.Sprintf("%slimit=%s", sep, limit)
+	}
+	var resp ListExecutionsResponse
+	if err := c.get(path, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) ListMyExecutions(status, limit string) (*ListExecutionsResponse, error) {
+	path := "/api/v1/executions?mine=true"
+	if status != "" {
+		path += fmt.Sprintf("&status=%s", status)
+	}
+	if limit != "" {
+		path += fmt.Sprintf("&limit=%s", limit)
+	}
+	var resp ListExecutionsResponse
+	if err := c.get(path, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) ListDelegatedExecutions(status, limit string) (*ListExecutionsResponse, error) {
+	path := "/api/v1/executions?delegated=true"
+	if status != "" {
+		path += fmt.Sprintf("&status=%s", status)
+	}
+	if limit != "" {
+		path += fmt.Sprintf("&limit=%s", limit)
 	}
 	var resp ListExecutionsResponse
 	if err := c.get(path, &resp); err != nil {
@@ -406,15 +441,16 @@ func (c *Client) parseError(resp *http.Response) error {
 }
 
 type RunbookItem struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Status      string `json:"status"`
-	Risk        string `json:"risk_level"`
-	Command     string `json:"command_preview"`
-	CreatedAt   string `json:"created_at"`
-	Permitted   bool   `json:"permitted"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Title        string `json:"title"`
+	Description  string `json:"description"`
+	Status       string `json:"status"`
+	Risk         string `json:"risk_level"`
+	Command      string `json:"command_preview"`
+	CreatedAt    string `json:"created_at"`
+	Permitted    bool   `json:"permitted"`
+	AllowedRoles string `json:"allowed_roles"`
 }
 
 type ListRunbooksResponse struct {
@@ -422,24 +458,33 @@ type ListRunbooksResponse struct {
 }
 
 func (c *Client) ListRunbooks() (*ListRunbooksResponse, error) {
+	return c.SearchRunbooks("")
+}
+
+func (c *Client) SearchRunbooks(query string) (*ListRunbooksResponse, error) {
+	path := "/api/v1/runbooks"
+	if query != "" {
+		path += "?search=" + url.QueryEscape(query)
+	}
 	var resp ListRunbooksResponse
-	if err := c.get("/api/v1/runbooks", &resp); err != nil {
+	if err := c.get(path, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
 type RunbookDetail struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Status      string `json:"status"`
-	Version     int    `json:"version"`
-	Risk        string `json:"risk_level"`
-	Command     string `json:"command"`
-	Definition  string `json:"definition_json"`
-	CreatedAt   string `json:"created_at"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Title        string `json:"title"`
+	Description  string `json:"description"`
+	Status       string `json:"status"`
+	Version      int    `json:"version"`
+	Risk         string `json:"risk_level"`
+	Command      string `json:"command"`
+	Definition   string `json:"definition_json"`
+	AllowedRoles string `json:"allowed_roles"`
+	CreatedAt    string `json:"created_at"`
 }
 
 type GetRunbookResponse struct {

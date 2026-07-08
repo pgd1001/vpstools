@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 )
 
 func migrate(ctx context.Context, db *sql.DB) error {
@@ -70,6 +72,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
 		actor_user_id TEXT NOT NULL REFERENCES users(id),
 		actor_role_at_time TEXT NOT NULL,
+		delegated_by_user_id TEXT REFERENCES users(id),
+		approval_id TEXT,
 		execution_type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'created',
 		risk_level TEXT NOT NULL DEFAULT 'medium', environment TEXT, reason TEXT,
 		command_preview TEXT, command_hash TEXT,
@@ -87,6 +91,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		server_snapshot TEXT NOT NULL DEFAULT '{}',
 		started_at TEXT, finished_at TEXT, exit_code INTEGER,
 		stdout_bytes INTEGER NOT NULL DEFAULT 0, stderr_bytes INTEGER NOT NULL DEFAULT 0,
+		stdout TEXT NOT NULL DEFAULT '', stderr TEXT NOT NULL DEFAULT '',
 		error_summary TEXT,
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		UNIQUE(execution_id, server_id)
@@ -119,6 +124,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		parameter_schema TEXT NOT NULL DEFAULT '{}',
 		target_constraints TEXT NOT NULL DEFAULT '{}',
 		approval_rules TEXT NOT NULL DEFAULT '{}',
+		allowed_roles TEXT NOT NULL DEFAULT '["senior_engineer","admin","owner"]',
 		command_preview TEXT, command_hash TEXT,
 		created_by_user_id TEXT NOT NULL REFERENCES users(id),
 		published_by_user_id TEXT REFERENCES users(id),
@@ -160,6 +166,23 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_approvals_requester ON approval_requests(requester_user_id, created_at);
 	`
 	_, err := db.ExecContext(ctx, schema)
+	if err != nil {
+		return err
+	}
+	// Idempotent migrations for existing databases
+	_ = addColumnIgnoreErr(ctx, db, "executions", "delegated_by_user_id", "TEXT")
+	_ = addColumnIgnoreErr(ctx, db, "executions", "approval_id", "TEXT")
+	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "stdout", "TEXT NOT NULL DEFAULT ''")
+	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "stderr", "TEXT NOT NULL DEFAULT ''")
+	_ = addColumnIgnoreErr(ctx, db, "runbook_versions", "allowed_roles", "TEXT NOT NULL DEFAULT '[\"senior_engineer\",\"admin\",\"owner\"]'")
+	return nil
+}
+
+func addColumnIgnoreErr(ctx context.Context, db *sql.DB, table, column, def string) error {
+	_, err := db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, def))
+	if err != nil && strings.Contains(err.Error(), "duplicate column name") {
+		return nil
+	}
 	return err
 }
 
@@ -178,7 +201,7 @@ func seed(ctx context.Context, db *sql.DB) error {
 	INSERT OR IGNORE INTO runners (id, organisation_id, name, runner_type, status, last_seen_at, registered_at) VALUES ('rnr_local', 'org_demo', 'local-runner', 'customer_managed', 'active', datetime('now'), datetime('now'));
 	INSERT OR IGNORE INTO runner_scopes (id, organisation_id, runner_id, scope_type, scope_value) VALUES ('rsc_local', 'org_demo', 'rnr_local', 'all', '*');
 	INSERT OR IGNORE INTO runbooks (id, organisation_id, name, title, description, status, current_version_id, created_by_user_id) VALUES ('rbk_demo', 'org_demo', 'check-uptime', 'Check Uptime', 'Check server uptime and load', 'published', 'rbv_demo_v1', 'user_senior');
-	INSERT OR IGNORE INTO runbook_versions (id, organisation_id, runbook_id, version, status, risk_level, definition_yaml, definition_json, command_preview, command_hash, target_constraints, created_by_user_id, published_by_user_id, published_at) VALUES ('rbv_demo_v1', 'org_demo', 'rbk_demo', 1, 'published', 'low', '{}', '{"apiVersion":"vps-tools.io/v1","kind":"Runbook","spec":{"execution":{"command":"uptime"}}}', 'uptime', '', '{"allowedEnvironments":["development","staging"]}', 'user_senior', 'user_senior', datetime('now'));
+	INSERT OR IGNORE INTO runbook_versions (id, organisation_id, runbook_id, version, status, risk_level, allowed_roles, definition_yaml, definition_json, command_preview, command_hash, target_constraints, created_by_user_id, published_by_user_id, published_at) VALUES ('rbv_demo_v1', 'org_demo', 'rbk_demo', 1, 'published', 'low', '["senior_engineer","junior_engineer","admin","owner"]', '{}', '{"apiVersion":"vps-tools.io/v1","kind":"Runbook","spec":{"execution":{"command":"uptime"}}}', 'uptime', '', '{"allowedEnvironments":["development","staging"]}', 'user_senior', 'user_senior', datetime('now'));
 	`
 	_, err := db.ExecContext(ctx, stmt)
 	return err

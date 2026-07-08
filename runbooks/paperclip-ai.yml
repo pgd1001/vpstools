@@ -1,0 +1,117 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: paperclip-ai
+  title: Paperclip AI Agent Orchestration
+  description: |
+    Paperclip is an open-source orchestration platform for AI agents.
+    Hire AI employees, set goals, automate jobs. Features org charts,
+    heartbeats, budgets, ticketing, multi-company isolation, and
+    governance. Self-hosted with embedded PostgreSQL.
+    https://paperclipai.net | https://github.com/paperclipai/paperclip
+  risk: medium
+  tags: ["provisioning", "ai", "agents", "orchestration", "paperclip", "autonomy"]
+  version: 1
+spec:
+  parameters:
+    - name: paperclip_port
+      type: string
+      default: "3000"
+      description: Paperclip dashboard port
+    - name: domain
+      type: string
+      default: ""
+      description: Domain for reverse proxy (blank = local IP)
+    - name: node_version
+      type: string
+      default: "22"
+      description: Node.js major version
+    - name: data_dir
+      type: string
+      default: "/opt/paperclip"
+      description: Data directory
+  targets:
+    allowedEnvironments: ["development", "staging"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 600
+    concurrency: 1
+    command: |
+      set -euo pipefail
+
+      PC_PORT="${PAPERCLIP_PORT:-3000}"
+      DOMAIN="${DOMAIN:-}"
+      NODE_VER="${NODE_VERSION:-22}"
+      DATA_DIR="${DATA_DIR:-/opt/paperclip}"
+
+      echo "=== [1/4] System deps & Node.js ==="
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq curl git ca-certificates ufw
+
+      if ! command -v node &>/dev/null; then
+        curl -fsSL "https://deb.nodesource.com/setup_${NODE_VER}.x" | bash -
+        apt-get install -y -qq nodejs
+      fi
+
+      echo "=== [2/4] UFW ==="
+      ufw allow "$PC_PORT/tcp" comment 'Paperclip'
+      ufw --force enable
+
+      echo "=== [3/4] Create Paperclip user & data dir ==="
+      id -u paperclip &>/dev/null || useradd -r -s /bin/bash -m -d "$DATA_DIR" paperclip
+      mkdir -p "$DATA_DIR"
+      chown paperclip:paperclip "$DATA_DIR"
+
+      echo "=== [4/4] Run Paperclip setup ==="
+      cd "$DATA_DIR"
+      sudo -u paperclip bash -c "npx paperclipai onboard --yes --port $PC_PORT" 2>&1 || \
+      sudo -u paperclip bash -c "npx paperclipai start --port $PC_PORT --host 0.0.0.0" 2>&1 &
+
+      echo "--- Installing systemd service ---"
+      cat > /etc/systemd/system/paperclip.service << SVDEOF
+      [Unit]
+      Description=Paperclip AI Agent Orchestration
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=paperclip
+      Group=paperclip
+      WorkingDirectory=$DATA_DIR
+      ExecStart=$(which npx) paperclipai start --port $PC_PORT --host 0.0.0.0
+      Restart=always
+      RestartSec=10
+      Environment=NODE_ENV=production
+      Environment=PAPERCLIP_DATA_DIR=$DATA_DIR
+      Environment=PAPERCLIP_PORT=$PC_PORT
+
+      [Install]
+      WantedBy=multi-user.target
+      SVDEOF
+
+      systemctl daemon-reload
+      systemctl enable paperclip
+      systemctl restart paperclip
+
+      sleep 5
+      IP=$(hostname -I | awk '{print $1}')
+      echo ""
+      echo "=== PAPERCLIP DEPLOYED ==="
+      echo "Dashboard:  http://$IP:$PC_PORT"
+      if [ -n "$DOMAIN" ]; then
+        echo "Domain:     https://$DOMAIN"
+      fi
+      echo ""
+      echo "Setup:      Open the dashboard in your browser to create your first company"
+      echo "Service:    journalctl -u paperclip -f"
+      echo "Config:     $DATA_DIR"
+      echo ""
+      systemctl is-active --quiet paperclip && echo "Status: RUNNING" || echo "Status: Check 'journalctl -u paperclip'"
+  output:
+    store: inline
+    redact: []

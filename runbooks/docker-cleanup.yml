@@ -1,0 +1,115 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: docker-cleanup
+  title: Docker Cleanup and Prune
+  description: |
+    Removes stopped containers, dangling images, unused networks,
+    and unused volumes (opt-in). Reports freed space. Idempotent --
+    running containers are never touched. Use with care on production.
+  risk: medium
+  tags: ["maintenance", "docker", "cleanup", "disk", "prune"]
+  version: 1
+spec:
+  parameters:
+    - name: prune_volumes
+      type: string
+      default: "false"
+      description: Prune unused volumes too (true/false)
+    - name: keep_images_days
+      type: string
+      default: "30"
+      description: Remove dangling images older than N days
+    - name: healthcheck_url
+      type: string
+      default: "http://localhost/health"
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "weekly"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: true
+    requiredRoles: ["admin", "senior_engineer"]
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 120
+    concurrency: 5
+    command: |
+      set -euo pipefail
+
+      PRUNE_VOLS="${PRUNE_VOLUMES:-false}"
+      KEEP_DAYS="${KEEP_IMAGES_DAYS:-30}"
+      HEALTHCHECK="${HEALTHCHECK_URL:-http://localhost/health}"
+
+      echo "=========================================="
+      echo "  DOCKER CLEANUP AND PRUNE"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "=========================================="
+      echo ""
+
+      if ! command -v docker &>/dev/null; then
+        echo "Docker is not installed."
+        exit 0
+      fi
+
+      if ! docker info &>/dev/null 2>&1; then
+        echo "Docker daemon is not running."
+        exit 0
+      fi
+
+      echo "--- BEFORE ---"
+      docker system df 2>/dev/null || true
+      echo ""
+      before_bytes=$(docker system df --format '{{.Size}}' 2>/dev/null | tail -1 || echo "?")
+
+      echo "--- PRUNING STOPPED CONTAINERS ---"
+      stopped=$(docker ps -a -f status=exited -f status=created -q | wc -l)
+      echo "Stopped containers: $stopped"
+      docker container prune -f 2>&1
+      echo ""
+
+      echo "--- PRUNING DANGLING IMAGES (age > ${KEEP_DAYS}d) ---"
+      dangling=$(docker images -f dangling=true -q | wc -l)
+      echo "Dangling images: $dangling"
+      docker image prune -a -f --filter "until=${KEEP_DAYS}h" 2>&1 || docker image prune -a -f 2>&1
+      echo ""
+
+      echo "--- PRUNING UNUSED NETWORKS ---"
+      docker network prune -f 2>&1 || true
+      echo ""
+
+      echo "--- PRUNING BUILD CACHE ---"
+      docker builder prune -f --filter "until=${KEEP_DAYS}h" 2>&1 || true
+      echo ""
+
+      if [ "$PRUNE_VOLS" = "true" ]; then
+        echo "--- PRUNING UNUSED VOLUMES ---"
+        unused_vols=$(docker volume ls -f dangling=true -q | wc -l)
+        echo "Unused volumes: $unused_vols"
+        docker volume prune -f 2>&1 || true
+      else
+        echo "--- SKIPPING VOLUMES ---"
+        echo "Set --prune_volumes true to remove unused volumes."
+      fi
+      echo ""
+
+      echo "--- AFTER ---"
+      docker system df 2>/dev/null || true
+      echo ""
+      after_bytes=$(docker system df --format '{{.Size}}' 2>/dev/null | tail -1 || echo "?")
+      echo "Cleanup complete. Previous disk: $before_bytes"
+
+      echo ""
+      echo "--- HEALTH CHECK ---"
+      curl -s -o /dev/null -w "HTTP %{http_code}\n" --connect-timeout 5 "$HEALTHCHECK" 2>/dev/null || echo "Health check skipped (unreachable)"
+  output:
+    store: inline
+    redact: []

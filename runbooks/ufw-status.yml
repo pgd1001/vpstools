@@ -1,0 +1,94 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: ufw-status
+  title: UFW Firewall Status
+  description: |
+    Reports UFW firewall status, active rules by profile (in/out),
+    default policies, logging config, and rate limiting. Flags
+    overly permissive rules for review. Read-only audit.
+  risk: low
+  tags: ["security", "firewall", "ufw", "network", "audit"]
+  version: 1
+spec:
+  parameters:
+    - name: healthcheck_url
+      type: string
+      default: ""
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "weekly"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 30
+    concurrency: 10
+    command: |
+      set -euo pipefail
+
+      echo "=========================================="
+      echo "  UFW FIREWALL STATUS"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Host: $(hostname)"
+      echo "=========================================="
+      echo ""
+
+      if ! command -v ufw &>/dev/null; then
+        echo "UFW is not installed."
+        exit 0
+      fi
+
+      echo "--- STATUS ---"
+      ufw status verbose 2>&1
+      echo ""
+
+      echo "--- RULES (numbered) ---"
+      ufw status numbered 2>&1
+      echo ""
+
+      echo "--- DEFAULT POLICIES ---"
+      ufw status verbose 2>/dev/null | grep -i "default\|policy\|logging" || echo "(not found)"
+      echo ""
+
+      echo "--- OPEN PORTS (non-standard) ---"
+      ufw status 2>/dev/null | grep -E '^[0-9]' | grep -vE '^\s*(22|80|443)/' | awk '{print "  " $0}' || echo "  (no non-standard open ports)"
+      echo ""
+
+      echo "--- RATE LIMITING ---"
+      ufw status 2>/dev/null | grep -i 'limit' || echo "  No rate limiting rules found."
+      echo ""
+
+      echo "--- PERMISSIVE RULES (any/any) ---"
+      ufw status 2>/dev/null | grep -i 'any.*any' || echo "  No overly permissive rules."
+      echo ""
+
+      echo "--- AUDIT FINDINGS ---"
+      issues=0
+      if ufw status 2>/dev/null | grep -q "^Status: inactive"; then
+        echo "  !! CRITICAL: Firewall is INACTIVE !!"
+        issues=$((issues + 1))
+      fi
+      default_in=$(ufw status verbose 2>/dev/null | grep "Default:" | grep -oP 'incoming:\s*\S+' | cut -d' ' -f2)
+      if [ "$default_in" != "deny" ]; then
+        echo "  !! Default incoming policy is '$default_in' (should be 'deny') !!"
+        issues=$((issues + 1))
+      fi
+      if [ "$issues" -eq 0 ]; then
+        echo "  No critical issues found."
+      fi
+
+      echo ""
+      echo "Audit complete."
+  output:
+    store: inline
+    redact: []

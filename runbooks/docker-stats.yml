@@ -1,0 +1,101 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: docker-stats
+  title: Docker Container Statistics
+  description: |
+    Reports running containers, image count and age, volume sizes,
+    Docker daemon health, disk usage by Docker storage driver, and
+    resource usage (CPU/memory per container). Non-blocking read-only.
+  risk: low
+  tags: ["diagnostic", "docker", "containers", "performance"]
+  version: 1
+spec:
+  parameters:
+    - name: healthcheck_url
+      type: string
+      default: ""
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "daily"
+      description: Recommended cadence
+  targets:
+    allowedTags:
+      os: ubuntu
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 30
+    concurrency: 10
+    command: |
+      set -euo pipefail
+
+      echo "=========================================="
+      echo "  DOCKER CONTAINER STATISTICS"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "=========================================="
+      echo ""
+
+      if ! command -v docker &>/dev/null; then
+        echo "Docker is not installed on this system."
+        exit 0
+      fi
+
+      if ! docker info &>/dev/null 2>&1; then
+        echo "Docker daemon is not running or not accessible."
+        exit 0
+      fi
+
+      echo "--- DAEMON INFO ---"
+      docker info --format 'Server Version: {{.ServerVersion}}' 2>/dev/null || true
+      docker info --format 'Storage Driver: {{.Driver}}' 2>/dev/null || true
+      docker info --format 'Containers:     {{.Containers}}' 2>/dev/null || true
+      docker info --format 'Running:        {{.ContainersRunning}}' 2>/dev/null || true
+      docker info --format 'Paused:         {{.ContainersPaused}}' 2>/dev/null || true
+      docker info --format 'Stopped:        {{.ContainersStopped}}' 2>/dev/null || true
+      docker info --format 'Images:         {{.Images}}' 2>/dev/null || true
+      docker info --format 'Data Space:     {{.DockerRootDir}}' 2>/dev/null || true
+      echo ""
+
+      echo "--- RUNNING CONTAINERS ---"
+      running=$(docker ps -q | wc -l)
+      if [ "$running" -gt 0 ]; then
+        docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+      else
+        echo "(no running containers)"
+      fi
+      echo ""
+
+      echo "--- ALL CONTAINERS ---"
+      docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Image}}" 2>/dev/null
+      echo ""
+
+      echo "--- DISK USAGE ---"
+      docker system df 2>/dev/null || echo "(disk info not available)"
+      echo ""
+
+      echo "--- RESOURCE USAGE (running containers) ---"
+      if [ "$running" -gt 0 ]; then
+        docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}" 2>/dev/null || echo "(stats not available)"
+      fi
+      echo ""
+
+      echo "--- IMAGE AGE ---"
+      docker images --format "table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}" 2>/dev/null | head -20
+      echo ""
+
+      echo "--- UNUSED RESOURCES ---"
+      echo "Dangling images: $(docker images -f dangling=true -q 2>/dev/null | wc -l)"
+      echo "Unused volumes:  $(docker volume ls -f dangling=true -q 2>/dev/null | wc -l)"
+      echo "Stopped containers: $(docker ps -f status=exited -q 2>/dev/null | wc -l)"
+  output:
+    store: inline
+    redact: []

@@ -39,11 +39,11 @@ func (p *Policy) CheckExecution(ctx context.Context, db *sql.DB, actor *Actor, e
 	}
 
 	if risk == RiskHigh && !actor.IsSenior() {
-		return Deny("high_risk_requires_senior", "High-risk commands require senior engineer or above.")
+		return Deny("high_risk_requires_senior", "High-risk commands require senior engineer or above.\nJunior engineers can execute a pre-approved runbook instead.")
 	}
 
 	if !actor.CanExecuteRaw() {
-		return Deny("junior_raw_command_denied", "Junior engineers cannot run arbitrary commands. Use a permitted runbook instead.")
+		return Deny("junior_raw_command_denied", "Junior engineers cannot run arbitrary commands.\nUse 'vps runbook list' to see permitted runbooks, then 'vps runbook run <name> --target <server>'.")
 	}
 
 	if environment == EnvProduction && reason == "" {

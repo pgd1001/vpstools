@@ -1,0 +1,114 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: ssl-cert-check
+  title: SSL Certificate Expiry Check
+  description: |
+    Finds all SSL/TLS certificates on the filesystem, parses expiry
+    dates, days remaining, issuer, and subject. Highlights certs
+    expiring within 30 days. Checks common paths and auto-detects
+    certbot-managed certs. Ship with weekly cron.
+  risk: low
+  tags: ["diagnostic", "ssl", "certificate", "security", "renewal"]
+  version: 1
+spec:
+  parameters:
+    - name: warn_days
+      type: string
+      default: "30"
+      description: Warn threshold in days before expiry
+    - name: cert_paths
+      type: string
+      default: "/etc/letsencrypt/live,/etc/ssl/certs,/etc/nginx/ssl,/etc/apache2/ssl"
+      description: Comma-separated cert search paths
+    - name: healthcheck_url
+      type: string
+      default: ""
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "weekly"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 30
+    concurrency: 10
+    command: |
+      set -euo pipefail
+
+      WARN="${WARN_DAYS:-30}"
+      PATHS="${CERT_PATHS:-/etc/letsencrypt/live,/etc/ssl/certs,/etc/nginx/ssl,/etc/apache2/ssl}"
+      NOW=$(date +%s)
+      EXPIRE_SOON=0
+      EXPIRED=0
+
+      echo "=========================================="
+      echo "  SSL CERTIFICATE EXPIRY CHECK"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Warn threshold: $WARN days"
+      echo "=========================================="
+      echo ""
+
+      IFS=',' read -ra SEARCH_PATHS <<< "$PATHS"
+      FOUND_CERTS=0
+
+      for base in "${SEARCH_PATHS[@]}"; do
+        base=$(echo "$base" | xargs)
+        [ ! -d "$base" ] && continue
+        while IFS= read -r -d '' cert; do
+          FOUND_CERTS=$((FOUND_CERTS + 1))
+          info=$(openssl x509 -in "$cert" -noout -subject -issuer -dates -fingerprint 2>/dev/null) || continue
+          end_date=$(echo "$info" | grep 'notAfter=' | cut -d= -f2)
+          subject=$(echo "$info" | grep 'subject=' | cut -d= -f2-)
+          issuer=$(echo "$info" | grep 'issuer=' | cut -d= -f2-)
+          fp=$(echo "$info" | grep 'SHA256 Fingerprint=' | cut -d= -f2-)
+
+          expire_epoch=$(date -d "$end_date" +%s 2>/dev/null) || continue
+          days_left=$(( (expire_epoch - NOW) / 86400 ))
+
+          if [ "$days_left" -lt 0 ]; then
+            echo "EXPIRED:  $cert"
+            echo "  Subject: $subject"
+            echo "  Expired: ${days_left#-} days ago"
+            EXPIRED=$((EXPIRED + 1))
+          elif [ "$days_left" -lt "$WARN" ]; then
+            echo "WARNING:  $cert"
+            echo "  Subject: $subject"
+            echo "  Expires: $end_date ($days_left days)"
+            EXPIRE_SOON=$((EXPIRE_SOON + 1))
+          else
+            echo "OK:       $cert"
+            echo "  Subject: $subject"
+            echo "  Expires: $end_date ($days_left days)"
+          fi
+          echo "  Issuer:  $issuer"
+          echo ""
+        done < <(find "$base" -type f -name '*.pem' -o -name 'cert.pem' -o -name 'fullchain.pem' -print0 2>/dev/null)
+      done
+
+      echo "--- SUMMARY ---"
+      echo "Certs found:  $FOUND_CERTS"
+      echo "Expiring <${WARN}d: $EXPIRE_SOON"
+      echo "Expired:      $EXPIRED"
+      echo ""
+
+      echo "--- CERTBOT STATUS ---"
+      if command -v certbot &>/dev/null; then
+        certbot certificates 2>/dev/null | grep -E 'Certificate Name|Expiry Date|Domains' || echo "No certbot certs"
+      fi
+
+      if [ "$EXPIRED" -gt 0 ] || [ "$EXPIRE_SOON" -gt 0 ]; then
+        echo "!! ACTION REQUIRED: Renew expiring certs !!"
+      fi
+  output:
+    store: inline
+    redact: []

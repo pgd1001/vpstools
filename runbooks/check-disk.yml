@@ -1,0 +1,17 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: check-disk
+  title: Check Disk Usage
+  description: Check disk usage with df -h
+  risk: low
+  tags: ["diagnostic", "disk"]
+spec:
+  execution:
+    command: df -h
+    timeoutSeconds: 30
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  output:
+    store: inline
+    redact: []

@@ -1,0 +1,28 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: tail-logs
+  title: Tail Application Logs
+  description: Tail the last N lines of an application log file
+  risk: low
+  tags: ["logs", "debugging"]
+spec:
+  parameters:
+    - name: logfile
+      type: string
+      default: /var/log/app.log
+      required: true
+      description: Path to the log file
+    - name: lines
+      type: string
+      default: "50"
+      required: false
+      description: Number of lines to tail
+  execution:
+    command: tail -n ${lines} ${logfile}
+    timeoutSeconds: 30
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  output:
+    store: inline
+    redact: []

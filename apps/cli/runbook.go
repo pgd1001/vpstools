@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/pgd1001/svrtools/packages/sdk-go/client"
 	"github.com/spf13/cobra"
@@ -69,15 +70,16 @@ var runbookInspectCmd = &cobra.Command{
 		}
 
 		rb := resp.Runbook
-		fmt.Printf("ID:          %s\n", rb.ID)
-		fmt.Printf("Name:        %s\n", rb.Name)
-		fmt.Printf("Title:       %s\n", rb.Title)
-		fmt.Printf("Description: %s\n", rb.Description)
-		fmt.Printf("Status:      %s\n", rb.Status)
-		fmt.Printf("Version:     %d\n", rb.Version)
-		fmt.Printf("Risk:        %s\n", rb.Risk)
-		fmt.Printf("Command:     %s\n", rb.Command)
-		fmt.Printf("Created:     %s\n", rb.CreatedAt)
+		fmt.Printf("ID:            %s\n", rb.ID)
+		fmt.Printf("Name:          %s\n", rb.Name)
+		fmt.Printf("Title:         %s\n", rb.Title)
+		fmt.Printf("Description:   %s\n", rb.Description)
+		fmt.Printf("Status:        %s\n", rb.Status)
+		fmt.Printf("Version:       %d\n", rb.Version)
+		fmt.Printf("Risk:          %s\n", rb.Risk)
+		fmt.Printf("Command:       %s\n", rb.Command)
+		fmt.Printf("Allowed roles: %s\n", rb.AllowedRoles)
+		fmt.Printf("Created:       %s\n", rb.CreatedAt)
 	},
 }
 
@@ -151,6 +153,8 @@ var runbookRunCmd = &cobra.Command{
 		reason, _ := cmd.Flags().GetString("reason")
 		paramsFlag, _ := cmd.Flags().GetString("params")
 		output, _ := cmd.Flags().GetString("output")
+		wait, _ := cmd.Flags().GetBool("wait")
+		timeout, _ := cmd.Flags().GetInt("timeout")
 
 		if target == "" {
 			fmt.Fprintln(os.Stderr, "error: --target is required (e.g. server:demo, server:web-01)")
@@ -187,11 +191,68 @@ var runbookRunCmd = &cobra.Command{
 			return
 		}
 
-		fmt.Printf("Execution ID: %s\n", resp["execution_id"])
+		execID := ""
+		if eid, ok := resp["execution_id"]; ok {
+			execID = eid.(string)
+		}
+		fmt.Printf("Execution ID: %s\n", execID)
 		fmt.Printf("Status:       %s\n", resp["status"])
 		if tc, ok := resp["target_count"]; ok {
 			fmt.Printf("Targets:      %v\n", tc)
 		}
+
+		if !wait || execID == "" {
+			fmt.Println("\nRun the runner to execute, or use --wait to poll for results.")
+			return
+		}
+
+		fmt.Println("\nWaiting for completion...")
+		if timeout == 0 {
+			timeout = 300
+		}
+
+		pollInterval := 1 * time.Second
+		deadline := time.Now().Add(time.Duration(timeout) * time.Second)
+
+		for time.Now().Before(deadline) {
+			time.Sleep(pollInterval)
+			exec, err := apiClient.GetExecution(execID)
+			if err != nil {
+				continue
+			}
+			e := exec.Execution
+			switch e.Status {
+			case "succeeded":
+				fmt.Printf("\nExecution %s\n\n", e.Status)
+				for _, t := range exec.Targets {
+					fmt.Printf("  [%s] exit=%d\n", t.Status, t.ExitCode)
+					if t.Stdout != "" {
+						fmt.Printf("  stdout: %s\n", strings.TrimSpace(t.Stdout))
+					}
+					if t.Stderr != "" {
+						fmt.Printf("  stderr: %s\n", strings.TrimSpace(t.Stderr))
+					}
+				}
+				return
+			case "failed":
+				fmt.Printf("\nExecution %s\n\n", e.Status)
+				for _, t := range exec.Targets {
+					fmt.Printf("  [%s] exit=%d\n", t.Status, t.ExitCode)
+					if t.Error != "" {
+						fmt.Printf("    error: %s\n", t.Error)
+					}
+				}
+				os.Exit(1)
+			case "cancelled":
+				fmt.Println("\nExecution cancelled")
+				os.Exit(1)
+			default:
+				since := time.Since(time.Now().Add(-pollInterval)).Round(time.Second)
+				fmt.Printf("\rStatus: %s (%s elapsed)...", e.Status, since)
+			}
+			pollInterval = minDuration(pollInterval*2, 5*time.Second)
+		}
+		fmt.Println("\n\nTimeout reached. Check status with: vps exec status " + execID)
 	},
 }
 
@@ -214,6 +275,8 @@ func init() {
 	runbookRunCmd.Flags().String("reason", "", "Reason for execution")
 	runbookRunCmd.Flags().String("params", "", "Parameters as key=value,key=value")
 	runbookRunCmd.Flags().String("output", "table", "Output format (table, json)")
+	runbookRunCmd.Flags().Bool("wait", false, "Wait for execution to complete")
+	runbookRunCmd.Flags().Int("timeout", 300, "Timeout in seconds (with --wait)")
 
 	runbookCmd.AddCommand(runbookListCmd)
 	runbookCmd.AddCommand(runbookInspectCmd)

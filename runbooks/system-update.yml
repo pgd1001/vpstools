@@ -1,0 +1,115 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: system-update
+  title: System Package Update
+  description: |
+    Updates package lists, performs safe package upgrades, runs
+    unattended-upgrades if installed, and optionally reboots if kernel
+    was updated. Reboot is off by default. Idempotent and safe to
+    re-run. Notify stakeholders before production runs.
+  risk: medium
+  tags: ["maintenance", "system", "packages", "update", "security"]
+  version: 1
+spec:
+  parameters:
+    - name: allow_reboot
+      type: string
+      default: "false"
+      description: Reboot if kernel updated (true/false)
+    - name: healthcheck_url
+      type: string
+      default: "http://localhost/health"
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "weekly"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: true
+    requiredRoles: ["admin", "senior_engineer"]
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 300
+    concurrency: 3
+    command: |
+      set -euo pipefail
+
+      REBOOT="${ALLOW_REBOOT:-false}"
+      HEALTHCHECK="${HEALTHCHECK_URL:-http://localhost/health}"
+
+      echo "=========================================="
+      echo "  SYSTEM PACKAGE UPDATE"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "=========================================="
+      echo ""
+
+      echo "[1/5] Updating package lists..."
+      apt-get update -qq 2>/dev/null || apt update -qq
+
+      echo ""
+
+      echo "[2/5] Checking upgradable packages..."
+      UPDATES=$(apt list --upgradable 2>/dev/null | grep -c upgradable || echo 0)
+      echo "Packages to upgrade: $UPDATES"
+
+      if [ "$UPDATES" -eq 0 ]; then
+        echo "No updates available. Skipping upgrade."
+      else
+        echo ""
+        echo "[3/5] Performing safe upgrade..."
+        DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" 2>&1
+      fi
+
+      echo ""
+
+      echo "[4/5] Checking unattended-upgrades..."
+      if dpkg -l unattended-upgrades &>/dev/null 2>&1; then
+        echo "Unattended-upgrades is installed."
+        unattended-upgrades --dry-run 2>/dev/null | head -10 || true
+      else
+        echo "unattended-upgrades not installed."
+      fi
+
+      echo ""
+
+      echo "[5/5] Health check..."
+      echo "Testing: $HEALTHCHECK"
+      for i in 1 2 3; do
+        code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$HEALTHCHECK" 2>/dev/null || echo "FAIL")
+        echo "  Attempt $i: HTTP $code"
+        if [ "$code" != "FAIL" ] && [ "$code" != "000" ]; then
+          echo "Health check passed."
+          break
+        fi
+        if [ "$i" -lt 3 ]; then sleep 3; fi
+      done
+
+      echo ""
+
+      if [ "$REBOOT" = "true" ]; then
+        if [ -f /var/run/reboot-required ]; then
+          echo "REBOOT REQUIRED: Kernel updated. Rebooting in 10 seconds..."
+          sleep 10
+          reboot
+        else
+          echo "No reboot required."
+        fi
+      else
+        if [ -f /var/run/reboot-required ]; then
+          echo "NOTE: Reboot required for kernel update (--allow_reboot true to apply)."
+        fi
+      fi
+
+      echo ""
+      echo "System update complete."
+  output:
+    store: inline
+    redact: []

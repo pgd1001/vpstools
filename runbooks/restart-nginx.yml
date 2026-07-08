@@ -1,0 +1,21 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: restart-nginx
+  title: Restart Nginx
+  description: Safely restart nginx service
+  risk: medium
+  tags: ["service", "nginx"]
+spec:
+  execution:
+    command: sudo systemctl restart nginx
+    timeoutSeconds: 60
+  targets:
+    allowedEnvironments: ["development", "staging"]
+  approval:
+    required: true
+    environment: production
+    requiredRole: senior_engineer
+  output:
+    store: inline
+    redact: []

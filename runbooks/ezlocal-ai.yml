@@ -1,0 +1,149 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: ezlocal-ai
+  title: EZ Local AI Inference Server
+  description: |
+    ezLocalai is a complete local AI inference server. One binary,
+    one port, OpenAI-compatible API. Supports text, vision, voice
+    cloning, speech-to-text, and image generation — all offline.
+    Auto GPU detection (CUDA, ROCm, CPU). No telemetry, no cloud.
+    https://ezlocal.ai | https://github.com/DevXT-LLC/ezlocalai
+  risk: medium
+  tags: ["provisioning", "ai", "inference", "llm", "local", "vision", "tts"]
+  version: 1
+spec:
+  parameters:
+    - name: ez_port
+      type: string
+      default: "8091"
+      description: API server port
+    - name: model
+      type: string
+      default: "unsloth/Qwen3-4B-Instruct-2507-GGUF"
+      description: Default GGUF model from Hugging Face
+    - name: gpu_layers
+      type: string
+      default: "-1"
+      description: GPU layers (-1 = all, 0 = CPU)
+    - name: whisper_model
+      type: string
+      default: "base.en"
+      description: Whisper model for speech recognition
+    - name: data_dir
+      type: string
+      default: "/opt/ezlocalai"
+      description: Model and data storage directory
+  targets:
+    allowedTags:
+      os: ubuntu
+    allowedEnvironments: ["development", "staging"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 600
+    concurrency: 1
+    command: |
+      set -euo pipefail
+
+      EZ_PORT="${EZ_PORT:-8091}"
+      MODEL="${MODEL:-unsloth/Qwen3-4B-Instruct-2507-GGUF}"
+      GPU_LAYERS="${GPU_LAYERS:--1}"
+      WHISPER="${WHISPER_MODEL:-base.en}"
+      DATA_DIR="${DATA_DIR:-/opt/ezlocalai}"
+
+      echo "=== [1/5] System deps ==="
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq \
+        python3 python3-pip python3-venv \
+        build-essential curl git ufw
+
+      echo "=== [2/5] Create venv & install ezLocalai ==="
+      mkdir -p "$DATA_DIR"
+      python3 -m venv "$DATA_DIR/venv"
+      source "$DATA_DIR/venv/bin/activate"
+      pip install -q --upgrade pip
+      pip install -q ezlocalai
+
+      echo "=== [3/5] UFW ==="
+      ufw allow "$EZ_PORT/tcp" comment 'ezLocalai'
+      ufw --force enable
+
+      echo "=== [4/5] Create config ==="
+      mkdir -p "$DATA_DIR/config"
+      cat > "$DATA_DIR/config/config.yml" << CONFEOF
+      server:
+        host: 0.0.0.0
+        port: $EZ_PORT
+      models:
+        default: $MODEL
+        download_dir: $DATA_DIR/models
+      inference:
+        gpu_layers: $GPU_LAYERS
+        n_ctx: 32768
+      audio:
+        whisper_model: $WHISPER
+      image:
+        engine: auto
+      logging:
+        level: INFO
+      CONFEOF
+
+      echo "=== [5/5] Install systemd service ==="
+      cat > /etc/systemd/system/ezlocalai.service << SVDEOF
+      [Unit]
+      Description=ezLocalai AI Inference Server
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=root
+      WorkingDirectory=$DATA_DIR
+      ExecStart=$DATA_DIR/venv/bin/ezlocalai start \
+        --port $EZ_PORT \
+        --host 0.0.0.0 \
+        --model "$MODEL" \
+        --gpu-layers $GPU_LAYERS \
+        --whisper-model "$WHISPER" \
+        --data-dir $DATA_DIR
+      Restart=always
+      RestartSec=5
+      Environment=PYTHONUNBUFFERED=1
+      LimitNOFILE=65536
+
+      [Install]
+      WantedBy=multi-user.target
+      SVDEOF
+
+      systemctl daemon-reload
+      systemctl enable ezlocalai
+      systemctl restart ezlocalai
+
+      echo "--- Waiting for server to start ---"
+      for i in $(seq 1 30); do
+        if curl -s "http://127.0.0.1:$EZ_PORT/v1/health" >/dev/null 2>&1; then
+          echo "Server is ready!"
+          break
+        fi
+        sleep 2
+      done
+
+      IP=$(hostname -I | awk '{print $1}')
+      echo ""
+      echo "=== EZ LOCAL AI DEPLOYED ==="
+      echo "API:        http://$IP:$EZ_PORT/v1"
+      echo "Model:      $MODEL"
+      echo "GPU layers: $GPU_LAYERS"
+      echo "Data dir:   $DATA_DIR"
+      echo ""
+      echo "Test: curl http://$IP:$EZ_PORT/v1/chat/completions \\"
+      echo "  -d '{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}'"
+      echo ""
+      echo "Service:    journalctl -u ezlocalai -f"
+  output:
+    store: inline
+    redact: []

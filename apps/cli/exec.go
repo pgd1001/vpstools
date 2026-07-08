@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pgd1001/svrtools/packages/sdk-go/client"
 	"github.com/spf13/cobra"
 )
 
@@ -209,8 +210,19 @@ var execListCmd = &cobra.Command{
 		output, _ := cmd.Flags().GetString("output")
 		status, _ := cmd.Flags().GetString("status")
 		limit, _ := cmd.Flags().GetString("limit")
+		mine, _ := cmd.Flags().GetBool("mine")
+		delegated, _ := cmd.Flags().GetBool("delegated")
+		delegatedBy, _ := cmd.Flags().GetString("delegated-by")
 
-		resp, err := apiClient.ListExecutions(status, limit)
+		var resp *client.ListExecutionsResponse
+		var err error
+		if delegated || delegatedBy != "" {
+			resp, err = apiClient.ListDelegatedExecutions(status, limit)
+		} else if mine {
+			resp, err = apiClient.ListMyExecutions(status, limit)
+		} else {
+			resp, err = apiClient.ListExecutions(status, limit)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -249,6 +261,9 @@ func init() {
 	execListCmd.Flags().String("status", "", "Filter by status")
 	execListCmd.Flags().String("limit", "20", "Max results")
 	execListCmd.Flags().String("output", "table", "Output format (table, json)")
+	execListCmd.Flags().Bool("mine", false, "Show only my executions")
+	execListCmd.Flags().Bool("delegated", false, "Show work delegated to others")
+	execListCmd.Flags().String("delegated-by", "", "Show work delegated by a specific user")
 
 	execCmd.AddCommand(execStatusCmd)
 	execCmd.AddCommand(execCancelCmd)

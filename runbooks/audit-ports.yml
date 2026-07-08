@@ -1,0 +1,93 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: audit-ports
+  title: Open Port Audit
+  description: |
+    Scans all listening TCP/UDP ports, identifies associated processes
+    and services, flags unexpected or non-standard ports, and compares
+    against a user-defined allowlist. Run weekly for security compliance.
+  risk: low
+  tags: ["security", "audit", "ports", "network", "compliance"]
+  version: 1
+spec:
+  parameters:
+    - name: allowlist
+      type: string
+      default: "22,80,443"
+      description: Comma-separated port allowlist
+    - name: healthcheck_url
+      type: string
+      default: ""
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "weekly"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 30
+    concurrency: 10
+    command: |
+      set -euo pipefail
+
+      ALLOWLIST="${ALLOWLIST:-22,80,443}"
+
+      echo "=========================================="
+      echo "  OPEN PORT AUDIT"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Host: $(hostname)"
+      echo "=========================================="
+      echo ""
+
+      echo "--- ALL LISTENING PORTS ---"
+      ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null || echo "No port info"
+      echo ""
+
+      echo "--- PROCESS-TO-PORT MAPPING ---"
+      if command -v ss &>/dev/null; then
+        ss -tulpn 2>/dev/null | grep -v '^Netid\|^State' | while IFS= read -r line; do
+          port=$(echo "$line" | grep -oP ':\K[0-9]+')
+          process=$(echo "$line" | grep -oP 'users:\(\(\K[^)]+')
+          proto=$(echo "$line" | awk '{print $1}')
+          listen=$(echo "$line" | awk '{print $4}')
+          if [ -n "$port" ]; then
+            echo "  $proto $listen  →  $process"
+          fi
+        done
+      fi
+      echo ""
+
+      echo "--- NON-STANDARD PORTS (outside allowlist) ---"
+      IFS=',' read -ra ALLOW <<< "$ALLOWLIST"
+      ss -tulpn 2>/dev/null | grep -oP ':\K[0-9]+' | sort -n -u | while IFS= read -r port; do
+        found=0
+        for a in "${ALLOW[@]}"; do
+          a=$(echo "$a" | xargs)
+          [ "$port" = "$a" ] && found=1 && break
+        done
+        if [ "$found" -eq 0 ]; then
+          echo "  UNLISTED: port $port"
+        fi
+      done
+      echo ""
+
+      echo "--- SUMMARY ---"
+      total=$(ss -tulpn 2>/dev/null | grep -c LISTEN || echo 0)
+      echo "Total listening services: $total"
+      echo "Allowlist: $ALLOWLIST"
+
+      echo ""
+      echo "Audit complete."
+  output:
+    store: inline
+    redact: []

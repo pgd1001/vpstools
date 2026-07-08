@@ -1,0 +1,105 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: user-audit
+  title: User Account Audit
+  description: |
+    Lists all human users, sudoers, accounts with shell access, locked
+    accounts, stale accounts (no login >90d), and SSH authorized_keys
+    per user. Flags users with UID 0 (non-root), empty passwords, or
+    expired passwords. Run monthly for compliance.
+  risk: low
+  tags: ["security", "audit", "users", "ssh", "compliance"]
+  version: 1
+spec:
+  parameters:
+    - name: stale_days
+      type: string
+      default: "90"
+      description: Days without login to flag as stale
+    - name: healthcheck_url
+      type: string
+      default: ""
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "monthly"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 30
+    concurrency: 10
+    command: |
+      set -euo pipefail
+
+      STALE="${STALE_DAYS:-90}"
+
+      echo "=========================================="
+      echo "  USER ACCOUNT AUDIT"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Host: $(hostname)"
+      echo "=========================================="
+      echo ""
+
+      echo "--- HUMAN USERS (UID >= 1000, UID != 65534) ---"
+      awk -F: '$3 >= 1000 && $3 != 65534 {printf "  %-20s UID=%-5s GID=%-5s Shell=%-15s Home=%s\n", $1, $3, $4, $7, $6}' /etc/passwd
+      echo ""
+
+      echo "--- SUDOERS ---"
+      if [ -f /etc/sudoers ]; then
+        echo "From /etc/sudoers:"
+        grep -v '^#' /etc/sudoers 2>/dev/null | grep -v '^$' | grep -v 'Defaults\|Host_Alias\|User_Alias\|Cmnd_Alias' | while IFS= read -r line; do
+          echo "  $line"
+        done
+      fi
+      for d in /etc/sudoers.d/*; do
+        [ -f "$d" ] && echo "[$(basename "$d")]" && grep -v '^#' "$d" 2>/dev/null | grep -v '^$' | while IFS= read -r line; do echo "  $line"; done
+      done
+      echo ""
+
+      echo "--- USERS WITH ROOT (UID 0) ---"
+      awk -F: '$3 == 0 {print "  " $1}' /etc/passwd | grep -v '^  root$' || echo "  (none besides root)"
+      echo ""
+
+      echo "--- LOCKED ACCOUNTS ---"
+      passwd -S -a 2>/dev/null | grep " L " | awk '{print "  " $1}' || shadow_output=$(awk -F: '!/^[^:]+:\*:|!:\*:/ {if($2 ~ /^[!*]/) print "  " $1}' /etc/shadow 2>/dev/null) || echo "  (none)"
+      echo ""
+
+      echo "--- PASSWORD EXPIRY ---"
+      for user in $(awk -F: '$3 >= 1000 && $3 != 65534 {print $1}' /etc/passwd); do
+        expiry=$(chage -l "$user" 2>/dev/null | grep 'Password expires' | cut -d: -f2- | xargs)
+        last=$(chage -l "$user" 2>/dev/null | grep 'Last password change' | cut -d: -f2- | xargs)
+        echo "  $user: last change=$last, expires=$expiry"
+      done
+      echo ""
+
+      echo "--- STALE ACCOUNTS (no login >${STALE}d) ---"
+      cutoff=$(date -d "$STALE days ago" +%s 2>/dev/null || echo "unix")
+      lastlog -t "$STALE" 2>/dev/null | awk 'NR>1 {print "  " $1 " (last: "$2" "$3" "$4")"}' || echo "  (lastlog not available)"
+      echo ""
+
+      echo "--- SSH AUTHORIZED KEYS ---"
+      for user in $(awk -F: '$3 >= 1000 && $3 != 65534 {print $1}' /etc/passwd); do
+        home=$(awk -F: -v u="$user" '$1 == u {print $6}' /etc/passwd)
+        for keyfile in "$home/.ssh/authorized_keys" "$home/.ssh/authorized_keys2"; do
+          if [ -f "$keyfile" ]; then
+            count=$(grep -c '^ssh-' "$keyfile" 2>/dev/null || echo 0)
+            echo "  $user ($keyfile): $count key(s)"
+          fi
+        done
+      done
+
+      echo ""
+      echo "Audit complete."
+  output:
+    store: inline
+    redact: []

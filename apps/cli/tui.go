@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/table"
@@ -32,6 +33,7 @@ const (
 	screenApprovals
 	screenAudit
 	screenHelp
+	screenExecutionDetail
 )
 
 type tuiModel struct {
@@ -61,6 +63,9 @@ type tuiModel struct {
 	// Audit browser
 	auditInput   textinput.Model
 	auditEvents  []client.AuditEvent
+
+	// Execution detail
+	selectedExec *client.GetExecutionResponse
 
 	quitting     bool
 }
@@ -115,7 +120,7 @@ func newTUIModel(c *client.Client) tuiModel {
 	rbList := list.New(rbItems, list.NewDefaultDelegate(), 0, 0)
 	rbList.Title = "Runbooks"
 	rbList.SetShowStatusBar(false)
-	rbList.SetFilteringEnabled(false)
+	rbList.SetFilteringEnabled(true)
 	rbList.SetShowHelp(false)
 
 	return tuiModel{
@@ -197,6 +202,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.runbookList.SetItems(items)
 			}
 			return m, nil
+
 		case "3":
 			m.screen = screenExecutions
 			m.err = ""
@@ -261,6 +267,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "enter":
+			if m.screen == screenRunbooks {
+				idx := m.runbookList.Index()
+				if idx >= 0 && idx < len(m.runbooks) {
+					rb := m.runbooks[idx]
+					m.msg = fmt.Sprintf("Runbook: %s  Risk: %s  Permitted: %v  Role: %s",
+						rb.Name, rb.Risk, rb.Permitted, rb.AllowedRoles)
+				}
+				return m, nil
+			}
 			if m.screen == screenAudit {
 				actor := m.auditInput.Value()
 				events, _ := m.client.ListAudit("50")
@@ -274,6 +289,61 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.auditEvents = filtered
 				} else if events != nil {
 					m.auditEvents = events.Events
+				}
+			}
+			if m.screen == screenExecutions {
+				cursor := m.execTable.Cursor()
+				if cursor >= 0 && cursor < len(m.executions) {
+					execID := m.executions[cursor].ID
+					exec, err := m.client.GetExecution(execID)
+					if err == nil && exec != nil {
+						m.selectedExec = exec
+						m.screen = screenExecutionDetail
+					}
+				}
+			}
+			if m.screen == screenExecutionDetail {
+				m.screen = screenExecutions
+				m.selectedExec = nil
+			}
+			return m, nil
+		case "a":
+			if m.screen == screenApprovals {
+				cursor := m.approvalTable.Cursor()
+				if cursor >= 0 && cursor < len(m.approvals) {
+					approvalID := m.approvals[cursor].ID
+					_, err := m.client.ApproveApproval(approvalID)
+					if err != nil {
+						m.err = "approve failed: " + err.Error()
+					} else {
+						m.msg = "Approved " + approvalID
+						// refresh approvals
+						a, _ := m.client.ListApprovals("")
+						if a != nil {
+							m.approvals = a.Approvals
+							m.approvalTable.SetRows(approvalRows(a.Approvals))
+						}
+					}
+				}
+			}
+			return m, nil
+		case "d":
+			if m.screen == screenApprovals {
+				cursor := m.approvalTable.Cursor()
+				if cursor >= 0 && cursor < len(m.approvals) {
+					approvalID := m.approvals[cursor].ID
+					_, err := m.client.DenyApproval(approvalID)
+					if err != nil {
+						m.err = "deny failed: " + err.Error()
+					} else {
+						m.msg = "Denied " + approvalID
+						// refresh approvals
+						a, _ := m.client.ListApprovals("")
+						if a != nil {
+							m.approvals = a.Approvals
+							m.approvalTable.SetRows(approvalRows(a.Approvals))
+						}
+					}
 				}
 			}
 			return m, nil
@@ -299,6 +369,8 @@ func (m tuiModel) View() string {
 		return m.auditView()
 	case screenHelp:
 		return m.helpView()
+	case screenExecutionDetail:
+		return m.executionDetailView()
 	}
 	return ""
 }
@@ -339,7 +411,7 @@ func (m tuiModel) runbooksView() string {
 	} else {
 		s += m.runbookList.View() + "\n"
 	}
-	s += helpStyle.Render("[q] back  [↑↓] navigate")
+	s += helpStyle.Render("[q] back  [↑↓] navigate  [/] search name/title/tags")
 	return tuiAppStyle.Render(s)
 }
 
@@ -350,7 +422,65 @@ func (m tuiModel) executionsView() string {
 	} else {
 		s += m.execTable.View() + "\n"
 	}
-	s += helpStyle.Render("[q] back  [r] refresh")
+	s += helpStyle.Render("[q] back  [r] refresh  [enter] view detail")
+	return tuiAppStyle.Render(s)
+}
+
+func (m tuiModel) executionDetailView() string {
+	if m.selectedExec == nil {
+		return tuiAppStyle.Render(titleStyle.Render("Execution Detail") + "\n" + dimStyle.Render("No execution selected.") + "\n" + helpStyle.Render("[q] back"))
+	}
+	e := m.selectedExec.Execution
+	s := titleStyle.Render("Execution Detail") + "\n\n"
+	s += fmt.Sprintf("  ID:       %s\n", e.ID)
+	s += fmt.Sprintf("  Status:   %s\n", e.Status)
+	s += fmt.Sprintf("  Actor:    %s (%s)\n", e.ActorUserID, e.ActorRole)
+	s += fmt.Sprintf("  Command:  %s\n", e.CommandPreview)
+	s += fmt.Sprintf("  Risk:     %s\n", e.RiskLevel)
+	s += fmt.Sprintf("  Reason:   %s\n", e.Reason)
+	if e.DelegatedBy != "" {
+		s += fmt.Sprintf("  Delegated by: %s\n", e.DelegatedBy)
+	}
+	if e.ApprovalID != "" {
+		s += fmt.Sprintf("  Approval: %s\n", e.ApprovalID)
+	}
+	s += fmt.Sprintf("  Requested: %s\n", e.RequestedAt)
+	if e.StartedAt != "" {
+		s += fmt.Sprintf("  Started:   %s\n", e.StartedAt)
+	}
+	if e.FinishedAt != "" {
+		s += fmt.Sprintf("  Finished:  %s\n", e.FinishedAt)
+	}
+	if e.ErrorSummary != "" {
+		s += fmt.Sprintf("  Error:    %s\n", e.ErrorSummary)
+	}
+	if len(m.selectedExec.Targets) > 0 {
+		s += "\n  Targets:\n"
+		for _, t := range m.selectedExec.Targets {
+			marker := "[?]"
+			switch t.Status {
+			case "succeeded":
+				marker = "[OK]"
+			case "failed":
+				marker = "[FAIL]"
+			case "running":
+				marker = "[RUN]"
+			case "cancelled":
+				marker = "[CANCEL]"
+			}
+			s += fmt.Sprintf("    %s %s exit=%d\n", marker, t.ServerID, t.ExitCode)
+			if t.Stdout != "" {
+				s += fmt.Sprintf("    stdout: %s\n", strings.TrimSpace(t.Stdout))
+			}
+			if t.Stderr != "" {
+				s += fmt.Sprintf("    stderr: %s\n", strings.TrimSpace(t.Stderr))
+			}
+			if t.Error != "" {
+				s += fmt.Sprintf("    error: %s\n", t.Error)
+			}
+		}
+	}
+	s += "\n" + helpStyle.Render("[q] back  [enter] close")
 	return tuiAppStyle.Render(s)
 }
 
@@ -361,7 +491,13 @@ func (m tuiModel) approvalsView() string {
 	} else {
 		s += m.approvalTable.View() + "\n"
 	}
-	s += helpStyle.Render("[q] back  [r] refresh")
+	s += helpStyle.Render("[q] back  [r] refresh  [a] approve  [d] deny")
+	if m.msg != "" {
+		s += "\n" + selectedStyle.Render(m.msg)
+	}
+	if m.err != "" {
+		s += "\n" + errorStyle.Render(m.err)
+	}
 	return tuiAppStyle.Render(s)
 }
 
@@ -388,7 +524,11 @@ func (m tuiModel) helpView() string {
 	s += "  h          Help\n"
 	s += "  ↑↓ / j,k   Navigate lists\n"
 	s += "  r          Refresh current view\n"
-	s += "  enter      Select / Confirm\n\n"
+	s += "  enter      Select / Confirm\n"
+	s += "  /          Filter list (runbook search)\n\n"
+	s += "Actions:\n"
+	s += "  Executions:  enter = view detail (with stdout/stderr)\n"
+	s += "  Approvals:   a = approve selected, d = deny selected\n\n"
 	s += "CLI equivalents:\n"
 	s += "  vps server list\n"
 	s += "  vps runbook list | vps run\n"
@@ -414,7 +554,7 @@ func (i runbookListItem) Description() string {
 	return fmt.Sprintf("%s — %s%s", i.rb.Status, i.rb.Title, perm)
 }
 func (i runbookListItem) FilterValue() string {
-	return i.rb.Name + " " + i.rb.Title + " " + i.rb.Command
+	return i.rb.Name + " " + i.rb.Title + " " + i.rb.Command + " " + i.rb.Description + " " + i.rb.Risk + " " + i.rb.Status
 }
 
 func serverRows(servers []client.Server) []table.Row {

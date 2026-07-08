@@ -6,6 +6,8 @@
 
 **Phase 7 (Hardening and Beta) is implemented.** Secret redaction, runner scope checks, 10 security tests (RBAC, audit completeness, tenant isolation, cross-org job claims), known limitations doc, operator guide, GoReleaser config.
 
+**Post-Phase-7 additions:** 24 maintenance runbook templates (diagnostics, maintenance, security, recovery) — 41 runbooks total. Runbook search via TUI (`/` key filter) and API (`?search=` query param).
+
 **Go module:** `github.com/pgd1001/svrtools` (Go 1.26.3)  
 **Build output:** `bin/vps.exe`, `bin/api.exe`, `bin/runner.exe`
 

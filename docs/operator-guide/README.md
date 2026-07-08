@@ -119,7 +119,10 @@ $env:VPS_USER = "user_junior"
 .\bin\vps.exe tui
 ```
 - `1` Servers, `2` Runbooks, `3` Executions, `4` Approvals, `5` Audit
-- `q` Back/Quit, `h` Help
+- `q` Back/Quit, `h` Help, `r` Refresh current view
+- **Runbook search:** Press `/` in the runbook view to filter by name, title, description, risk, or tags
+- **Approvals:** `a` approve selected, `d` deny selected
+- **Execution detail:** `enter` on an execution to view full output with stdout/stderr
 
 ## Web Console
 
@@ -137,6 +140,22 @@ All list/detail commands support `--output json`:
 .\bin\vps.exe server list --output json
 .\bin\vps.exe audit search --limit 10 --output json
 ```
+
+## Runbook Catalog
+
+41 runbook templates are included with the project. Use `vps runbook list` to view all, or press `/` in the TUI runbook screen to filter.
+
+| Category | Count | Risk | Key runbooks |
+|---|---|---|---|
+| Diagnostics | 7 | low | system-info, network-diag, ssl-cert-check, failed-auth-report |
+| Provisioning | 7 | high | base-hardened-ubuntu, docker-server, nextcloud-aio |
+| AI Stack | 6 | medium | ollama-openwebui-opencode, n8n-ai-starter-kit, agixt-platform |
+| Maintenance | 6 | medium | system-update, docker-cleanup, log-cleanup, cert-renew |
+| Security & Perf | 7 | low | audit-ports, user-audit, fail2ban-status, ufw-status |
+| Recovery | 4 | high | service-restart, docker-restart, emergency-cleanup |
+| Examples | 4 | low | check-disk, check-memory, restart-nginx, tail-logs |
+
+Full details in `docs/runbooks/README.md`.
 
 ## Target Formats
 

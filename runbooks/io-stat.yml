@@ -1,0 +1,108 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: io-stat
+  title: Disk I/O Statistics
+  description: |
+    Reports disk I/O stats per device: read/write throughput, IOPS,
+    average queue size, average wait time, and service time. Also
+    reports top I/O-consuming processes. Read-only diagnostic.
+  risk: low
+  tags: ["performance", "disk", "io", "monitor", "diagnostic"]
+  version: 1
+spec:
+  parameters:
+    - name: interval_seconds
+      type: string
+      default: "5"
+      description: Sampling interval in seconds
+    - name: samples
+      type: string
+      default: "2"
+      description: Number of samples to capture
+    - name: healthcheck_url
+      type: string
+      default: ""
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "on-demand"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 60
+    concurrency: 10
+    command: |
+      set -euo pipefail
+
+      INTERVAL="${INTERVAL_SECONDS:-5}"
+      SAMPLES="${SAMPLES:-2}"
+
+      echo "=========================================="
+      echo "  DISK I/O STATISTICS"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Host: $(hostname)"
+      echo "  Interval: ${INTERVAL}s, Samples: $SAMPLES"
+      echo "=========================================="
+      echo ""
+
+      echo "--- BLOCK DEVICES ---"
+      lsblk -d -o NAME,SIZE,TYPE,MOUNTPOINT,MODEL 2>/dev/null || lsblk 2>/dev/null || echo "(no lsblk)"
+      echo ""
+
+      echo "--- DEVICE I/O STATS ---"
+      if command -v iostat &>/dev/null; then
+        iostat -x -y "$INTERVAL" "$SAMPLES" 2>&1
+      else
+        echo "iostat not installed. Reading /proc/diskstats..."
+        echo "Device    r/s     w/s     rkB/s   wkB/s   wait avg"
+        awk 'NR>2 { if ($3 ~ /^[a-z]+$/ && $3 !~ /loop|ram/) {
+          r=$4; rsec=$6; w=$8; wsec=$10; time=$13
+          printf "%-10s %-7d %-7d %-7d %-7d %-7d\n", $3, r, w, rsec/2, wsec/2, time
+        }}' /proc/diskstats 2>/dev/null | head -20
+      fi
+      echo ""
+
+      echo "--- TOP I/O PROCESSES ---"
+      if command -v iotop &>/dev/null; then
+        iotop -b -n 1 -o -P 2>/dev/null | head -15 || echo "(iotop requires root or capability)"
+      fi
+      if command -v pidstat &>/dev/null; then
+        echo "(pidstat I/O report:)"
+        pidstat -d "$INTERVAL" 1 2>/dev/null | head -20 || true
+      else
+        echo "(install sysstat for iostat/pidstat)"
+      fi
+      echo ""
+
+      echo "--- DISK LATENCY (from /proc/diskstats) ---"
+      awk 'NR>2 { if ($3 ~ /^sd|^nvme|^vd|^xvd/ && $4 > 0) {
+        io=$4+$8
+        if (io > 0) {
+          queue=$10
+          wait=$13/io
+          printf "%-10s IOs=%-8d Queue=%-6.1f AvgWait=%.2fms\n", $3, io, queue, wait
+        }
+      }}' /proc/diskstats 2>/dev/null
+
+      echo ""
+      echo "--- SWAP ACTIVITY ---"
+      if [ -f /proc/swaps ]; then
+        cat /proc/swaps 2>/dev/null
+      fi
+      vmstat 1 2 2>/dev/null | tail -1 | awk '{printf "Swap in/si: %d  Swap out/so: %d\n", $7, $8}' || true
+
+      echo ""
+      echo "Stats capture complete."
+  output:
+    store: inline
+    redact: []

@@ -1,0 +1,111 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: network-diag
+  title: Network Diagnostic
+  description: |
+    Runs connectivity tests: ping default gateway, DNS resolution for
+    common domains, HTTP reachability, traceroute to a target, and
+    listening port scan. Useful for triaging network issues.
+  risk: low
+  tags: ["diagnostic", "network", "connectivity", "dns"]
+  version: 1
+spec:
+  parameters:
+    - name: ping_targets
+      type: string
+      default: "1.1.1.1,8.8.8.8,google.com"
+      description: Comma-separated targets to ping
+    - name: dns_targets
+      type: string
+      default: "google.com,github.com"
+      description: Comma-separated domains for DNS resolution
+    - name: curl_targets
+      type: string
+      default: "https://google.com,https://github.com"
+      description: Comma-separated URLs for HTTP check
+    - name: traceroute_target
+      type: string
+      default: "1.1.1.1"
+      description: Traceroute target (empty to skip)
+    - name: healthcheck_url
+      type: string
+      default: ""
+      description: Local health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "on-demand"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 60
+    concurrency: 10
+    command: |
+      set -euo pipefail
+
+      PING="${PING_TARGETS:-1.1.1.1,8.8.8.8,google.com}"
+      DNS="${DNS_TARGETS:-google.com,github.com}"
+      CURL="${CURL_TARGETS:-https://google.com,https://github.com}"
+      TRACE="${TRACEROUTE_TARGET:-1.1.1.1}"
+
+      echo "=========================================="
+      echo "  NETWORK DIAGNOSTIC"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Host: $(hostname)"
+      echo "=========================================="
+      echo ""
+
+      echo "--- INTERFACES ---"
+      ip -brief addr 2>/dev/null || ifconfig 2>/dev/null
+      echo ""
+
+      echo "--- DEFAULT ROUTE ---"
+      ip route show default 2>/dev/null || route -n 2>/dev/null | grep ^0.0.0.0
+      echo ""
+
+      echo "--- PING ---"
+      IFS=',' read -ra TARGETS <<< "$PING"
+      for t in "${TARGETS[@]}"; do
+        t=$(echo "$t" | xargs)
+        ping -c 2 -W 3 "$t" 2>&1 | tail -1 || echo "FAIL: $t (unreachable)"
+      done
+      echo ""
+
+      echo "--- DNS RESOLUTION ---"
+      IFS=',' read -ra DTARGETS <<< "$DNS"
+      for t in "${DTARGETS[@]}"; do
+        t=$(echo "$t" | xargs)
+        result=$(dig +short "$t" 2>/dev/null || nslookup "$t" 2>/dev/null | grep -A1 'Name:' || host "$t" 2>/dev/null)
+        echo "$t → $result"
+      done
+      echo ""
+
+      echo "--- HTTP CHECK ---"
+      IFS=',' read -ra CTARGETS <<< "$CURL"
+      for t in "${CTARGETS[@]}"; do
+        t=$(echo "$t" | xargs)
+        code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$t" 2>/dev/null || echo "FAIL")
+        echo "$t → HTTP $code"
+      done
+      echo ""
+
+      echo "--- TRACEROUTE ---"
+      if [ -n "$TRACE" ]; then
+        traceroute -n -m 15 -q 1 "$TRACE" 2>/dev/null || echo "traceroute not available"
+      fi
+      echo ""
+
+      echo "--- LISTENING PORTS ---"
+      ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || echo "No port info"
+  output:
+    store: inline
+    redact: []

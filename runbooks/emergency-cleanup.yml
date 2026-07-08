@@ -1,0 +1,157 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: emergency-cleanup
+  title: Emergency Disk Cleanup
+  description: |
+    Aggressive emergency cleanup when disk is critically full (>90%).
+    Purges: apt cache, old journal logs, rotated logs beyond 2 days,
+    Docker dangling images, old kernel images, and temporary files.
+    Use only when disk is critical -- more aggressive than normal cleanup.
+  risk: high
+  tags: ["recovery", "disk", "cleanup", "emergency", "system"]
+  version: 1
+spec:
+  parameters:
+    - name: critical_threshold_pct
+      type: string
+      default: "90"
+      description: Disk usage percentage to trigger emergency mode
+    - name: journal_retention_hours
+      type: string
+      default: "12"
+      description: Journal retention in hours (aggressive)
+    - name: preserve_docker_data
+      type: string
+      default: "true"
+      description: Skip Docker volume prune (true/false)
+    - name: healthcheck_url
+      type: string
+      default: "http://localhost/health"
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Required reason for this action
+    - name: schedule
+      type: string
+      default: "on-demand"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: true
+    requiredRoles: ["admin", "senior_engineer"]
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 180
+    concurrency: 1
+    command: |
+      set -euo pipefail
+
+      THRESHOLD="${CRITICAL_THRESHOLD_PCT:-90}"
+      JOURNAL_HOURS="${JOURNAL_RETENTION_HOURS:-12}"
+      PRESERVE_DOCKER="${PRESERVE_DOCKER_DATA:-true}"
+      HEALTHCHECK="${HEALTHCHECK_URL:-http://localhost/health}"
+
+      echo "=========================================="
+      echo "  EMERGENCY DISK CLEANUP"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Host: $(hostname)"
+      echo "=========================================="
+      echo ""
+
+      # Check if we're actually critical
+      usage=$(df / 2>/dev/null | awk 'NR==2 {gsub(/%/,""); print $5}')
+      echo "Root disk usage: ${usage}% (threshold: ${THRESHOLD}%)"
+
+      if [ "$usage" -lt "$THRESHOLD" ]; then
+        echo "Disk usage below threshold. Normal cleanup only."
+      fi
+
+      echo ""
+      echo "--- [1/6] APT CACHE ---"
+      before=$(du -sh /var/cache/apt 2>/dev/null | awk '{print $1}')
+      echo "Before: $before"
+      apt-get clean -qq 2>/dev/null || apt-get autoclean -qq 2>/dev/null || true
+      apt-get autoremove -y -qq 2>/dev/null || true
+      after=$(du -sh /var/cache/apt 2>/dev/null | awk '{print $1}')
+      echo "After:  $after"
+      echo ""
+
+      echo "--- [2/6] OLD JOURNAL LOGS (${JOURNAL_HOURS}h retention) ---"
+      if command -v journalctl &>/dev/null; then
+        before=$(journalctl --disk-usage 2>/dev/null || echo "?")
+        echo "Before: $before"
+        journalctl --vacuum-time="${JOURNAL_HOURS}h" 2>&1 || true
+        after=$(journalctl --disk-usage 2>/dev/null || echo "?")
+        echo "After:  $after"
+      fi
+      echo ""
+
+      echo "--- [3/6] OLD ROTATED LOGS (>2 days) ---"
+      old=$(find /var/log -name '*.gz' -mtime +2 -o -name '*.old' -mtime +2 -o -name '*.log.*' -mtime +2 2>/dev/null | wc -l)
+      echo "Files to remove: $old"
+      find /var/log -name '*.gz' -mtime +2 -delete 2>/dev/null || true
+      find /var/log -name '*.old' -mtime +2 -delete 2>/dev/null || true
+      find /var/log -name '*.log.*' ! -name '*.log.1' -mtime +2 -delete 2>/dev/null || true
+      echo ""
+
+      echo "--- [4/6] DOCKER CLEANUP ---"
+      if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+        echo "Removing stopped containers..."
+        docker container prune -f 2>&1 | tail -1
+        echo "Removing dangling images..."
+        docker image prune -a -f 2>&1 | tail -1
+        echo "Removing build cache..."
+        docker builder prune -f 2>&1 | tail -1 || true
+        if [ "$PRESERVE_DOCKER" != "true" ]; then
+          echo "Removing unused volumes..."
+          docker volume prune -f 2>&1 | tail -1 || true
+        fi
+      else
+        echo "Docker not available or not running."
+      fi
+      echo ""
+
+      echo "--- [5/6] OLD KERNEL IMAGES ---"
+      if command -v dpkg &>/dev/null; then
+        current=$(uname -r)
+        old_kernels=$(dpkg --list 'linux-image-*' 2>/dev/null | grep '^ii' | awk '{print $2}' | grep -v "$current" | wc -l)
+        if [ "$old_kernels" -gt 0 ]; then
+          echo "Old kernel images: $old_kernels"
+          dpkg --list 'linux-image-*' 2>/dev/null | grep '^ii' | awk '{print $2}' | grep -v "$current" | while IFS= read -r k; do
+            apt-get purge -y -qq "$k" 2>/dev/null && echo "  Removed: $k" || true
+          done
+        else
+          echo "No old kernel images."
+        fi
+      fi
+      echo ""
+
+      echo "--- [6/6] TEMPORARY FILES ---"
+      tmp_size=$(du -sh /tmp 2>/dev/null | awk '{print $1}')
+      echo "/tmp size: $tmp_size"
+      find /tmp -type f -atime +1 -delete 2>/dev/null || true
+
+      if [ -d /var/tmp ]; then
+        vtmp_size=$(du -sh /var/tmp 2>/dev/null | awk '{print $1}')
+        echo "/var/tmp size: $vtmp_size"
+        find /var/tmp -type f -atime +2 -delete 2>/dev/null || true
+      fi
+      echo ""
+
+      echo "--- FINAL DISK STATUS ---"
+      df -h / 2>/dev/null
+      echo ""
+
+      echo "--- HEALTH CHECK ---"
+      echo "Testing: $HEALTHCHECK"
+      curl -s -o /dev/null -w "HTTP %{http_code}\n" --connect-timeout 5 "$HEALTHCHECK" 2>/dev/null || echo "Health check skipped (unreachable)"
+      echo ""
+
+      echo "Emergency cleanup complete."
+  output:
+    store: inline
+    redact: []

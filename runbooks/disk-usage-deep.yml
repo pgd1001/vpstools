@@ -1,0 +1,102 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: disk-usage-deep
+  title: Deep Disk Usage Analysis
+  description: |
+    Analyzes disk usage beyond `df`: largest directories/files per
+    mount point, inode usage, filesystem type breakdown, and growth
+    trends. Designed to identify unexpected disk fills quickly.
+  risk: low
+  tags: ["performance", "disk", "storage", "analysis", "monitor"]
+  version: 1
+spec:
+  parameters:
+    - name: depth
+      type: string
+      default: "3"
+      description: Directory tree depth for du scan
+    - name: min_size_mb
+      type: string
+      default: "100"
+      description: Minimum directory size to report (MB)
+    - name: healthcheck_url
+      type: string
+      default: ""
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "weekly"
+      description: Recommended cadence
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: false
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 60
+    concurrency: 5
+    command: |
+      set -euo pipefail
+
+      DEPTH="${DEPTH:-3}"
+      MIN_SIZE="${MIN_SIZE_MB:-100}"
+
+      echo "=========================================="
+      echo "  DEEP DISK USAGE ANALYSIS"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Host: $(hostname)"
+      echo "=========================================="
+      echo ""
+
+      echo "--- MOUNT OVERVIEW ---"
+      df -hT --exclude-type=tmpfs --exclude-type=devtmpfs --exclude-type=overlay 2>/dev/null || df -hT
+      echo ""
+
+      echo "--- INODE USAGE ---"
+      df -i --exclude-type=tmpfs --exclude-type=devtmpfs 2>/dev/null | grep -v '^Filesystem'
+      echo ""
+
+      echo "--- LARGEST DIRECTORIES (depth $DEPTH, min ${MIN_SIZE}M) ---"
+      du -h --max-depth="$DEPTH" / 2>/dev/null | awk -v min="$MIN_SIZE" '{gsub(/[A-Za-z]/,"",$1); if ($1+0 >= min) print}' | sort -rh | head -30 || \
+      du -h -d "$DEPTH" / 2>/dev/null | head -30
+      echo ""
+
+      echo "--- FILESYSTEM TYPE BREAKDOWN ---"
+      echo "  $(df -T 2>/dev/null | awk 'NR>1 {print $2}' | sort | uniq -c | sort -rn | head -10)"
+      echo ""
+
+      echo "--- LARGE FILES (> ${MIN_SIZE}M) ---"
+      find / -type f -size "+${MIN_SIZE}M" -exec ls -lh {} \; 2>/dev/null | awk '{print $5, $NF}' | sort -rh | head -20
+      echo ""
+
+      echo "--- DISK BY SUBDIR (/var) ---"
+      if [ -d /var ]; then
+        echo "Top /var subdirs:"
+        du -h --max-depth=2 /var 2>/dev/null | sort -rh | head -15
+      fi
+
+      echo ""
+      echo "--- DISK BY SUBDIR (/home) ---"
+      if [ -d /home ]; then
+        echo "Top /home subdirs:"
+        du -h --max-depth=2 /home 2>/dev/null | sort -rh | head -15
+      fi
+
+      echo ""
+      echo "--- SNAPSHOT FOR FUTURE COMPARISON ---"
+      echo "  Total disk: $(df -h / 2>/dev/null | awk 'NR==2 {print $2}')"
+      echo "  Used:       $(df -h / 2>/dev/null | awk 'NR==2 {print $3}')"
+      echo "  Available:  $(df -h / 2>/dev/null | awk 'NR==2 {print $4}')"
+      echo "  Use%:       $(df -h / 2>/dev/null | awk 'NR==2 {print $5}')"
+
+      echo ""
+      echo "Analysis complete."
+  output:
+    store: inline
+    redact: []

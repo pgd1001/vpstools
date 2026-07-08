@@ -1,0 +1,172 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: selfhosted-ai-package
+  title: Self-Hosted AI Package (SourceForge)
+  description: |
+    Full local AI ecosystem by Cole (mirrored on SourceForge).
+    Includes: Ollama, n8n, Supabase (DB + vector store + auth),
+    Open WebUI, Flowise, Neo4j, Langfuse, SearXNG, and Caddy.
+    All behind a reverse proxy with automatic SSL.
+    Requires: 8 GB RAM, 4 vCPUs, 40 GB disk.
+    Repo: https://github.com/coleam00/local-ai-packaged
+  risk: high
+  tags: ["provisioning", "ai", "all-in-one", "supabase", "n8n", "flowise", "ollama"]
+  version: 1
+spec:
+  parameters:
+    - name: domain
+      type: string
+      default: "localhost"
+      description: Public domain for Caddy reverse proxy
+    - name: email
+      type: string
+      default: ""
+      description: Email for Let's Encrypt (blank = staging cert)
+    - name: install_dir
+      type: string
+      default: "/opt/ai-package"
+      description: Installation directory
+    - name: default_llm
+      type: string
+      default: "llama3.2:8b"
+      description: Default Ollama model
+    - name: public_mode
+      type: string
+      default: "false"
+      description: Expose services publicly via Caddy (true/false)
+    - name: supabase_anon_key
+      type: string
+      default: ""
+      description: Supabase anon key (auto-generated if blank)
+  targets:
+    allowedTags:
+      os: ubuntu
+    allowedEnvironments: ["development", "staging"]
+  approval:
+    required: true
+    environment: production
+    requiredRole: admin
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 1200
+    concurrency: 1
+    command: |
+      set -euo pipefail
+
+      DOMAIN="${DOMAIN:-localhost}"
+      EMAIL="${EMAIL:-}"
+      INSTALL_DIR="${INSTALL_DIR:-/opt/ai-package}"
+      LLM="${DEFAULT_LLM:-llama3.2:8b}"
+      PUBLIC="${PUBLIC_MODE:-false}"
+      ANON_KEY="${SUPABASE_ANON_KEY:-$(openssl rand -hex 24)}"
+      JWT_SECRET="$(openssl rand -hex 32)"
+
+      echo "=== [1/5] System deps & Docker ==="
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq curl git ca-certificates ufw
+
+      if ! command -v docker &>/dev/null; then
+        curl -fsSL https://get.docker.com | bash
+      fi
+      systemctl enable --now docker
+
+      echo "=== [2/5] Clone AI Package ==="
+      if [ -d "$INSTALL_DIR" ]; then
+        cd "$INSTALL_DIR" && git pull
+      else
+        git clone https://github.com/coleam00/local-ai-packaged.git "$INSTALL_DIR"
+      fi
+      cd "$INSTALL_DIR"
+
+      echo "=== [3/5] Configure environment ==="
+      cp -n .env.example .env 2>/dev/null || true
+      cat > .env << ENVEOF
+      # Domain & SSL
+      DOMAIN=$DOMAIN
+      CADDY_EMAIL=${EMAIL:+$EMAIL}
+
+      # n8n
+      N8N_ENCRYPTION_KEY=$(openssl rand -hex 24)
+      N8N_USER_MANAGEMENT_JWT_SECRET=$(openssl rand -hex 24)
+
+      # Supabase
+      SUPABASE_ANON_KEY=$ANON_KEY
+      SUPABASE_SERVICE_KEY=$(openssl rand -hex 32)
+      SUPABASE_JWT_SECRET=$JWT_SECRET
+
+      # Ollama
+      OLLAMA_HOST=ollama:11434
+      DEFAULT_LLM=$LLM
+
+      # Qdrant
+      QDRANT_HOST=qdrant:6333
+
+      # SearXNG
+      SEARXNG_SECRET=$(openssl rand -base64 32)
+
+      # Langfuse
+      LANGFUSE_SECRET_KEY=$(openssl rand -hex 32)
+      LANGFUSE_PUBLIC_KEY=$(openssl rand -hex 16)
+      LANGFUSE_SALT=$(openssl rand -hex 16)
+      LANGFUSE_ENCRYPTION_KEY=$(openssl rand -hex 32)
+
+      # Storage (required by latest Supabase)
+      GLOBAL_S3_BUCKET=stub
+      REGION=stub
+      STORAGE_TENANT_ID=stub
+      S3_PROTOCOL_ACCESS_KEY_ID=625729a08b95bf1b7ff351a663f3a23c
+      S3_PROTOCOL_ACCESS_KEY_SECRET=850181e4652dd023b7a98c58ae0d2d34bd487ee0cc3254aed6eda37307425907
+      ENVEOF
+
+      echo "=== [4/5] UFW rules ==="
+      # Open core service ports for access
+      for port in 5678 3000 8000 8080 6900; do
+        ufw allow "$port/tcp" comment "AI Package:$port" 2>/dev/null || true
+      done
+      if [ "$PUBLIC" = "true" ]; then
+        ufw allow 80/tcp comment 'HTTP'
+        ufw allow 443/tcp comment 'HTTPS'
+      fi
+      ufw --force enable
+
+      echo "=== [5/5] Deploy ==="
+      if [ "$PUBLIC" = "true" ]; then
+        COMPOSE_FILE="-f docker-compose.yml -f docker-compose.override.public.yml"
+      else
+        COMPOSE_FILE="-f docker-compose.yml"
+      fi
+
+      docker compose $COMPOSE_FILE pull
+      docker compose $COMPOSE_FILE up -d
+
+      echo "--- Pulling default model ---"
+      docker exec ollama ollama pull "$LLM" 2>/dev/null || true
+
+      IP=$(hostname -I | awk '{print $1}')
+      echo ""
+      echo "=== AI PACKAGE DEPLOYED ==="
+      echo ""
+      echo "Services:"
+      echo "  n8n:         http://$IP:5678"
+      echo "  Open WebUI:  http://$IP:3000"
+      echo "  Flowise:     http://$IP:8000"
+      echo "  Supabase:    http://$IP:8000 (API)"
+      echo "  Ollama:      http://$IP:11434"
+      echo "  Qdrant:      http://$IP:6333"
+      echo "  Langfuse:    http://$IP:6900"
+      echo "  SearXNG:     http://$IP:8080"
+      echo "  Caddy:       http://$IP:80 / https://$IP:443"
+      echo ""
+      echo "Directory: $INSTALL_DIR"
+      echo "Config:    .env"
+      echo ""
+      echo "First-run setup:"
+      echo "  1. Open http://$IP:5678 to configure n8n admin"
+      echo "  2. Go to http://$IP:3000 for Open WebUI chat"
+      echo "  3. Import workflows from n8n/backup/workflows/"
+  output:
+    store: inline
+    redact: ["${ANON_KEY}", "${JWT_SECRET}"]

@@ -1,0 +1,115 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: cert-renew
+  title: SSL Certificate Renewal
+  description: |
+    Renews all Let's Encrypt / Certbot-managed certificates, reports
+    renewal status per domain, restarts dependent web services
+    (nginx, apache2, caddy), and runs a post-renewal health check.
+    Idempotent -- certbot skips certificates not due for renewal.
+  risk: medium
+  tags: ["maintenance", "ssl", "certificate", "certbot", "renewal"]
+  version: 1
+spec:
+  parameters:
+    - name: services
+      type: string
+      default: "nginx,apache2,caddy,haproxy"
+      description: Comma-separated services to restart after renewal
+    - name: dry_run
+      type: string
+      default: "false"
+      description: Dry run only (true/false)
+    - name: healthcheck_url
+      type: string
+      default: "http://localhost/health"
+      description: Health endpoint to verify
+    - name: reason
+      type: string
+      default: ""
+      description: Reason for production runs
+    - name: schedule
+      type: string
+      default: "weekly"
+      description: Recommended cadence (run on all servers weekly)
+  targets:
+    allowedEnvironments: ["development", "staging", "production"]
+  approval:
+    required: true
+    requiredRoles: ["admin", "senior_engineer"]
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 120
+    concurrency: 5
+    command: |
+      set -euo pipefail
+
+      SERVICES="${SERVICES:-nginx,apache2,caddy,haproxy}"
+      DRY_RUN="${DRY_RUN:-false}"
+      HEALTHCHECK="${HEALTHCHECK_URL:-http://localhost/health}"
+
+      echo "=========================================="
+      echo "  SSL CERTIFICATE RENEWAL"
+      echo "  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      echo "  Host: $(hostname)"
+      echo "=========================================="
+      echo ""
+
+      if ! command -v certbot &>/dev/null; then
+        echo "Certbot is not installed. No certificates to renew."
+        exit 0
+      fi
+
+      echo "--- EXISTING CERTIFICATES ---"
+      certbot certificates 2>/dev/null || echo "(no certificates)"
+      echo ""
+
+      echo "--- RENEWAL ---"
+      if [ "$DRY_RUN" = "true" ]; then
+        certbot renew --dry-run 2>&1
+      else
+        certbot renew --non-interactive 2>&1
+      fi
+
+      RENEW_EXIT=$?
+
+      echo ""
+      if [ "$DRY_RUN" = "true" ]; then
+        echo "Dry run complete (exit: $RENEW_EXIT). No certificates were modified."
+        exit 0
+      fi
+      echo ""
+
+      echo "--- POST-RENEW: RESTARTING WEB SERVICES ---"
+      IFS=',' read -ra SVCS <<< "$SERVICES"
+      for svc in "${SVCS[@]}"; do
+        svc=$(echo "$svc" | xargs)
+        if systemctl is-enabled "$svc" &>/dev/null 2>&1 || systemctl is-active "$svc" &>/dev/null 2>&1; then
+          echo "Restarting $svc..."
+          systemctl restart "$svc" 2>&1 || echo "  Warning: $svc restart had issues"
+          systemctl is-active "$svc" &>/dev/null && echo "  $svc OK" || echo "  $svc FAILED"
+        fi
+      done
+      echo ""
+
+      echo "--- HEALTH CHECK ---"
+      echo "Testing: $HEALTHCHECK"
+      code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "$HEALTHCHECK" 2>/dev/null || echo "FAIL")
+      echo "HTTP $code"
+      if [ "$code" = "FAIL" ] || [ "$code" = "000" ]; then
+        echo "WARNING: Health check failed. Services may need manual restart."
+      else
+        echo "Health check passed."
+      fi
+      echo ""
+
+      echo "--- RENEWED CERTIFICATES ---"
+      certbot certificates 2>/dev/null || true
+
+      echo ""
+      echo "Certificate renewal complete."
+  output:
+    store: inline
+    redact: []

@@ -1,0 +1,131 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: docker-server
+  title: Docker + Portainer Server
+  description: |
+    Installs Docker Engine, Docker Compose plugin, hardened daemon config,
+    and Portainer CE with optional SSL via Traefik reverse proxy.
+    Designed for Ubuntu 22.04+. Safe to re-run.
+  risk: high
+  tags: ["provisioning", "docker", "portainer", "containers", "ubuntu"]
+  version: 1
+spec:
+  parameters:
+    - name: portainer_port
+      type: string
+      default: "9443"
+      description: Portainer HTTPS port
+    - name: domain
+      type: string
+      default: ""
+      description: Optional domain for Traefik SSL frontend
+    - name: email
+      type: string
+      default: ""
+      description: Email for Let's Encrypt (required if domain set)
+  targets:
+    allowedTags:
+      os: ubuntu
+    allowedEnvironments: ["development", "staging"]
+  approval:
+    required: true
+    environment: production
+    requiredRole: senior_engineer
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 600
+    concurrency: 1
+    command: |
+      set -euo pipefail
+
+      PORTAINER_PORT="${PORTAINER_PORT:-9443}"
+      DOMAIN="${DOMAIN:-}"
+      EMAIL="${EMAIL:-}"
+
+      echo "=== [1/4] Install Docker Engine ==="
+      if ! command -v docker &>/dev/null; then
+        curl -fsSL https://get.docker.com | bash
+      fi
+      systemctl enable --now docker
+
+      echo "=== [2/4] Install Docker Compose plugin ==="
+      apt-get update -qq
+      apt-get install -y -qq docker-compose-plugin
+
+      echo "=== [3/4] Harden Docker daemon ==="
+      mkdir -p /etc/docker
+      cat > /etc/docker/daemon.json << DOCKEREOF
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "3" },
+        "icc": false,
+        "userland-proxy": false,
+        "ip-forward": true,
+        "iptables": true,
+        "live-restore": true,
+        "no-new-privileges": true
+      }
+      DOCKEREOF
+      systemctl restart docker
+
+      echo "=== [4/4] Deploy Portainer ==="
+      docker volume inspect portainer_data &>/dev/null || docker volume create portainer_data
+      docker rm -f portainer 2>/dev/null || true
+      docker run -d \
+        --name portainer \
+        --restart always \
+        -p "$PORTAINER_PORT":9443 \
+        -v /var/run/docker.sock:/var/run/docker.sock:ro \
+        -v portainer_data:/data \
+        portainer/portainer-ce:latest
+
+      if [ -n "$DOMAIN" ] && [ -n "$EMAIL" ]; then
+        echo "--- Setting up Traefik reverse proxy for Portainer ---"
+        docker network inspect traefik-public &>/dev/null || docker network create traefik-public
+        mkdir -p /opt/traefik
+        cat > /opt/traefik/docker-compose.yml << TRAEFIKEOF
+      version: "3"
+      services:
+        traefik:
+          image: traefik:v3.1
+          restart: always
+          command:
+            - "--providers.docker=true"
+            - "--providers.docker.exposedbydefault=false"
+            - "--entrypoints.websecure.address=:443"
+            - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+            - "--certificatesresolvers.letsencrypt.acme.email=${EMAIL}"
+            - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+          ports:
+            - "443:443"
+          volumes:
+            - /var/run/docker.sock:/var/run/docker.sock:ro
+            - traefik_data:/letsencrypt
+        portainer:
+          image: portainer/portainer-ce:latest
+          restart: always
+          labels:
+            - "traefik.enable=true"
+            - "traefik.http.routers.portainer.rule=Host(\`${DOMAIN}\`)"
+            - "traefik.http.routers.portainer.entrypoints=websecure"
+            - "traefik.http.routers.portainer.tls.certresolver=letsencrypt"
+            - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+          volumes:
+            - /var/run/docker.sock:/var/run/docker.sock:ro
+            - portainer_data:/data
+      volumes:
+        traefik_data:
+        portainer_data:
+      TRAEFIKEOF
+        cd /opt/traefik && docker compose up -d
+      fi
+
+      usermod -aG docker "${SUDO_USER:-$USER}" 2>/dev/null || true
+
+      echo "=== DOCKER SETUP COMPLETE ==="
+      echo "Portainer: https://$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}'):$PORTAINER_PORT"
+  output:
+    store: inline
+    redact: []

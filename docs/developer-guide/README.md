@@ -70,7 +70,51 @@ vps exec → HTTP POST → API → SQLite → runner polls GET /api/v1/jobs/next
 | `/api/v1/executions` | POST | Create execution |
 | `/api/v1/jobs/next` | GET | Poll next job (runner) |
 | `/api/v1/jobs/result` | POST | Submit result (runner) |
+| `/api/v1/runbooks` | GET | List runbooks (supports `?search=` filter) |
+| `/api/v1/runbooks` | POST | Create runbook |
+| `/api/v1/runbooks/:name` | GET | Get runbook detail |
+| `/api/v1/runbooks/:name/publish` | POST | Publish runbook |
+| `/api/v1/runbooks/:name/run` | POST | Execute runbook |
 | `/api/v1/audit` | GET | Search audit events |
+
+## Runbook Templates
+
+41 runbook YAML templates live in `runbooks/` and are validated by `runbooks/validate_runbooks_test.go`:
+
+| Wave | Count | Risk | Description |
+|---|---|---|---|
+| Examples | 4 | low | check-disk, check-memory, restart-nginx, tail-logs |
+| Diagnostics | 7 | low | system-info, network-diag, process-top, ssl-cert-check, docker-stats, failed-auth-report, journal-check |
+| Provisioning | 7 | high | base-hardened-ubuntu, docker-server, dokploy-install, nextcloud-aio, seafile-install, hermes-agent, ai-code-tools |
+| AI Stack | 6 | medium | ollama-openwebui-opencode, n8n-ai-starter-kit, selfhosted-ai-package, agixt-platform, paperclip-ai, ezlocal-ai |
+| Maintenance | 6 | medium | system-update, docker-cleanup, log-cleanup, config-backup, cert-renew, service-rotate |
+| Security | 7 | low | audit-ports, user-audit, fail2ban-status, ufw-status, disk-usage-deep, io-stat, memory-report |
+| Recovery | 4 | high | service-restart, docker-restart, swap-manage, emergency-cleanup |
+
+Runbook YAML structure:
+
+```yaml
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: unique-name
+  title: Human Readable Title
+  risk: low|medium|high
+  tags: ["category", "sub-category"]
+spec:
+  parameters:
+    - name: param_name
+      type: string
+      default: "value"
+  execution:
+    command: |
+      #!/bin/bash
+      # Use ${PARAM_NAME:-default} for parameter substitution
+  approval:
+    required: true
+    requiredRoles: ["admin", "senior_engineer"]
+    environment: production
+```
 
 ## Configuration
 

@@ -1,0 +1,101 @@
+apiVersion: vps-tools.io/v1
+kind: Runbook
+metadata:
+  name: nextcloud-aio
+  title: Nextcloud All-in-One
+  description: |
+    Installs Nextcloud AIO (All-in-One) using Docker. A master container
+    manages Nextcloud, database, Redis, Collabora, and Talk behind
+    automatic Let's Encrypt. Built-in backup/restore.
+    Minimum: 4 GB RAM, 2 vCPUs, 40 GB disk. Ubuntu 22.04+.
+  risk: critical
+  tags: ["provisioning", "nextcloud", "cloud", "file-sync", "docker"]
+  version: 1
+spec:
+  parameters:
+    - name: domain
+      type: string
+      default: ""
+      required: true
+      description: Domain for Nextcloud (DNS must point here)
+    - name: email
+      type: string
+      default: ""
+      required: true
+      description: Email for Let's Encrypt notifications
+    - name: nc_port
+      type: string
+      default: "8443"
+      description: Port for the AIO master container UI
+    - name: timezone
+      type: string
+      default: "Europe/Berlin"
+      description: Server timezone
+  targets:
+    allowedTags:
+      os: ubuntu
+    allowedEnvironments: ["staging"]
+  approval:
+    required: true
+    environment: staging
+    requiredRole: admin
+  execution:
+    shell: /bin/bash
+    sudo: true
+    timeoutSeconds: 900
+    concurrency: 1
+    command: |
+      set -euo pipefail
+
+      DOMAIN="${DOMAIN:?domain is required}"
+      EMAIL="${EMAIL:?email is required}"
+      NC_PORT="${NC_PORT:-8443}"
+      TZ="${TZ:-Europe/Berlin}"
+
+      echo "=== [1/4] System dependencies ==="
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq docker.io docker-compose-plugin ufw curl
+
+      systemctl enable --now docker
+
+      echo "=== [2/4] UFW ==="
+      ufw allow 80/tcp comment 'HTTP'
+      ufw allow 443/tcp comment 'HTTPS'
+      ufw allow "$NC_PORT"/tcp comment 'Nextcloud AIO'
+      ufw --force enable
+
+      echo "=== [3/4] Start AIO master container ==="
+      docker rm -f nextcloud-aio-master 2>/dev/null || true
+      docker run -d \
+        --name nextcloud-aio-master \
+        --restart always \
+        --network host \
+        -v /var/run/docker.sock:/var/run/docker.sock:ro \
+        -v nextcloud_aio_master:/data \
+        -e APACHE_PORT=11081 \
+        -e APACHE_IP_BINDING=0.0.0.0 \
+        -e AIO_DOMAIN="$DOMAIN" \
+        -e AIO_URL="https://$DOMAIN:$NC_PORT" \
+        -e LETSENCRYPT_EMAIL="$EMAIL" \
+        -e TZ="$TZ" \
+        nextcloud/all-in-one:latest
+
+      echo "=== [4/4] Wait & verify ==="
+      sleep 15
+      docker ps --filter name=nextcloud --format "table {{.Names}}\t{{.Status}}"
+
+      echo ""
+      echo "=== NEXTCLOUD AIO SETUP COMPLETE ==="
+      echo "1) Open https://$DOMAIN:$NC_PORT in browser"
+      echo "2) Enter the password below to log into the AIO interface:"
+      echo ""
+      echo "Password:"
+      docker exec nextcloud-aio-master grep password /data/config.php 2>/dev/null || \
+        echo "docker exec nextcloud-aio-master grep password /data/config.php"
+      echo ""
+      echo "3) In the AIO interface, select which containers to enable"
+      echo "4) Wait for all containers to become healthy"
+  output:
+    store: inline
+    redact: ["${DOMAIN}", "${EMAIL}"]

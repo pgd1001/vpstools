@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/pgd1001/svrtools/packages/authz"
 	"github.com/pgd1001/svrtools/packages/runbooks"
@@ -24,6 +27,7 @@ func handleCreateRunbook(w http.ResponseWriter, r *http.Request) {
 		Timeout     int    `json:"timeout"`
 		Environment string `json:"environment"`
 		YAML        string `json:"yaml"`
+		AllowedRoles string `json:"allowed_roles"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
@@ -82,12 +86,20 @@ func handleCreateRunbook(w http.ResponseWriter, r *http.Request) {
 		rbID, actor.OrganisationID, rb.Metadata.Name, rb.Metadata.Title, rb.Metadata.Description, actor.UserID)
 
 	rvID := "rbv_" + shortID()
+	targetJSON := jsonString(rb.Spec.Targets)
+	approvalJSON := jsonString(rb.Spec.Approval)
+
+	allowedRoles := `["senior_engineer","admin","owner"]`
+	if req.AllowedRoles != "" {
+		allowedRoles = req.AllowedRoles
+	}
+
 	db.ExecContext(r.Context(),
-		`INSERT INTO runbook_versions (id, organisation_id, runbook_id, version, status, risk_level, definition_yaml, definition_json, command_preview, command_hash, target_constraints, parameter_schema, approval_rules, created_by_user_id)
-		VALUES (?,?,?,?,'draft',?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO runbook_versions (id, organisation_id, runbook_id, version, status, risk_level, allowed_roles, definition_yaml, definition_json, command_preview, command_hash, target_constraints, parameter_schema, approval_rules, created_by_user_id)
+		VALUES (?,?,?,?,'draft',?,?,?,?,?,?,?,?,?,?)`,
 		rvID, actor.OrganisationID, rbID, rb.Metadata.Version, string(rb.Metadata.Risk),
-		string(yamlBytes), string(defJSON), rb.Spec.Execution.Command, hashCmd(rb.Spec.Execution.Command),
-		jsonString(rb.Spec.Targets), "{}", jsonString(rb.Spec.Approval), actor.UserID)
+		allowedRoles, string(yamlBytes), string(defJSON), rb.Spec.Execution.Command, hashCmd(rb.Spec.Execution.Command),
+		targetJSON, "{}", approvalJSON, actor.UserID)
 
 	db.ExecContext(r.Context(), "UPDATE runbooks SET current_version_id = ? WHERE id = ?", rvID, rbID)
 
@@ -98,14 +110,22 @@ func handleCreateRunbook(w http.ResponseWriter, r *http.Request) {
 func handleListRunbooks(w http.ResponseWriter, r *http.Request) {
 	actor, _ := authz.RequireActor(r.Context())
 	db := dbFrom(r)
+	search := r.URL.Query().Get("search")
 
-	rows, err := db.QueryContext(r.Context(),
-		`SELECT r.id, r.name, r.title, r.description, r.status,
-		COALESCE(rv.risk_level,'medium'), COALESCE(rv.command_preview,''), r.created_at
+	query := `SELECT r.id, r.name, r.title, r.description, r.status,
+		COALESCE(rv.risk_level,'medium'), COALESCE(rv.command_preview,''), COALESCE(rv.allowed_roles,'["senior_engineer","admin","owner"]'), r.created_at
 		FROM runbooks r
 		LEFT JOIN runbook_versions rv ON rv.id = r.current_version_id
-		WHERE r.organisation_id = ? AND r.status != 'archived'
-		ORDER BY r.name ASC`, actor.OrganisationID)
+		WHERE r.organisation_id = ? AND r.status != 'archived'`
+	args := []any{actor.OrganisationID}
+	if search != "" {
+		query += ` AND (r.name LIKE ? OR r.title LIKE ? OR COALESCE(r.description,'') LIKE ?)`
+		like := "%" + search + "%"
+		args = append(args, like, like, like)
+	}
+	query += ` ORDER BY r.name ASC`
+
+	rows, err := db.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "query failed"})
 		return
@@ -122,14 +142,15 @@ func handleListRunbooks(w http.ResponseWriter, r *http.Request) {
 		Command     string `json:"command_preview"`
 		CreatedAt   string `json:"created_at"`
 		Permitted   bool   `json:"permitted"`
+		AllowedRoles string `json:"allowed_roles"`
 	}
 
 	var results []rbItem
 	for rows.Next() {
 		var item rbItem
 		rows.Scan(&item.ID, &item.Name, &item.Title, &item.Description, &item.Status,
-			&item.Risk, &item.Command, &item.CreatedAt)
-		item.Permitted = true
+			&item.Risk, &item.Command, &item.AllowedRoles, &item.CreatedAt)
+		item.Permitted = roleAllowedInList(actor.Role, item.AllowedRoles)
 		results = append(results, item)
 	}
 	writeJSON(w, 200, map[string]any{"runbooks": results})
@@ -140,27 +161,29 @@ func handleGetRunbook(w http.ResponseWriter, r *http.Request, name string) {
 	db := dbFrom(r)
 
 	var rb struct {
-		ID          string `json:"id"`
-		Name        string `json:"name"`
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		Status      string `json:"status"`
-		Version     int    `json:"version"`
-		Risk        string `json:"risk_level"`
-		Command     string `json:"command"`
-		Definition  string `json:"definition_json"`
-		CreatedAt   string `json:"created_at"`
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		Title        string `json:"title"`
+		Description  string `json:"description"`
+		Status       string `json:"status"`
+		Version      int    `json:"version"`
+		Risk         string `json:"risk_level"`
+		Command      string `json:"command"`
+		Definition   string `json:"definition_json"`
+		AllowedRoles string `json:"allowed_roles"`
+		CreatedAt    string `json:"created_at"`
 	}
 
 	err := db.QueryRowContext(r.Context(),
 		`SELECT r.id, r.name, r.title, COALESCE(r.description,''), r.status,
-		COALESCE(rv.version,1), COALESCE(rv.risk_level,'medium'), COALESCE(rv.command_preview,''), COALESCE(rv.definition_json,'{}'), r.created_at
+		COALESCE(rv.version,1), COALESCE(rv.risk_level,'medium'), COALESCE(rv.command_preview,''),
+		COALESCE(rv.definition_json,'{}'), COALESCE(rv.allowed_roles,'["senior_engineer","admin","owner"]'), r.created_at
 		FROM runbooks r
 		LEFT JOIN runbook_versions rv ON rv.id = r.current_version_id
 		WHERE (r.id = ? OR r.name = ?) AND r.organisation_id = ?`,
 		name, name, actor.OrganisationID,
 	).Scan(&rb.ID, &rb.Name, &rb.Title, &rb.Description, &rb.Status,
-		&rb.Version, &rb.Risk, &rb.Command, &rb.Definition, &rb.CreatedAt)
+		&rb.Version, &rb.Risk, &rb.Command, &rb.Definition, &rb.AllowedRoles, &rb.CreatedAt)
 	if err != nil {
 		writeJSON(w, 404, map[string]string{"error": "runbook not found"})
 		return
@@ -208,14 +231,14 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	var rbID, rvID, command string
-	var risk string
+	var risk, allowedRoles string
 	var targetJSON string
 	err := db.QueryRowContext(r.Context(),
-		`SELECT r.id, rv.id, rv.command_preview, rv.risk_level, rv.target_constraints
+		`SELECT r.id, rv.id, rv.command_preview, rv.risk_level, rv.target_constraints, COALESCE(rv.allowed_roles,'["senior_engineer","admin","owner"]')
 		FROM runbooks r
 		JOIN runbook_versions rv ON rv.id = r.current_version_id
 		WHERE (r.id = ? OR r.name = ?) AND r.organisation_id = ? AND r.status = 'published'`,
-		name, name, actor.OrganisationID).Scan(&rbID, &rvID, &command, &risk, &targetJSON)
+		name, name, actor.OrganisationID).Scan(&rbID, &rvID, &command, &risk, &targetJSON, &allowedRoles)
 	if err != nil {
 		writeJSON(w, 404, map[string]string{"error": "runbook not found or not published"})
 		return
@@ -223,6 +246,11 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 
 	if rbID == "" {
 		writeJSON(w, 404, map[string]string{"error": "runbook not found or not published"})
+		return
+	}
+
+	if !roleAllowedInList(actor.Role, allowedRoles) {
+		writeDenial(w, r, actor, "runbook.executed", "runbook", rbID, authz.Deny("runbook_not_permitted", "This runbook is not permitted for your role. Use 'vps runbook list' to see permitted runbooks."))
 		return
 	}
 
@@ -238,30 +266,45 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 
 	env := detectEnv(r.Context(), db, actor.OrganisationID, targetIDs)
 
-	// Policy check for runbook execution
-	dec := policy.CheckRunbookExecution(actor, authz.Env(env), authz.RiskLevel(risk), req.Reason, rbDef)
-	if !dec.Allowed {
-		writeDenial(w, r, actor, "runbook.executed", "runbook", rbID, dec)
-		return
-	}
-
-	// Check if approval is needed
+	// Check if approval is needed (high-risk production, or junior on high-risk)
 	needsApproval := false
 	if env == "production" && risk == "high" {
 		needsApproval = true
 	}
+	if risk == "high" && !actor.IsSenior() {
+		needsApproval = true
+	}
 	if needsApproval {
 		approvalID := "apr_" + shortID()
+		execPayload := jsonString(map[string]any{
+			"runbook_id":   rbID,
+			"runbook_name": name,
+			"target":       req.Target,
+			"command":      command,
+			"risk":         risk,
+			"reason":       req.Reason,
+			"params":       req.Params,
+			"target_ids":   targetIDs,
+			"environment":  env,
+			"target_count": len(targetIDs),
+		})
 		db.ExecContext(r.Context(),
 			`INSERT INTO approval_requests (id, organisation_id, requester_user_id, action_type, status, risk_level, reason, target_type, target_id, target_snapshot, request_payload, expires_at)
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now','+1 hour'))`,
-			approvalID, actor.OrganisationID, actor.UserID, "runbook", "pending", risk, req.Reason, "server", req.Target, "{}", "{}")
+			approvalID, actor.OrganisationID, actor.UserID, "runbook", "pending", risk, req.Reason, "server", req.Target, "{}", execPayload)
 		writeAuditEvent(r.Context(), db, actor.OrganisationID, actor.UserID, "approval.requested", "approval", approvalID, "pending", map[string]any{"runbook_id": rbID})
 		writeJSON(w, 202, map[string]string{
 			"status":       "awaiting_approval",
 			"approval_id":  approvalID,
 			"message":      "This runbook requires approval. Use 'vps approvals approve " + approvalID + "' to proceed.",
 		})
+		return
+	}
+
+	// Policy check for direct runbook execution (no approval needed)
+	dec := policy.CheckRunbookExecution(actor, authz.Env(env), authz.RiskLevel(risk), req.Reason, rbDef)
+	if !dec.Allowed {
+		writeDenial(w, r, actor, "runbook.executed", "runbook", rbID, dec)
 		return
 	}
 
@@ -341,16 +384,27 @@ func handleApprove(w http.ResponseWriter, r *http.Request, approvalID string) {
 	}
 
 	var note string
-	var req struct {
+	var body struct {
 		Note string `json:"note"`
 	}
-	if json.NewDecoder(r.Body).Decode(&req) == nil {
-		note = req.Note
+	if json.NewDecoder(r.Body).Decode(&body) == nil {
+		note = body.Note
 	}
 
 	db := dbFrom(r)
+
+	var payload string
+	var requesterID, riskLevel, reason string
+	err := db.QueryRowContext(r.Context(),
+		"SELECT requester_user_id, risk_level, reason, request_payload FROM approval_requests WHERE id = ? AND organisation_id = ?",
+		approvalID, actor.OrganisationID).Scan(&requesterID, &riskLevel, &reason, &payload)
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": "approval not found"})
+		return
+	}
+
 	result, err := db.ExecContext(r.Context(),
-		"UPDATE approval_requests SET status = 'approved', approver_user_id = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ? AND organisation_id = ?",
+		"UPDATE approval_requests SET status = 'approved', approver_user_id = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ? AND organisation_id = ? AND status = 'pending'",
 		actor.UserID, sqlNullString(note), approvalID, actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to approve"})
@@ -358,12 +412,60 @@ func handleApprove(w http.ResponseWriter, r *http.Request, approvalID string) {
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
-		writeJSON(w, 404, map[string]string{"error": "approval not found"})
+		writeJSON(w, 404, map[string]string{"error": "approval not found or already decided"})
 		return
 	}
 
 	writeAuditEvent(r.Context(), db, actor.OrganisationID, actor.UserID, "approval.approved", "approval", approvalID, "approved", nil)
-	writeJSON(w, 200, map[string]string{"status": "approved"})
+
+	execID := createExecutionFromApproval(r.Context(), db, actor.OrganisationID, requesterID, actor.UserID, riskLevel, reason, payload, approvalID)
+	resp := map[string]string{"status": "approved"}
+	if execID != "" {
+		resp["execution_id"] = execID
+		resp["message"] = "Execution " + execID + " has been queued."
+	}
+	writeJSON(w, 200, resp)
+}
+
+func createExecutionFromApproval(ctx context.Context, db *sql.DB, orgID, requesterID, approverID, risk, reason, payload, approvalID string) string {
+	var intent struct {
+		Command     string   `json:"command"`
+		RunbookID   string   `json:"runbook_id"`
+		RunbookName string   `json:"runbook_name"`
+		TargetIDs   []string `json:"target_ids"`
+		Environment string   `json:"environment"`
+		Target      string   `json:"target"`
+	}
+	if err := json.Unmarshal([]byte(payload), &intent); err != nil || intent.Command == "" {
+		return ""
+	}
+
+	env := intent.Environment
+	if env == "" {
+		if len(intent.TargetIDs) > 0 {
+			env = detectEnv(ctx, db, orgID, intent.TargetIDs)
+		}
+	}
+	if env == "" {
+		env = "development"
+	}
+
+	execID := "exe_" + shortID()
+	db.ExecContext(ctx,
+		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, delegated_by_user_id, approval_id, execution_type, status, environment, risk_level, reason, command_preview, command_hash, timeout_seconds)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		execID, orgID, requesterID, "junior_engineer", approverID, approvalID, "runbook", "queued", env, risk, reason, intent.Command, hashCmd(intent.Command), 300)
+
+	for _, srvID := range intent.TargetIDs {
+		db.ExecContext(ctx,
+			`INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status)
+			VALUES (?,?,?,?,'pending')`,
+			"ext_"+shortID(), orgID, execID, srvID)
+	}
+
+	writeAuditEvent(ctx, db, orgID, requesterID, "runbook.executed", "runbook", intent.RunbookID, "queued",
+		map[string]any{"execution_id": execID, "command": intent.Command, "delegated_by": approverID})
+	return execID
 }
 
 func handleDeny(w http.ResponseWriter, r *http.Request, approvalID string) {
@@ -402,4 +504,20 @@ func handleDeny(w http.ResponseWriter, r *http.Request, approvalID string) {
 func jsonString(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+func roleAllowedInList(userRole string, allowedRolesJSON string) bool {
+	if allowedRolesJSON == "" {
+		return false
+	}
+	var roles []string
+	if err := json.Unmarshal([]byte(allowedRolesJSON), &roles); err != nil {
+		return true
+	}
+	for _, r := range roles {
+		if strings.EqualFold(r, userRole) {
+			return true
+		}
+	}
+	return false
 }
