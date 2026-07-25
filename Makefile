@@ -1,4 +1,4 @@
-.PHONY: dev-up dev-down build test vet lint generate clean
+.PHONY: dev-up dev-down build test vet lint generate clean backup
 
 dev-up:
 	docker compose -f deploy/docker-compose/docker-compose.yml up -d
@@ -29,6 +29,9 @@ lint:
 generate:
 	buf generate
 	sqlc generate
+
+backup:
+	go run ./apps/api/cmd/backup
 
 clean:
 	rm -f svrtools.db vps.exe api.exe runner.exe

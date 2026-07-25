@@ -12,8 +12,8 @@
 - **Single runner.** The MVP supports one runner per organisation. Multiple runner federations not yet supported.
 - **No NATS.** Jobs are dispatched via database polling (`GET /api/v1/jobs/next`). NATS JetStream planned post-MVP.
 - **No interactive SSH.** Only non-interactive command execution. No TTY, no session recording.
-- **No output retention.** stdout/stderr stored inline in database. Object storage (MinIO/S3) planned post-MVP.
-- **No retry logic.** Failed executions are not automatically retried.
+- **Self-contained output storage is the default.** Large stdout/stderr is encrypted in the local artefact directory and referenced from SQLite. S3-compatible storage remains an optional extension for larger deployments.
+- **Database dispatch is the default.** Leases and bounded attempt metadata are present for recovery. JetStream remains an optional extension.
 
 ## RBAC & Policy
 
@@ -32,8 +32,8 @@
 
 ## Infrastructure
 
-- **SQLite for local dev.** PostgreSQL required for production. SQLite is single-writer, no HA.
-- **No backup/restore.** Manual database file copy is the only backup mechanism.
+- **SQLite is the default deployment database.** PostgreSQL is an optional extension for higher concurrency and horizontal scaling. SQLite remains single-writer and does not provide HA.
+- **Backup is local-first.** `make backup` creates a SQLite backup, encrypted artefact copy, and manifest. Automated scheduling and remote backup replication remain future work.
 - **Single binary API.** No horizontal scaling. The API is a single process.
 - **No health monitoring.** Runner and server health checks are manual (`vps server check`).
 
@@ -53,7 +53,7 @@
 ## Security
 
 - **No hash-chain audit.** Audit events are append-only at application level, not cryptographically chained.
-- **No output redaction server-side.** Redaction happens in the runner before submitting to API. API does not redact.
+- **Output is redacted at the API boundary as well as by the runner.** Large output is encrypted in the local artefact store.
 - **No rate limiting.** No brute-force protection on endpoints.
 - **CORS is allowlisted but basic.** Set `VPS_WEB_ORIGIN` to the exact console origin. OIDC and CSRF protection are still pending.
 

@@ -13,7 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pgd1001/svrtools/packages/artifacts"
 	"github.com/pgd1001/svrtools/packages/authz"
+	"github.com/pgd1001/svrtools/packages/config"
 	"github.com/pgd1001/svrtools/packages/redact"
 	_ "modernc.org/sqlite"
 )
@@ -25,6 +27,8 @@ type tag struct {
 
 var policy = authz.NewPolicy()
 var apiDB *sql.DB
+var apiArtifacts artifacts.Store
+var apiBackends config.BackendConfig
 
 type handlerFunc func(w http.ResponseWriter, r *http.Request)
 
@@ -34,14 +38,32 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	dbPath := envOrDefault("DB_PATH", "svrtools.db")
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)")
+	apiBackends = config.Load()
+	if err := apiBackends.Validate(); err != nil {
+		logger.Error("backend configuration invalid", "error", err)
+		os.Exit(1)
+	}
+	if apiBackends.DatabaseDriver != "sqlite" {
+		logger.Error("database backend is configured but the current API handlers require the self-contained SQLite tier", "database_driver", apiBackends.DatabaseDriver)
+		os.Exit(1)
+	}
+	if apiBackends.ArtifactStore != "local" || apiBackends.JobDispatch != "database" || apiBackends.Scheduler != "embedded" || apiBackends.EventBus != "disabled" {
+		logger.Error("an extended backend was selected, but this binary currently supports the self-contained tier only", "artifact_store", apiBackends.ArtifactStore, "job_dispatch", apiBackends.JobDispatch, "scheduler", apiBackends.Scheduler, "event_bus", apiBackends.EventBus)
+		os.Exit(1)
+	}
+	db, err := sql.Open("sqlite", apiBackends.DatabaseURL+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		logger.Error("database open failed", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
 	apiDB = db
+	localArtifacts, err := artifacts.NewLocalStore(apiBackends.ArtifactsDir, apiBackends.ArtifactKey)
+	if err != nil {
+		logger.Error("artifact store initialisation failed", "error", err)
+		os.Exit(1)
+	}
+	apiArtifacts = localArtifacts
 
 	if err := migrate(ctx, db); err != nil {
 		logger.Error("migration failed", "error", err)
@@ -52,12 +74,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("database ready")
+	logger.Info("database ready", "tier", apiBackends.Tier(), "database_driver", apiBackends.DatabaseDriver, "artifact_store", apiBackends.ArtifactStore, "job_dispatch", apiBackends.JobDispatch)
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]string{"status": "ok", "version": "0.4.0"})
+		writeJSON(w, 200, map[string]string{"status": "ok", "version": "0.4.0", "deployment_tier": apiBackends.Tier(), "database_driver": apiBackends.DatabaseDriver, "artifact_store": apiBackends.ArtifactStore, "job_dispatch": apiBackends.JobDispatch})
 	})
 
 	mux.HandleFunc("/api/v1/whoami", withAuth(db, handleWhoAmI))
@@ -1056,20 +1078,22 @@ func handleGetExecution(w http.ResponseWriter, r *http.Request, execID string) {
 	}
 
 	type targetResult struct {
-		ID         string `json:"id"`
-		ServerID   string `json:"server_id"`
-		RunnerID   string `json:"runner_id"`
-		Status     string `json:"status"`
-		ExitCode   int    `json:"exit_code"`
-		Stdout     string `json:"stdout"`
-		Stderr     string `json:"stderr"`
-		StartedAt  string `json:"started_at"`
-		FinishedAt string `json:"finished_at"`
-		Error      string `json:"error_summary"`
+		ID               string `json:"id"`
+		ServerID         string `json:"server_id"`
+		RunnerID         string `json:"runner_id"`
+		Status           string `json:"status"`
+		ExitCode         int    `json:"exit_code"`
+		Stdout           string `json:"stdout"`
+		Stderr           string `json:"stderr"`
+		StartedAt        string `json:"started_at"`
+		FinishedAt       string `json:"finished_at"`
+		Error            string `json:"error_summary"`
+		StdoutArtifactID string `json:"-"`
+		StderrArtifactID string `json:"-"`
 	}
 	rows, err := db.QueryContext(r.Context(),
 		`SELECT id, server_id, COALESCE(runner_id,''), status, COALESCE(exit_code,0),
-		stdout, stderr, COALESCE(started_at,''), COALESCE(finished_at,''), COALESCE(error_summary,'')
+		stdout, stderr, COALESCE(stdout_artifact_id,''), COALESCE(stderr_artifact_id,''), COALESCE(started_at,''), COALESCE(finished_at,''), COALESCE(error_summary,'')
 		FROM execution_targets WHERE execution_id = ? ORDER BY server_id`, execID)
 	var targets []targetResult
 	if err == nil {
@@ -1077,7 +1101,17 @@ func handleGetExecution(w http.ResponseWriter, r *http.Request, execID string) {
 		for rows.Next() {
 			var t targetResult
 			rows.Scan(&t.ID, &t.ServerID, &t.RunnerID, &t.Status,
-				&t.ExitCode, &t.Stdout, &t.Stderr, &t.StartedAt, &t.FinishedAt, &t.Error)
+				&t.ExitCode, &t.Stdout, &t.Stderr, &t.StdoutArtifactID, &t.StderrArtifactID, &t.StartedAt, &t.FinishedAt, &t.Error)
+			if t.StdoutArtifactID != "" && apiArtifacts != nil {
+				if data, _, artifactErr := apiArtifacts.Get(t.StdoutArtifactID); artifactErr == nil {
+					t.Stdout = string(data)
+				}
+			}
+			if t.StderrArtifactID != "" && apiArtifacts != nil {
+				if data, _, artifactErr := apiArtifacts.Get(t.StderrArtifactID); artifactErr == nil {
+					t.Stderr = string(data)
+				}
+			}
 			targets = append(targets, t)
 		}
 	}
@@ -1325,7 +1359,10 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 	var sshPort, timeout int
 	err = tx.QueryRowContext(ctx, `SELECT et.id, e.id, e.command_preview, COALESCE(s.hostname, s.public_ip, ''), s.ssh_port, COALESCE(s.ssh_username,''), e.timeout_seconds
 		FROM execution_targets et JOIN executions e ON e.id = et.execution_id JOIN servers s ON s.id = et.server_id
-		WHERE e.status = 'queued' AND et.status = 'pending' AND e.organisation_id = ? AND et.runner_id IS NULL
+		WHERE e.status IN ('queued','running') AND e.organisation_id = ?
+		AND ((et.status = 'pending' AND (et.next_attempt_at IS NULL OR et.next_attempt_at <= datetime('now')))
+			OR (et.status = 'running' AND et.lease_expires_at IS NOT NULL AND et.lease_expires_at <= datetime('now')))
+		AND et.attempt < et.max_attempts
 		AND EXISTS (SELECT 1 FROM runners rn JOIN runner_scopes rs ON rs.runner_id = rn.id
 			WHERE rn.id = ? AND rn.organisation_id = ? AND rn.status = 'active'
 			AND (rs.scope_type = 'all' OR (rs.scope_type = 'server' AND rs.scope_value = et.server_id)))
@@ -1337,11 +1374,12 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		writeJSON(w, 404, map[string]string{"status": "no_jobs"})
 		return
 	}
-	if _, err = tx.ExecContext(ctx, "UPDATE executions SET status = 'running', started_at = datetime('now') WHERE id = ? AND status = 'queued'", execID); err != nil {
+	if _, err = tx.ExecContext(ctx, "UPDATE executions SET status = 'running', started_at = COALESCE(started_at, datetime('now')) WHERE id = ? AND status IN ('queued','running')", execID); err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "job was claimed by another runner"})
 		return
 	}
-	if _, err = tx.ExecContext(ctx, "UPDATE execution_targets SET status = 'running', runner_id = ?, started_at = datetime('now') WHERE id = ? AND status = 'pending'", runnerID, targetID); err != nil {
+	leaseID := "lease_" + shortID()
+	if _, err = tx.ExecContext(ctx, "UPDATE execution_targets SET status = 'running', runner_id = ?, lease_id = ?, lease_expires_at = datetime('now','+5 minutes'), attempt = attempt + 1, started_at = COALESCE(started_at, datetime('now')) WHERE id = ? AND status IN ('pending','running') AND attempt < max_attempts", runnerID, leaseID, targetID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to bind job to runner"})
 		return
 	}
@@ -1358,6 +1396,7 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		"port":         sshPort,
 		"user":         sshUser,
 		"timeout":      timeout,
+		"lease_id":     leaseID,
 	})
 }
 
@@ -1372,26 +1411,39 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 		ExecutionID string `json:"execution_id"`
 		TargetID    string `json:"target_id"`
 		RunnerID    string `json:"runner_id"`
+		LeaseID     string `json:"lease_id"`
 		ExitCode    int    `json:"exit_code"`
 		Stdout      string `json:"stdout"`
 		Stderr      string `json:"stderr"`
 		Error       string `json:"error"`
 		DurationMs  int64  `json:"duration_ms"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ExecutionID == "" || req.TargetID == "" || req.RunnerID == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ExecutionID == "" || req.TargetID == "" || req.RunnerID == "" || req.LeaseID == "" {
 		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 		return
 	}
 	req.Stdout = redact.Stdout(req.Stdout)
 	req.Stderr = redact.Stdout(req.Stderr)
+	stdoutArtifactID, stderrArtifactID, err := persistExecutionArtifacts(ctx, db, orgID, req.ExecutionID, req.TargetID, req.Stdout, req.Stderr)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist execution output"})
+		return
+	}
+	storedStdout, storedStderr := req.Stdout, req.Stderr
+	if stdoutArtifactID != "" {
+		storedStdout = ""
+	}
+	if stderrArtifactID != "" {
+		storedStderr = ""
+	}
 
 	status := "succeeded"
 	if req.ExitCode != 0 || req.Error != "" {
 		status = "failed"
 	}
 
-	targetResult, err := db.ExecContext(ctx, "UPDATE execution_targets SET status = ?, exit_code = ?, error_summary = ?, stdout = ?, stderr = ?, finished_at = datetime('now') WHERE id = ? AND execution_id = ? AND runner_id = ? AND status = 'running' AND EXISTS (SELECT 1 FROM executions e WHERE e.id = execution_targets.execution_id AND e.organisation_id = ?) AND EXISTS (SELECT 1 FROM runners rn WHERE rn.id = execution_targets.runner_id AND rn.organisation_id = ?)",
-		status, req.ExitCode, sqlNullString(req.Error), req.Stdout, req.Stderr, req.TargetID, req.ExecutionID, req.RunnerID, orgID, orgID)
+	targetResult, err := db.ExecContext(ctx, "UPDATE execution_targets SET status = ?, exit_code = ?, error_summary = ?, stdout = ?, stderr = ?, stdout_artifact_id = ?, stderr_artifact_id = ?, stdout_bytes = ?, stderr_bytes = ?, lease_expires_at = NULL, finished_at = datetime('now') WHERE id = ? AND execution_id = ? AND runner_id = ? AND lease_id = ? AND status = 'running' AND EXISTS (SELECT 1 FROM executions e WHERE e.id = execution_targets.execution_id AND e.organisation_id = ?) AND EXISTS (SELECT 1 FROM runners rn WHERE rn.id = execution_targets.runner_id AND rn.organisation_id = ?)",
+		status, req.ExitCode, sqlNullString(req.Error), storedStdout, storedStderr, sqlNullString(stdoutArtifactID), sqlNullString(stderrArtifactID), len(req.Stdout), len(req.Stderr), req.TargetID, req.ExecutionID, req.RunnerID, req.LeaseID, orgID, orgID)
 	if err != nil || func() bool { n, _ := targetResult.RowsAffected(); return n == 0 }() {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "target is not assigned to this runner"})
 		return
@@ -1425,4 +1477,35 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 	})
 
 	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+const artifactInlineLimit = 64 * 1024
+
+func persistExecutionArtifacts(ctx context.Context, db *sql.DB, orgID, executionID, targetID, stdout, stderr string) (string, string, error) {
+	if apiArtifacts == nil {
+		return "", "", nil
+	}
+	var stdoutID, stderrID string
+	store := func(kind, value string) (string, error) {
+		if len(value) <= artifactInlineLimit {
+			return "", nil
+		}
+		id := fmt.Sprintf("art_%s_%s_%s", executionID, targetID, kind)
+		meta, err := apiArtifacts.Put(id, "text/plain", []byte(value))
+		if err != nil {
+			return "", err
+		}
+		if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO artifact_records (id, organisation_id, owner_type, owner_id, content_type, byte_size, sha256, backend) VALUES (?,?,?,?,?,?,?,'local')`, id, orgID, "execution_target_"+kind, targetID, meta.ContentType, meta.Size, meta.SHA256); err != nil {
+			return "", err
+		}
+		return id, nil
+	}
+	var err error
+	if stdoutID, err = store("stdout", stdout); err != nil {
+		return "", "", err
+	}
+	if stderrID, err = store("stderr", stderr); err != nil {
+		return "", "", err
+	}
+	return stdoutID, stderrID, nil
 }

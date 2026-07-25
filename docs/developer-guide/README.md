@@ -131,3 +131,46 @@ spec:
 - `API_URL` env var (defaults to `http://localhost:8080`)
 - `SIMULATE=true` to skip SSH and fake execution
 - `SSH_TARGET_HOST`, `SSH_TARGET_PORT`, `SSH_USER`, `SSH_PASSWORD` for real SSH
+# Self-contained deployment
+
+The default API deployment requires no PostgreSQL, object storage, or message broker.
+It uses SQLite in WAL mode, an encrypted local artefact directory, and database-backed job polling.
+
+```text
+DATABASE_DRIVER=sqlite
+DATABASE_URL=./svrtools.db
+ARTIFACT_STORE=local
+ARTIFACTS_DIR=./data/artifacts
+JOB_DISPATCH=database
+SCHEDULER=embedded
+EVENT_BUS=disabled
+```
+
+The local artefact store creates an encryption key at `ARTIFACTS_DIR/.key` on first start.
+Back up this file with the database. Losing it makes encrypted artefacts unrecoverable.
+
+Create a consistent backup with:
+
+```bash
+make backup
+```
+
+Large execution output is written as encrypted artefacts and referenced from SQLite.
+Small output remains inline for fast reads.
+
+## Extended deployment
+
+Larger installations can select PostgreSQL, S3-compatible storage, and NATS through the same backend settings:
+
+```text
+DATABASE_DRIVER=postgres
+DATABASE_URL=postgres://...
+ARTIFACT_STORE=s3
+S3_ENDPOINT=https://...
+JOB_DISPATCH=jetstream
+NATS_URL=nats://...
+SCHEDULER=external
+EVENT_BUS=nats
+```
+
+The API validates these settings at startup and refuses incomplete configurations. The self-contained SQLite path remains the supported local and small-deployment path.

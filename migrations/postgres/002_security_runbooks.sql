@@ -4,6 +4,38 @@ ALTER TABLE executions ADD COLUMN IF NOT EXISTS delegated_by_user_id TEXT REFERE
 ALTER TABLE executions ADD COLUMN IF NOT EXISTS approval_id TEXT;
 ALTER TABLE execution_targets ADD COLUMN IF NOT EXISTS stdout TEXT NOT NULL DEFAULT '';
 ALTER TABLE execution_targets ADD COLUMN IF NOT EXISTS stderr TEXT NOT NULL DEFAULT '';
+ALTER TABLE execution_targets ADD COLUMN IF NOT EXISTS stdout_artifact_id TEXT;
+ALTER TABLE execution_targets ADD COLUMN IF NOT EXISTS stderr_artifact_id TEXT;
+ALTER TABLE execution_targets ADD COLUMN IF NOT EXISTS lease_id TEXT;
+ALTER TABLE execution_targets ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+ALTER TABLE execution_targets ADD COLUMN IF NOT EXISTS attempt INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE execution_targets ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 3;
+ALTER TABLE execution_targets ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS execution_events (
+    id TEXT PRIMARY KEY,
+    organisation_id TEXT NOT NULL REFERENCES organisations(id),
+    execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
+    target_id TEXT REFERENCES execution_targets(id) ON DELETE CASCADE,
+    from_status TEXT,
+    to_status TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}',
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS artifact_records (
+    id TEXT PRIMARY KEY,
+    organisation_id TEXT NOT NULL REFERENCES organisations(id),
+    owner_type TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    byte_size BIGINT NOT NULL DEFAULT 0,
+    sha256 TEXT NOT NULL,
+    backend TEXT NOT NULL DEFAULT 'local',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at TIMESTAMPTZ
+);
 
 CREATE TABLE IF NOT EXISTS runner_credentials (
     id              TEXT PRIMARY KEY,

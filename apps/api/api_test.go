@@ -456,10 +456,11 @@ func TestStdoutStderrStoredOnSubmit(t *testing.T) {
 	// Runner submits result with stdout/stderr
 	var claimResp struct {
 		TargetID string `json:"target_id"`
+		LeaseID  string `json:"lease_id"`
 	}
 	json.NewDecoder(w2.Body).Decode(&claimResp)
 	w3 := doRequest(t, mux, http.MethodPost, "/api/v1/jobs/result",
-		fmt.Sprintf(`{"runner_id":"rnr_local","target_id":"%s","execution_id":"%s","exit_code":0,"stdout":"hello output\n","stderr":"","duration_ms":100}`, claimResp.TargetID, createResp.ExecutionID), "")
+		fmt.Sprintf(`{"runner_id":"rnr_local","target_id":"%s","execution_id":"%s","lease_id":"%s","exit_code":0,"stdout":"hello output\n","stderr":"","duration_ms":100}`, claimResp.TargetID, createResp.ExecutionID, claimResp.LeaseID), "")
 	if w3.Code != 200 {
 		t.Fatalf("submit result failed: %s", w3.Body.String())
 	}

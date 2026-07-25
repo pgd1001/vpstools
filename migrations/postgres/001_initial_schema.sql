@@ -201,8 +201,40 @@ CREATE TABLE execution_targets (
     error_summary   TEXT,
     stdout          TEXT NOT NULL DEFAULT '',
     stderr          TEXT NOT NULL DEFAULT '',
+    stdout_artifact_id TEXT,
+    stderr_artifact_id TEXT,
+    lease_id        TEXT,
+    lease_expires_at TIMESTAMPTZ,
+    attempt         INTEGER NOT NULL DEFAULT 0,
+    max_attempts    INTEGER NOT NULL DEFAULT 3,
+    next_attempt_at TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT execution_targets_unique UNIQUE (execution_id, server_id)
+);
+
+CREATE TABLE execution_events (
+    id              TEXT PRIMARY KEY,
+    organisation_id TEXT NOT NULL REFERENCES organisations(id),
+    execution_id    TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
+    target_id       TEXT REFERENCES execution_targets(id) ON DELETE CASCADE,
+    from_status     TEXT,
+    to_status       TEXT NOT NULL,
+    event_type      TEXT NOT NULL,
+    metadata        JSONB NOT NULL DEFAULT '{}',
+    occurred_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE artifact_records (
+    id              TEXT PRIMARY KEY,
+    organisation_id TEXT NOT NULL REFERENCES organisations(id),
+    owner_type      TEXT NOT NULL,
+    owner_id        TEXT NOT NULL,
+    content_type    TEXT NOT NULL,
+    byte_size       BIGINT NOT NULL DEFAULT 0,
+    sha256          TEXT NOT NULL,
+    backend         TEXT NOT NULL DEFAULT 'local',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at      TIMESTAMPTZ
 );
 
 CREATE TABLE audit_events (
@@ -242,6 +274,8 @@ CREATE INDEX idx_executions_org_status ON executions(organisation_id, status);
 CREATE INDEX idx_executions_actor ON executions(actor_user_id, requested_at DESC);
 CREATE INDEX idx_execution_targets_exec ON execution_targets(execution_id);
 CREATE INDEX idx_execution_targets_server ON execution_targets(server_id, created_at DESC);
+CREATE INDEX idx_execution_events_execution ON execution_events(execution_id, occurred_at DESC);
+CREATE INDEX idx_artifact_records_owner ON artifact_records(organisation_id, owner_type, owner_id);
 CREATE INDEX idx_audit_events_org_time ON audit_events(organisation_id, occurred_at DESC);
 CREATE INDEX idx_audit_events_actor ON audit_events(organisation_id, actor_user_id, occurred_at DESC);
 CREATE INDEX idx_audit_events_action ON audit_events(organisation_id, action, occurred_at DESC);

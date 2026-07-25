@@ -34,7 +34,7 @@ func main() {
 	targetHost := envOrDefault("SSH_TARGET_HOST", "localhost")
 	targetPort := envOrDefault("SSH_TARGET_PORT", "2222")
 	sshUser := envOrDefault("SSH_USER", "svrtools")
-	sshPassword := envOrDefault("SSH_PASSWORD", "svrtools")
+	sshPassword := os.Getenv("SSH_PASSWORD")
 	runnerToken := os.Getenv("VPS_RUNNER_TOKEN")
 	knownHosts := os.Getenv("SSH_KNOWN_HOSTS")
 
@@ -49,6 +49,10 @@ func main() {
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	hostname, _ := os.Hostname()
 	runnerID := registerRunner(ctx, httpClient, apiURL, runnerName, hostname, runnerToken, logger)
+	if runnerID == "" {
+		logger.Error("runner cannot start without successful registration")
+		return
+	}
 
 	lastHeartbeat := time.Now()
 	pollInterval := 2 * time.Second
@@ -113,7 +117,7 @@ func main() {
 
 		logger.Info("job completed", "execution_id", job.ExecutionID, "exit_code", result.ExitCode, "duration_ms", result.DurationMs)
 
-		if err := submitResult(ctx, httpClient, apiURL, runnerID, job.TargetID, job.ExecutionID, runnerToken, result); err != nil {
+		if err := submitResult(ctx, httpClient, apiURL, runnerID, job.TargetID, job.ExecutionID, job.LeaseID, runnerToken, result); err != nil {
 			logger.Error("failed to submit result", "execution_id", job.ExecutionID, "error", err)
 		}
 	}
@@ -134,7 +138,7 @@ func registerRunner(ctx context.Context, client *http.Client, apiURL, name, host
 	req.Header.Set("X-VPS-Runner-Token", token)
 	resp, err := client.Do(req)
 	if err != nil {
-		logger.Warn("runner registration failed, continuing unregistered", "error", err)
+		logger.Warn("runner registration failed", "error", err)
 		return ""
 	}
 	defer resp.Body.Close()
@@ -168,7 +172,8 @@ func sendHeartbeat(ctx context.Context, client *http.Client, apiURL, runnerID, h
 }
 
 func getOutboundIP() string {
-	resp, err := http.Get("https://api.ipify.org")
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("https://api.ipify.org")
 	if err != nil {
 		return "127.0.0.1"
 	}
@@ -196,6 +201,7 @@ type job struct {
 	Port        int    `json:"port"`
 	User        string `json:"user"`
 	Timeout     int    `json:"timeout"`
+	LeaseID     string `json:"lease_id"`
 }
 
 func claimJob(ctx context.Context, client *http.Client, apiURL, runnerID, token string) (*job, error) {
@@ -227,11 +233,12 @@ func claimJob(ctx context.Context, client *http.Client, apiURL, runnerID, token 
 	return &j, nil
 }
 
-func submitResult(ctx context.Context, client *http.Client, apiURL, runnerID, targetID, execID, token string, result sshx.Result) error {
+func submitResult(ctx context.Context, client *http.Client, apiURL, runnerID, targetID, execID, leaseID, token string, result sshx.Result) error {
 	body := map[string]any{
 		"runner_id":    runnerID,
 		"target_id":    targetID,
 		"execution_id": execID,
+		"lease_id":     leaseID,
 		"exit_code":    result.ExitCode,
 		"stdout":       redact.Stdout(result.Stdout),
 		"stderr":       redact.Stdout(result.Stderr),

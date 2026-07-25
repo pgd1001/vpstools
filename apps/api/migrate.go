@@ -97,6 +97,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		started_at TEXT, finished_at TEXT, exit_code INTEGER,
 		stdout_bytes INTEGER NOT NULL DEFAULT 0, stderr_bytes INTEGER NOT NULL DEFAULT 0,
 		stdout TEXT NOT NULL DEFAULT '', stderr TEXT NOT NULL DEFAULT '',
+		stdout_artifact_id TEXT, stderr_artifact_id TEXT,
+		lease_id TEXT, lease_expires_at TEXT, attempt INTEGER NOT NULL DEFAULT 0,
+		max_attempts INTEGER NOT NULL DEFAULT 3, next_attempt_at TEXT,
 		error_summary TEXT,
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		UNIQUE(execution_id, server_id)
@@ -150,6 +153,19 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		decided_at TEXT, decision_note TEXT,
 		created_at TEXT NOT NULL DEFAULT (datetime('now'))
 	);
+	CREATE TABLE IF NOT EXISTS execution_events (
+		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
+		execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
+		target_id TEXT REFERENCES execution_targets(id) ON DELETE CASCADE,
+		from_status TEXT, to_status TEXT NOT NULL, event_type TEXT NOT NULL,
+		metadata TEXT NOT NULL DEFAULT '{}', occurred_at TEXT NOT NULL DEFAULT (datetime('now'))
+	);
+	CREATE TABLE IF NOT EXISTS artifact_records (
+		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
+		owner_type TEXT NOT NULL, owner_id TEXT NOT NULL, content_type TEXT NOT NULL,
+		byte_size INTEGER NOT NULL DEFAULT 0, sha256 TEXT NOT NULL, backend TEXT NOT NULL DEFAULT 'local',
+		created_at TEXT NOT NULL DEFAULT (datetime('now')), deleted_at TEXT
+	);
 	CREATE INDEX IF NOT EXISTS idx_servers_org_status ON servers(organisation_id, status);
 	CREATE INDEX IF NOT EXISTS idx_servers_org_env ON servers(organisation_id, environment);
 	CREATE INDEX IF NOT EXISTS idx_server_tags_org_kv ON server_tags(organisation_id, key, value);
@@ -170,6 +186,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_runbook_versions_runbook ON runbook_versions(runbook_id, version);
 	CREATE INDEX IF NOT EXISTS idx_approvals_org_status ON approval_requests(organisation_id, status);
 	CREATE INDEX IF NOT EXISTS idx_approvals_requester ON approval_requests(requester_user_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_execution_events_execution ON execution_events(execution_id, occurred_at);
+	CREATE INDEX IF NOT EXISTS idx_artifact_records_owner ON artifact_records(organisation_id, owner_type, owner_id);
 	`
 	_, err := db.ExecContext(ctx, schema)
 	if err != nil {
@@ -180,6 +198,13 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	_ = addColumnIgnoreErr(ctx, db, "executions", "approval_id", "TEXT")
 	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "stdout", "TEXT NOT NULL DEFAULT ''")
 	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "stderr", "TEXT NOT NULL DEFAULT ''")
+	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "stdout_artifact_id", "TEXT")
+	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "stderr_artifact_id", "TEXT")
+	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "lease_id", "TEXT")
+	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "lease_expires_at", "TEXT")
+	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "attempt", "INTEGER NOT NULL DEFAULT 0")
+	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "max_attempts", "INTEGER NOT NULL DEFAULT 3")
+	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "next_attempt_at", "TEXT")
 	_ = addColumnIgnoreErr(ctx, db, "runbook_versions", "allowed_roles", "TEXT NOT NULL DEFAULT '[\"senior_engineer\",\"admin\",\"owner\"]'")
 	return nil
 }
