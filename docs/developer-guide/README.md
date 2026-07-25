@@ -20,6 +20,7 @@ go build -o bin/runner.exe ./apps/runner
 .\bin\vps.exe exec server:demo -- uptime
 
 # Terminal 3: Run the runner (simulate mode)
+$env:VPS_DEV_AUTH = "true"
 $env:SIMULATE = "true"
 .\bin\runner.exe
 

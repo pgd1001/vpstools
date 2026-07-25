@@ -4,5 +4,7 @@ bin/
 *.db-wal
 *.exe
 .env
+*.env.local
+*.tsbuildinfo
 node_modules/
 apps/web/.next/

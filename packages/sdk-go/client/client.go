@@ -6,20 +6,23 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 )
 
 type Client struct {
-	baseURL string
-	userID  string
-	http    *http.Client
+	baseURL     string
+	userID      string
+	runnerToken string
+	http        *http.Client
 }
 
 func New(baseURL string) *Client {
 	return &Client{
-		baseURL: baseURL,
-		userID:  "user_senior",
-		http:    &http.Client{Timeout: 30 * time.Second},
+		baseURL:     baseURL,
+		userID:      "",
+		runnerToken: os.Getenv("VPS_RUNNER_TOKEN"),
+		http:        &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -246,23 +249,23 @@ func (c *Client) CreateExecution(target, command, reason string) (*CreateExecuti
 }
 
 type ExecutionDetail struct {
-	ID              string `json:"id"`
-	ActorUserID     string `json:"actor_user_id"`
-	ActorRole       string `json:"actor_role_at_time"`
-	ExecutionType   string `json:"execution_type"`
-	Status          string `json:"status"`
-	RiskLevel       string `json:"risk_level"`
-	Environment     string `json:"environment"`
-	Reason          string `json:"reason"`
-	CommandPreview  string `json:"command_preview"`
-	CommandHash     string `json:"command_hash"`
-	TimeoutSeconds  int    `json:"timeout_seconds"`
-	RequestedAt     string `json:"requested_at"`
-	StartedAt       string `json:"started_at"`
-	FinishedAt      string `json:"finished_at"`
-	ErrorSummary    string `json:"error_summary"`
-	DelegatedBy     string `json:"delegated_by_user_id"`
-	ApprovalID      string `json:"approval_id"`
+	ID             string `json:"id"`
+	ActorUserID    string `json:"actor_user_id"`
+	ActorRole      string `json:"actor_role_at_time"`
+	ExecutionType  string `json:"execution_type"`
+	Status         string `json:"status"`
+	RiskLevel      string `json:"risk_level"`
+	Environment    string `json:"environment"`
+	Reason         string `json:"reason"`
+	CommandPreview string `json:"command_preview"`
+	CommandHash    string `json:"command_hash"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+	RequestedAt    string `json:"requested_at"`
+	StartedAt      string `json:"started_at"`
+	FinishedAt     string `json:"finished_at"`
+	ErrorSummary   string `json:"error_summary"`
+	DelegatedBy    string `json:"delegated_by_user_id"`
+	ApprovalID     string `json:"approval_id"`
 }
 
 type ExecutionTarget struct {
@@ -292,20 +295,20 @@ func (c *Client) GetExecution(executionID string) (*GetExecutionResponse, error)
 }
 
 type ExecutionListItem struct {
-	ID              string `json:"id"`
-	ActorUserID     string `json:"actor_user_id"`
-	ActorRole       string `json:"actor_role_at_time"`
-	ExecutionType   string `json:"execution_type"`
-	Status          string `json:"status"`
-	CommandPreview  string `json:"command_preview"`
-	TargetCount     int    `json:"target_count"`
-	SucceededCount  int    `json:"succeeded_count"`
-	FailedCount     int    `json:"failed_count"`
-	RequestedAt     string `json:"requested_at"`
-	StartedAt       string `json:"started_at"`
-	FinishedAt      string `json:"finished_at"`
-	DelegatedBy     string `json:"delegated_by_user_id"`
-	ApprovalID      string `json:"approval_id"`
+	ID             string `json:"id"`
+	ActorUserID    string `json:"actor_user_id"`
+	ActorRole      string `json:"actor_role_at_time"`
+	ExecutionType  string `json:"execution_type"`
+	Status         string `json:"status"`
+	CommandPreview string `json:"command_preview"`
+	TargetCount    int    `json:"target_count"`
+	SucceededCount int    `json:"succeeded_count"`
+	FailedCount    int    `json:"failed_count"`
+	RequestedAt    string `json:"requested_at"`
+	StartedAt      string `json:"started_at"`
+	FinishedAt     string `json:"finished_at"`
+	DelegatedBy    string `json:"delegated_by_user_id"`
+	ApprovalID     string `json:"approval_id"`
 }
 
 type ListExecutionsResponse struct {
@@ -394,6 +397,9 @@ func (c *Client) ListAudit(limit string) (*ListAuditResponse, error) {
 func (c *Client) get(path string, out any) error {
 	req, _ := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
 	req.Header.Set("X-VPS-User", c.userID)
+	if c.runnerToken != "" {
+		req.Header.Set("X-VPS-Runner-Token", c.runnerToken)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
@@ -410,6 +416,9 @@ func (c *Client) post(path string, body, out any) error {
 	req, _ := http.NewRequest(http.MethodPost, c.baseURL+path, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-VPS-User", c.userID)
+	if c.runnerToken != "" {
+		req.Header.Set("X-VPS-Runner-Token", c.runnerToken)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)

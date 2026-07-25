@@ -1,189 +1,46 @@
 'use client';
-import { useState, useEffect } from 'react';
-import { api, Server, Runbook, Approval, AuditEvent, Execution } from './api';
+import { useEffect, useState } from 'react';
+import { api, Approval, AuditEvent, Execution, ExecutionDetail, Runbook, Runner, Server } from './api';
 
-function Tab({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-  return (
-    <button onClick={onClick} style={{
-      padding: '8px 16px', border: 'none', cursor: 'pointer',
-      background: active ? '#0ea5e9' : '#1e293b', color: active ? '#fff' : '#94a3b8',
-      borderRadius: '6px 6px 0 0', fontWeight: active ? 600 : 400,
-    }}>{label}</button>
-  );
-}
+type TabName = 'servers'|'runners'|'runbooks'|'approvals'|'executions'|'audit';
+const senior = (role:string) => ['owner','admin','senior_engineer'].includes(role);
+const blankServer = {name:'',hostname:'',public_ip:'',private_ip:'',ssh_port:22,ssh_username:'',environment:'development',provider:'',tags:[] as {key:string;value:string}[]};
+const blankRunbook = {name:'',title:'',description:'',risk:'medium',command:'',timeout:300,environment:'development',allowed_roles:'["senior_engineer","admin","owner"]'};
+const field: React.CSSProperties = { padding:'8px 10px', background:'#1e293b', color:'#e2e8f0', border:'1px solid #475569', borderRadius:4, width:'100%', boxSizing:'border-box', marginBottom:8 };
 
+function Tab({label,active,onClick}:{label:string;active:boolean;onClick:()=>void}) { return <button onClick={onClick} style={{padding:'8px 14px',border:'none',cursor:'pointer',background:active?'#0ea5e9':'#1e293b',color:active?'#fff':'#94a3b8',borderRadius:'6px 6px 0 0'}}>{label}</button>; }
 function UserSwitcher() {
-  const [user, setUser] = useState(api.getUser());
-  return (
-    <select value={user} onChange={e => { api.setUser(e.target.value); setUser(e.target.value); }}
-      style={{ padding: '4px 8px', background: '#1e293b', color: '#e2e8f0', border: '1px solid #334155', borderRadius: 6 }}>
-      <option value="user_senior">Senior Engineer</option>
-      <option value="user_junior">Junior Engineer</option>
-      <option value="user_auditor">Auditor</option>
-    </select>
-  );
+  const [u,setU]=useState(api.getUser());
+  const [session,setSession]=useState<{authenticated:boolean;email?:string}|null>(null);
+  useEffect(()=>{ if(process.env.NEXT_PUBLIC_DEV_AUTH!=='true') fetch('/api/auth/me',{credentials:'include'}).then(r=>r.ok?r.json():{authenticated:false}).then(setSession).catch(()=>setSession({authenticated:false})); },[]);
+  if(process.env.NEXT_PUBLIC_DEV_AUTH!=='true') {
+    if(!session) return <span style={{color:'#94a3b8'}}>Checking sign-in...</span>;
+    if(!session.authenticated) return <a href="/api/auth/login" style={{color:'#7dd3fc'}}>Sign in with ZITADEL</a>;
+    return <><span style={{color:'#cbd5e1'}}>{session.email}</span><a href="/api/auth/logout" style={{color:'#94a3b8',marginLeft:12}}>Sign out</a></>;
+  }
+  return <select value={u} onChange={e=>{api.setUser(e.target.value);setU(e.target.value)}} style={field}><option value="user_senior">Senior Engineer</option><option value="user_junior">Junior Engineer</option><option value="user_auditor">Auditor</option></select>;
 }
+function Form({children,onSubmit,onCancel}:{children:React.ReactNode;onSubmit:()=>void;onCancel:()=>void}) { return <div style={panel}><form onSubmit={e=>{e.preventDefault();onSubmit()}}>{children}<div><button style={btnGood}>Save</button><button type="button" onClick={onCancel} style={btnNeutral}>Cancel</button></div></form></div>; }
+function Label({name,children}:{name:string;children:React.ReactNode}) { return <label style={{display:'block',fontSize:12,color:'#94a3b8',marginTop:8}}>{name}{children}</label>; }
 
 export default function Home() {
-  const [tab, setTab] = useState<'servers'|'runbooks'|'approvals'|'executions'|'audit'>('servers');
-  const [servers, setServers] = useState<Server[]>([]);
-  const [runbooks, setRunbooks] = useState<Runbook[]>([]);
-  const [approvals, setApprovals] = useState<Approval[]>([]);
-  const [executions, setExecutions] = useState<Execution[]>([]);
-  const [audit, setAudit] = useState<AuditEvent[]>([]);
-  const [status, setStatus] = useState('');
-
-  const load = async (t: string) => {
-    setStatus('loading...');
-    try {
-      if (t === 'servers') setServers((await api.servers()).servers);
-      if (t === 'runbooks') setRunbooks((await api.runbooks()).runbooks);
-      if (t === 'approvals') setApprovals((await api.approvals()).approvals);
-      if (t === 'executions') setExecutions((await api.executions()).executions);
-      if (t === 'audit') setAudit((await api.audit()).events);
-      setStatus('');
-    } catch (e: any) { setStatus(e.message); }
-  };
-
-  useEffect(() => { load(tab); }, [tab]);
-
-  const handleApprove = async (id: string) => {
-    await api.approve(id); load('approvals');
-  };
-  const handleDeny = async (id: string) => {
-    await api.deny(id); load('approvals');
-  };
-
-  return (
-    <div style={{ minHeight: '100vh', background: '#0f172a', color: '#e2e8f0', fontFamily: 'monospace' }}>
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 20px', background: '#1e293b', borderBottom: '1px solid #334155' }}>
-        <h1 style={{ margin: 0, fontSize: 18, color: '#0ea5e9' }}>VPS Tools Console</h1>
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-          <span style={{ color: '#94a3b8', fontSize: 13 }}>User:</span>
-          <UserSwitcher />
-        </div>
-      </header>
-      <nav style={{ display: 'flex', gap: 2, padding: '0 20px', background: '#1e293b' }}>
-        {(['servers','runbooks','approvals','executions','audit'] as const).map(t =>
-          <Tab key={t} label={t.charAt(0).toUpperCase()+t.slice(1)} active={tab===t} onClick={() => setTab(t)} />
-        )}
-      </nav>
-      <main style={{ padding: 20 }}>
-        {status && <p style={{ color: '#f87171' }}>{status}</p>}
-
-        {tab === 'servers' && (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #334155' }}>
-                <th style={th}>Name</th><th style={th}>Hostname</th><th style={th}>Environment</th><th style={th}>Status</th><th style={th}>OS</th>
-              </tr>
-            </thead>
-            <tbody>
-              {servers.map(s => (
-                <tr key={s.id} style={{ borderBottom: '1px solid #1e293b' }}>
-                  <td style={td}><strong>{s.name}</strong></td>
-                  <td style={td}>{s.hostname||'-'}</td>
-                  <td style={td}>{s.environment}</td>
-                  <td style={td}>{s.status}</td>
-                  <td style={td}>{s.os_name||'-'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        {tab === 'runbooks' && (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #334155' }}>
-                <th style={th}>Name</th><th style={th}>Title</th><th style={th}>Risk</th><th style={th}>Status</th><th style={th}>Command</th>
-              </tr>
-            </thead>
-            <tbody>
-              {runbooks.map(r => (
-                <tr key={r.id} style={{ borderBottom: '1px solid #1e293b' }}>
-                  <td style={td}><strong>{r.name}</strong></td>
-                  <td style={td}>{r.title}</td>
-                  <td style={td}>{r.risk_level}</td>
-                  <td style={td}>{r.status}</td>
-                  <td style={td}><code>{r.command_preview}</code></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        {tab === 'approvals' && (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #334155' }}>
-                <th style={th}>ID</th><th style={th}>Requester</th><th style={th}>Reason</th><th style={th}>Status</th><th style={th}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {approvals.filter(a => a.status === 'pending').map(a => (
-                <tr key={a.id} style={{ borderBottom: '1px solid #1e293b' }}>
-                  <td style={td}><code>{a.id}</code></td>
-                  <td style={td}>{a.requester_name}</td>
-                  <td style={td}>{a.reason}</td>
-                  <td style={td}>{a.status}</td>
-                  <td style={td}>
-                    <button onClick={() => handleApprove(a.id)} style={btnGood}>Approve</button>
-                    <button onClick={() => handleDeny(a.id)} style={btnBad}>Deny</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        {tab === 'executions' && (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #334155' }}>
-                <th style={th}>ID</th><th style={th}>Status</th><th style={th}>Results</th><th style={th}>Command</th><th style={th}>Started</th>
-              </tr>
-            </thead>
-            <tbody>
-              {executions.map(e => (
-                <tr key={e.id} style={{ borderBottom: '1px solid #1e293b' }}>
-                  <td style={td}><code>{e.id}</code></td>
-                  <td style={td}>{e.status}</td>
-                  <td style={td}>{e.succeeded_count}/{e.failed_count}/{e.target_count}</td>
-                  <td style={td}><code>{e.command_preview}</code></td>
-                  <td style={td}>{e.requested_at?.slice(0,19)||'-'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        {tab === 'audit' && (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #334155' }}>
-                <th style={th}>Time</th><th style={th}>Actor</th><th style={th}>Action</th><th style={th}>Target</th><th style={th}>Result</th>
-              </tr>
-            </thead>
-            <tbody>
-              {audit.map(e => (
-                <tr key={e.id} style={{ borderBottom: '1px solid #1e293b' }}>
-                  <td style={td}>{e.created_at?.slice(0,19)}</td>
-                  <td style={td}>{e.actor_id}</td>
-                  <td style={td}>{e.action}</td>
-                  <td style={td}>{e.target_type}{e.target_id?':'+e.target_id:''}</td>
-                  <td style={td}>{e.result}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </main>
-    </div>
-  );
+  const [tab,setTab]=useState<TabName>('servers'),[role,setRole]=useState(''),[status,setStatus]=useState('');
+  const [servers,setServers]=useState<Server[]>([]),[runners,setRunners]=useState<Runner[]>([]),[runbooks,setRunbooks]=useState<Runbook[]>([]),[approvals,setApprovals]=useState<Approval[]>([]),[executions,setExecutions]=useState<Execution[]>([]),[audit,setAudit]=useState<AuditEvent[]>([]);
+  const [serverForm,setServerForm]=useState<any>(null),[runnerForm,setRunnerForm]=useState<any>(null),[runbookForm,setRunbookForm]=useState<any>(null),[executionForm,setExecutionForm]=useState<any>(null),[detail,setDetail]=useState<ExecutionDetail|null>(null),[search,setSearch]=useState('');
+  const load=async(t:TabName=tab)=>{setStatus('Loading...');try{if(t==='servers')setServers((await api.servers()).servers);if(t==='runners')setRunners((await api.runners()).runners);if(t==='runbooks')setRunbooks((await api.runbooks(search)).runbooks);if(t==='approvals')setApprovals((await api.approvals()).approvals);if(t==='executions')setExecutions((await api.executions()).executions);if(t==='audit')setAudit((await api.audit()).events);setStatus('')}catch(e:any){setStatus(e.message)}};
+  useEffect(()=>{load(tab)},[tab]); useEffect(()=>{api.whoami().then(x=>setRole(x.role)).catch(()=>setRole(''))},[]);
+  const act=async(fn:()=>Promise<any>,refresh=tab)=>{try{await fn();setServerForm(null);setRunnerForm(null);setRunbookForm(null);setExecutionForm(null);setDetail(null);await load(refresh)}catch(e:any){setStatus(e.message)}};
+  const input=(obj:any,key:string)=>(<input value={obj[key]??''} onChange={e=>obj[key]=e.target.value} style={field}/>);
+  return <div style={{minHeight:'100vh',background:'#0f172a',color:'#e2e8f0',fontFamily:'monospace'}}><header style={header}><h1 style={{margin:0,fontSize:18,color:'#0ea5e9'}}>VPS Tools Console</h1><div>Role: {role||'unknown'} <UserSwitcher/></div></header><nav style={{display:'flex',gap:2,padding:'0 20px',background:'#1e293b'}}>{(['servers','runners','runbooks','approvals','executions','audit'] as TabName[]).map(t=><Tab key={t} label={t[0].toUpperCase()+t.slice(1)} active={tab===t} onClick={()=>setTab(t)}/>)}</nav><main style={{padding:20}}><div style={{display:'flex',justifyContent:'space-between',marginBottom:12}}><span style={{color:'#94a3b8',fontSize:13}}>{status}</span><button onClick={()=>load()} style={btnNeutral}>Refresh</button></div>
+    {tab==='servers'&&<><Toolbar label="Servers" onClick={()=>setServerForm({...blankServer})} show={senior(role)}/>{serverForm&&<Form onCancel={()=>setServerForm(null)} onSubmit={()=>act(()=>serverForm.id?api.updateServer(serverForm.id,{...serverForm,tags:serverForm.tags}):api.createServer(serverForm))}><Label name="Name">{input(serverForm,'name')}</Label><Label name="Hostname">{input(serverForm,'hostname')}</Label><Label name="Public IP">{input(serverForm,'public_ip')}</Label><Label name="Private IP">{input(serverForm,'private_ip')}</Label><Label name="SSH username">{input(serverForm,'ssh_username')}</Label><Label name="SSH port">{input(serverForm,'ssh_port')}</Label><Label name="Environment"><select value={serverForm.environment} onChange={e=>serverForm.environment=e.target.value} style={field}><option>development</option><option>staging</option><option>production</option></select></Label><Label name="Provider">{input(serverForm,'provider')}</Label><Label name="Tags, key=value per line"><textarea value={(serverForm.tags||[]).map((x:any)=>`${x.key}=${x.value}`).join('\n')} onChange={e=>serverForm.tags=e.target.value.split('\n').filter(Boolean).map((x:string)=>{const [key,...v]=x.split('=');return {key,value:v.join('=')}})} style={field}/></Label></Form>}<Table headers={['Name','Hostname','Environment','Status','Actions']} rows={servers.map(s=><tr key={s.id}><td style={td}><strong>{s.name}</strong></td><td style={td}>{s.hostname||'-'}</td><td style={td}>{s.environment}</td><td style={td}>{s.status}</td><td style={td}>{senior(role)&&<><button style={btnNeutral} onClick={()=>setServerForm({...s})}>Edit</button><button style={btnNeutral} onClick={()=>act(()=>api.checkServer(s.id))}>Check</button><button style={btnBad} onClick={()=>act(()=>api.archiveServer(s.id))}>Archive</button></>}</td></tr>)}/></>}
+    {tab==='runners'&&<><Toolbar label="Runners" onClick={()=>setRunnerForm({name:'',runner_type:'customer_managed'})} show={senior(role)}/>{runnerForm&&<Form onCancel={()=>setRunnerForm(null)} onSubmit={()=>act(()=>api.createRunner(runnerForm))}><Label name="Name">{input(runnerForm,'name')}</Label><Label name="Type">{input(runnerForm,'runner_type')}</Label></Form>}<Table headers={['Name','Status','Version','Host','Last seen','Actions']} rows={runners.map(x=><tr key={x.id}><td style={td}>{x.name}<br/><small>{x.id}</small></td><td style={td}>{x.status}</td><td style={td}>{x.version||'-'}</td><td style={td}>{x.hostname||'-'}</td><td style={td}>{x.last_seen_at||'-'}</td><td style={td}>{senior(role)&&x.status!=='revoked'&&<button style={btnBad} onClick={()=>act(()=>api.revokeRunner(x.id))}>Revoke</button>}</td></tr>)}/><button style={btnNeutral} onClick={async()=>{try{const x=await api.registrationToken();navigator.clipboard?.writeText(x.token);setStatus(`Registration token copied, expires ${x.expires_at||'in one hour'}`)}catch(e:any){setStatus(e.message)}}}>Create registration token</button></>}
+    {tab==='runbooks'&&<><div><input value={search} onChange={e=>setSearch(e.target.value)} onKeyDown={e=>e.key==='Enter'&&load('runbooks')} placeholder="Search runbooks" style={inputStyle}/>{senior(role)&&<button onClick={()=>setRunbookForm({...blankRunbook})} style={btnNeutral}>New runbook</button>}</div>{runbookForm&&<Form onCancel={()=>setRunbookForm(null)} onSubmit={()=>act(()=>runbookForm.name?api.updateRunbook(runbookForm.name,runbookForm):api.createRunbook(runbookForm))}><Label name="Name">{input(runbookForm,'name')}</Label><Label name="Title">{input(runbookForm,'title')}</Label><Label name="Description"><textarea value={runbookForm.description} onChange={e=>runbookForm.description=e.target.value} style={field}/></Label><Label name="Command"><textarea value={runbookForm.command} onChange={e=>runbookForm.command=e.target.value} style={field}/></Label><Label name="Risk"><select value={runbookForm.risk} onChange={e=>runbookForm.risk=e.target.value} style={field}><option>low</option><option>medium</option><option>high</option><option>critical</option></select></Label><Label name="Environment">{input(runbookForm,'environment')}</Label><Label name="Timeout seconds">{input(runbookForm,'timeout')}</Label></Form>}<Table headers={['Name','Risk','Status','Command','Actions']} rows={runbooks.map(x=><tr key={x.id}><td style={td}><strong>{x.name}</strong><br/>{x.title}</td><td style={td}>{x.risk_level}</td><td style={td}>{x.status}</td><td style={td}><code>{x.command_preview}</code></td><td style={td}>{senior(role)&&<><button style={btnNeutral} onClick={async()=>{try{const d=await api.getRunbook(x.name);setRunbookForm({...blankRunbook,...d.runbook,name:x.name,command:d.runbook.command||d.runbook.command_preview})}catch(e:any){setStatus(e.message)}}}>Edit</button>{x.status==='draft'&&<button style={btnGood} onClick={()=>act(()=>api.publishRunbook(x.name))}>Publish</button>}<button style={btnBad} onClick={()=>act(()=>api.archiveRunbook(x.name))}>Archive</button></>}</td></tr>)}/></>}
+    {tab==='approvals'&&<Table headers={['ID','Requester','Reason','Status','Actions']} rows={(approvals||[]).filter(x=>x.status==='pending').map(x=><tr key={x.id}><td style={td}>{x.id}</td><td style={td}>{x.requester_name}</td><td style={td}>{x.reason}</td><td style={td}>{x.status}</td><td style={td}>{senior(role)&&<><button style={btnGood} onClick={()=>act(()=>api.approve(x.id),'approvals')}>Approve</button><button style={btnBad} onClick={()=>act(()=>api.deny(x.id),'approvals')}>Deny</button></>}</td></tr>)}/>}
+    {tab==='executions'&&<><Toolbar label="Executions" onClick={()=>setExecutionForm({target:'',command:'',reason:''})} show={senior(role)}/>{executionForm&&<Form onCancel={()=>setExecutionForm(null)} onSubmit={()=>act(()=>api.createExecution(executionForm))}><Label name="Target, server id or selector">{input(executionForm,'target')}</Label><Label name="Command"><textarea value={executionForm.command} onChange={e=>executionForm.command=e.target.value} style={field}/></Label><Label name="Reason"><textarea value={executionForm.reason} onChange={e=>executionForm.reason=e.target.value} style={field}/></Label></Form>}<Table headers={['ID','Status','Results','Command','Requested','Actions']} rows={executions.map(x=><tr key={x.id} onClick={async()=>{try{setDetail((await api.getExecution(x.id)).execution)}catch(e:any){setStatus(e.message)}}} style={{cursor:'pointer'}}><td style={td}>{x.id}</td><td style={td}>{x.status}</td><td style={td}>{x.succeeded_count}/{x.failed_count}/{x.target_count}</td><td style={td}><code>{x.command_preview}</code></td><td style={td}>{x.requested_at?.slice(0,19)}</td><td style={td}>{['created','queued'].includes(x.status)&&<button style={btnBad} onClick={e=>{e.stopPropagation();act(()=>api.cancelExecution(x.id))}}>Cancel</button>}</td></tr>)}/>{detail&&<div style={panel}><button onClick={()=>setDetail(null)} style={btnNeutral}>Close</button><h3>{detail.id}</h3>{detail.targets?.map(t=><div key={t.id} style={{borderTop:'1px solid #334155',padding:'10px 0'}}><strong>{t.server_name||t.server_id}</strong> {t.status}<pre style={{whiteSpace:'pre-wrap'}}>{t.stdout}{t.stderr&&`\n${t.stderr}`}</pre></div>)}</div>}</>}
+    {tab==='audit'&&<Table headers={['Time','Actor','Action','Target','Result']} rows={audit.map(x=><tr key={x.id}><td style={td}>{x.created_at?.slice(0,19)}</td><td style={td}>{x.actor_id}</td><td style={td}>{x.action}</td><td style={td}>{x.target_type}:{x.target_id}</td><td style={td}>{x.result}</td></tr>)}/>}
+  </main></div>;
 }
-
-const th: React.CSSProperties = { textAlign: 'left', padding: '8px 12px', color: '#94a3b8', fontSize: 13, fontWeight: 600 };
-const td: React.CSSProperties = { padding: '8px 12px', fontSize: 14 };
-const btnGood: React.CSSProperties = { padding: '4px 12px', margin: '0 4px', background: '#166534', color: '#86efac', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 };
-const btnBad: React.CSSProperties = { padding: '4px 12px', margin: '0 4px', background: '#7f1d1d', color: '#fca5a5', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 };
+function Toolbar({label,onClick,show}:{label:string;onClick:()=>void;show:boolean}){return <div style={{display:'flex',justifyContent:'space-between',marginBottom:10}}><h2 style={{fontSize:16}}>{label}</h2>{show&&<button onClick={onClick} style={btnNeutral}>Add</button>}</div>}
+function Table({headers,rows}:{headers:string[];rows:React.ReactNode[]}){return <table style={{width:'100%',borderCollapse:'collapse'}}><thead><tr style={{borderBottom:'1px solid #334155'}}>{headers.map(x=><th key={x} style={th}>{x}</th>)}</tr></thead><tbody>{rows}</tbody></table>}
+const header:React.CSSProperties={display:'flex',justifyContent:'space-between',alignItems:'center',padding:'12px 20px',background:'#1e293b',borderBottom:'1px solid #334155'};
+const th:React.CSSProperties={textAlign:'left',padding:'8px 12px',color:'#94a3b8',fontSize:12}; const td:React.CSSProperties={padding:'8px 12px',fontSize:13,borderBottom:'1px solid #1e293b'}; const panel:React.CSSProperties={padding:14,marginBottom:14,background:'#1e293b',border:'1px solid #475569',borderRadius:6,maxWidth:700}; const btnGood:React.CSSProperties={padding:'5px 12px',margin:'4px',background:'#166534',color:'#dcfce7',border:0,borderRadius:4,cursor:'pointer'}; const btnBad:React.CSSProperties={padding:'5px 12px',margin:'4px',background:'#7f1d1d',color:'#fecaca',border:0,borderRadius:4,cursor:'pointer'}; const btnNeutral:React.CSSProperties={padding:'5px 12px',margin:'4px',background:'#334155',color:'#e2e8f0',border:'1px solid #475569',borderRadius:4,cursor:'pointer'}; const inputStyle:React.CSSProperties={padding:'8px 10px',margin:'4px',background:'#1e293b',color:'#e2e8f0',border:'1px solid #475569',borderRadius:4};

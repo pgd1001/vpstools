@@ -30,6 +30,10 @@ func testAPI(t *testing.T) (*sql.DB, *http.ServeMux, func()) {
 		db.Close()
 		t.Fatalf("seed: %v", err)
 	}
+	if _, err := db.Exec(`INSERT INTO runner_credentials (id, organisation_id, token_hash, expires_at) VALUES ('rct_test','org_demo',?,datetime('now','+1 hour'))`, hashToken("test-runner-token")); err != nil {
+		db.Close()
+		t.Fatalf("runner credential: %v", err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
@@ -161,6 +165,9 @@ func doRequest(t *testing.T, mux *http.ServeMux, method, path, body, user string
 	}
 	if user != "" {
 		req.Header.Set("X-VPS-User", user)
+	}
+	if strings.HasPrefix(path, "/api/v1/jobs/") {
+		req.Header.Set("X-VPS-Runner-Token", "test-runner-token")
 	}
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
@@ -303,7 +310,8 @@ func TestRunnerScopeClaimByOrg(t *testing.T) {
 	doRequest(t, mux, http.MethodPost, "/api/v1/executions",
 		`{"target":"server:srv_demo","command":"echo test"}`, "user_senior")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/next?organisation_id=org_demo", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/next?runner_id=rnr_local", nil)
+	req.Header.Set("X-VPS-Runner-Token", "test-runner-token")
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != 200 {
@@ -431,11 +439,14 @@ func TestStdoutStderrStoredOnSubmit(t *testing.T) {
 	if w.Code != 201 {
 		t.Fatalf("exec create failed: %s", w.Body.String())
 	}
-	var createResp struct{ ExecutionID string `json:"execution_id"` }
+	var createResp struct {
+		ExecutionID string `json:"execution_id"`
+	}
 	json.NewDecoder(w.Body).Decode(&createResp)
 
 	// Runner claims job
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/next?organisation_id=org_demo", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/next?runner_id=rnr_local", nil)
+	req.Header.Set("X-VPS-Runner-Token", "test-runner-token")
 	w2 := httptest.NewRecorder()
 	mux.ServeHTTP(w2, req)
 	if w2.Code != 200 {
@@ -443,8 +454,12 @@ func TestStdoutStderrStoredOnSubmit(t *testing.T) {
 	}
 
 	// Runner submits result with stdout/stderr
+	var claimResp struct {
+		TargetID string `json:"target_id"`
+	}
+	json.NewDecoder(w2.Body).Decode(&claimResp)
 	w3 := doRequest(t, mux, http.MethodPost, "/api/v1/jobs/result",
-		fmt.Sprintf(`{"execution_id":"%s","exit_code":0,"stdout":"hello output\n","stderr":"","duration_ms":100}`, createResp.ExecutionID), "")
+		fmt.Sprintf(`{"runner_id":"rnr_local","target_id":"%s","execution_id":"%s","exit_code":0,"stdout":"hello output\n","stderr":"","duration_ms":100}`, claimResp.TargetID, createResp.ExecutionID), "")
 	if w3.Code != 200 {
 		t.Fatalf("submit result failed: %s", w3.Body.String())
 	}
@@ -464,5 +479,17 @@ func TestStdoutStderrStoredOnSubmit(t *testing.T) {
 	}
 	if !strings.Contains(execResp.Targets[0].Stdout, "hello output") {
 		t.Errorf("stdout not stored: got %q", execResp.Targets[0].Stdout)
+	}
+}
+
+func TestRunnerJobsRequireCredential(t *testing.T) {
+	_, mux, cleanup := testAPI(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/next?runner_id=rnr_local", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated runner claim to return 401, got %d", w.Code)
 	}
 }

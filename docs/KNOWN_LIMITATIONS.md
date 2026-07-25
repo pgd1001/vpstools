@@ -2,7 +2,7 @@
 
 ## Authentication & Identity
 
-- **Dev auth only.** The MVP uses `X-VPS-User` header for identity. No OIDC, no SSO, no MFA, no session tokens.
+- **Development auth only.** Set `VPS_DEV_AUTH=true` only for local demos. Production mode requires an authenticated `X-VPS-User` identity, but OIDC, SSO, MFA, and session tokens are still pending.
   OIDC integration is planned post-MVP.
 - **No password/token storage.** Production use requires an identity provider.
 
@@ -55,7 +55,7 @@
 - **No hash-chain audit.** Audit events are append-only at application level, not cryptographically chained.
 - **No output redaction server-side.** Redaction happens in the runner before submitting to API. API does not redact.
 - **No rate limiting.** No brute-force protection on endpoints.
-- **No CORS configuration.** CORS headers not set on the API.
+- **CORS is allowlisted but basic.** Set `VPS_WEB_ORIGIN` to the exact console origin. OIDC and CSRF protection are still pending.
 
 ## What Works
 

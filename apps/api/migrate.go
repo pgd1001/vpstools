@@ -68,6 +68,11 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		UNIQUE(runner_id, scope_type, scope_value)
 	);
+	CREATE TABLE IF NOT EXISTS runner_credentials (
+		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
+		token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL,
+		revoked_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+	);
 	CREATE TABLE IF NOT EXISTS executions (
 		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
 		actor_user_id TEXT NOT NULL REFERENCES users(id),
@@ -152,6 +157,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_runners_org_status ON runners(organisation_id, status);
 	CREATE INDEX IF NOT EXISTS idx_runners_last_seen ON runners(organisation_id, last_seen_at);
 	CREATE INDEX IF NOT EXISTS idx_runner_scopes_runner ON runner_scopes(runner_id);
+	CREATE INDEX IF NOT EXISTS idx_runner_credentials_hash ON runner_credentials(token_hash);
 	CREATE INDEX IF NOT EXISTS idx_executions_org_status ON executions(organisation_id, status);
 	CREATE INDEX IF NOT EXISTS idx_executions_actor ON executions(actor_user_id, requested_at);
 	CREATE INDEX IF NOT EXISTS idx_execution_targets_exec ON execution_targets(execution_id);

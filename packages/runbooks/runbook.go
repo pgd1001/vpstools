@@ -111,6 +111,11 @@ func Validate(rb *Runbook) error {
 	if rb.Metadata.Risk == "" {
 		rb.Metadata.Risk = RiskMedium
 	}
+	switch rb.Metadata.Risk {
+	case RiskLow, RiskMedium, RiskHigh, RiskCritical:
+	default:
+		return &ValidationError{Field: "metadata.risk", Message: "must be low, medium, high, or critical"}
+	}
 	return nil
 }
 
