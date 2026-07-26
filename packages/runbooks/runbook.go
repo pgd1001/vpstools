@@ -2,6 +2,7 @@ package runbooks
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -116,6 +117,30 @@ func Validate(rb *Runbook) error {
 	default:
 		return &ValidationError{Field: "metadata.risk", Message: "must be low, medium, high, or critical"}
 	}
+	seen := make(map[string]bool, len(rb.Spec.Parameters))
+	for i := range rb.Spec.Parameters {
+		p := &rb.Spec.Parameters[i]
+		if !validParameterName(p.Name) {
+			return &ValidationError{Field: fmt.Sprintf("spec.parameters[%d].name", i), Message: "must contain only letters, numbers, and underscores"}
+		}
+		if seen[p.Name] {
+			return &ValidationError{Field: "spec.parameters." + p.Name, Message: "is defined more than once"}
+		}
+		seen[p.Name] = true
+		switch strings.ToLower(p.Type) {
+		case "", "string", "integer", "number", "boolean", "enum":
+		default:
+			return &ValidationError{Field: "spec.parameters." + p.Name + ".type", Message: "must be string, integer, number, boolean, or enum"}
+		}
+		if len(p.AllowedValues) > 0 && strings.ToLower(p.Type) != "enum" {
+			return &ValidationError{Field: "spec.parameters." + p.Name + ".allowedValues", Message: "requires type enum"}
+		}
+		if p.Default != "" {
+			if err := validateParameterValue(*p, p.Default); err != nil {
+				return &ValidationError{Field: "spec.parameters." + p.Name + ".default", Message: err.Error()}
+			}
+		}
+	}
 	return nil
 }
 
@@ -162,10 +187,118 @@ func (rb *Runbook) NeedsApproval(env string) bool {
 	return false
 }
 
-func (rb *Runbook) RenderCommand(params map[string]string) string {
-	cmd := rb.Spec.Execution.Command
-	for k, v := range params {
-		cmd = strings.ReplaceAll(cmd, "${"+k+"}", v)
+var parameterToken = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// ValidateParams resolves defaults and validates all supplied values before a
+// runbook is rendered. Unknown values are rejected so callers cannot smuggle
+// unreviewed input into a command.
+func (rb *Runbook) ValidateParams(params map[string]string) (map[string]string, error) {
+	resolved := make(map[string]string, len(rb.Spec.Parameters))
+	definitions := make(map[string]Parameter, len(rb.Spec.Parameters))
+	for _, definition := range rb.Spec.Parameters {
+		definitions[definition.Name] = definition
+		if definition.Default != "" {
+			resolved[definition.Name] = definition.Default
+		}
 	}
-	return cmd
+	for name := range params {
+		if _, ok := definitions[name]; !ok {
+			return nil, fmt.Errorf("unknown parameter %q", name)
+		}
+	}
+	for name, value := range params {
+		if err := validateParameterValue(definitions[name], value); err != nil {
+			return nil, fmt.Errorf("parameter %q: %w", name, err)
+		}
+		resolved[name] = value
+	}
+	for _, definition := range rb.Spec.Parameters {
+		if definition.Required && strings.TrimSpace(resolved[definition.Name]) == "" {
+			return nil, fmt.Errorf("required parameter %q is missing", definition.Name)
+		}
+	}
+	for _, token := range parameterToken.FindAllStringSubmatch(rb.Spec.Execution.Command, -1) {
+		if _, ok := resolved[token[1]]; !ok {
+			return nil, fmt.Errorf("command parameter %q is missing", token[1])
+		}
+	}
+	return resolved, nil
+}
+
+// RenderCommand validates parameters and quotes each substitution for the
+// POSIX shell used by the runner. It returns an error rather than rendering
+// partially validated input.
+func (rb *Runbook) RenderCommand(params map[string]string) (string, error) {
+	resolved, err := rb.ValidateParams(params)
+	if err != nil {
+		return "", err
+	}
+	cmd := parameterToken.ReplaceAllStringFunc(rb.Spec.Execution.Command, func(token string) string {
+		name := strings.TrimSuffix(strings.TrimPrefix(token, "${"), "}")
+		return shellQuote(resolved[name])
+	})
+	return cmd, nil
+}
+
+func validParameterName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' || (i > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validateParameterValue(definition Parameter, value string) error {
+	switch strings.ToLower(definition.Type) {
+	case "", "string", "enum":
+	case "integer":
+		for i, r := range value {
+			if (r < '0' || r > '9') && !(i == 0 && r == '-') {
+				return fmt.Errorf("must be an integer")
+			}
+		}
+		if value == "" || value == "-" {
+			return fmt.Errorf("must be an integer")
+		}
+	case "number":
+		dots := 0
+		for i, r := range value {
+			if r == '.' {
+				dots++
+				continue
+			}
+			if (r < '0' || r > '9') && !(i == 0 && r == '-') {
+				return fmt.Errorf("must be a number")
+			}
+		}
+		if value == "" || value == "-" || dots > 1 {
+			return fmt.Errorf("must be a number")
+		}
+	case "boolean":
+		if value != "true" && value != "false" {
+			return fmt.Errorf("must be true or false")
+		}
+	}
+	if len(definition.AllowedValues) > 0 {
+		allowed := false
+		for _, candidate := range definition.AllowedValues {
+			if value == candidate {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return fmt.Errorf("must be one of: %s", strings.Join(definition.AllowedValues, ", "))
+		}
+	}
+	return nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }

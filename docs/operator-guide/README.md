@@ -1,5 +1,9 @@
 # VPS Tools — Operator Guide
 
+## Product improvement tracking
+
+The [Product Improvement Plan](../PRODUCT_IMPROVEMENT_PLAN.md) records the planned improvements for the junior engineer workflow, runbook authoring, approvals, automation, AI assistance, TUI, web console, and documentation. Use it to track implementation work and acceptance tests alongside this operational guide.
+
 ## Prerequisites
 
 - Go 1.24+ (to build from source)
@@ -120,10 +124,11 @@ $env:VPS_USER = "user_junior"
 ```bash
 .\bin\vps.exe tui
 ```
-- `1` Servers, `2` Runbooks, `3` Executions, `4` Approvals, `5` Audit
+- `1` Servers, `2` Runbooks, `3` Executions, `4` Approvals, `5` Schedules, `6` Audit
 - `q` Back/Quit, `h` Help, `r` Refresh current view
 - **Runbook search:** Press `/` in the runbook view to filter by name, title, description, risk, or tags
 - **Approvals:** `a` approve selected, `d` deny selected
+- **Schedules:** The schedules view shows enabled and disabled interval schedules. Create and disable schedules from the web console or API as a senior engineer.
 - **Execution detail:** `enter` on an execution to view full output with stdout/stderr
 
 ## Web Console
@@ -173,4 +178,13 @@ Full details in `docs/runbooks/README.md`.
 | `VPS_API_URL` | API address | `http://localhost:8080` |
 | `API_PORT` | API listen port | `8080` |
 | `DB_PATH` | SQLite database path | `svrtools.db` |
+| `DATABASE_DRIVER` | Metadata database driver | `sqlite` |
+| `DATABASE_URL` | SQLite path or external database URL | `./svrtools.db` |
+| `ARTIFACT_STORE` | Artefact backend | `local` |
+| `ARTIFACTS_DIR` / `VPS_ARTIFACTS_DIR` | Encrypted local artefact directory | `./data/artifacts` |
+| `JOB_DISPATCH` | Job queue backend | `database` |
+| `SCHEDULER` | Scheduler mode | `embedded` |
+| `EVENT_BUS` | Event bus mode | `disabled` |
 | `SIMULATE` | Runner simulate mode | omit for real SSH |
+
+For a larger deployment, see the [developer deployment notes](../developer-guide/README.md#deployment-backends). The self-contained runtime is the supported default.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -367,6 +368,7 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 		Target string            `json:"target"`
 		Reason string            `json:"reason"`
 		Params map[string]string `json:"params"`
+		DryRun bool              `json:"dry_run"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
@@ -406,14 +408,28 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 		return
 	}
 
-	env := detectEnv(r.Context(), db, actor.OrganisationID, targetIDs)
+	env, mixed := targetEnvironment(r.Context(), db, actor.OrganisationID, targetIDs)
+	if mixed {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "targets span multiple environments; submit one environment at a time"})
+		return
+	}
 	if !rbDef.EnvironmentAllowed(env) || !runbookTargetsAllowed(r.Context(), db, actor.OrganisationID, rbDef, targetIDs) {
 		writeDenial(w, r, actor, "runbook.executed", "runbook", rbID, authz.Deny("runbook_target_not_permitted", "This runbook is not permitted for the selected target."))
 		return
 	}
-	command = rbDef.RenderCommand(req.Params)
+	var renderErr error
+	command, renderErr = rbDef.RenderCommand(req.Params)
+	if renderErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": renderErr.Error()})
+		return
+	}
 	if command == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "runbook rendered an empty command"})
+		return
+	}
+	targetSnapshot := snapshotTargets(r.Context(), db, actor.OrganisationID, targetIDs)
+	if len(targetSnapshot) != len(targetIDs) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to snapshot selected targets"})
 		return
 	}
 
@@ -425,6 +441,14 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 	if risk == "high" && !actor.IsSenior() {
 		needsApproval = true
 	}
+	if req.DryRun {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "preflight", "approval_required": needsApproval,
+			"environment": env, "risk_level": risk, "target_count": len(targetIDs),
+			"target_snapshot": targetSnapshot, "command_preview": redact.Stdout(command),
+		})
+		return
+	}
 	if needsApproval {
 		if strings.TrimSpace(req.Reason) == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "an approval reason is required"})
@@ -432,16 +456,17 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 		}
 		approvalID := "apr_" + shortID()
 		execPayload := jsonString(map[string]any{
-			"runbook_id":   rbID,
-			"runbook_name": name,
-			"target":       req.Target,
-			"command":      command,
-			"risk":         risk,
-			"reason":       req.Reason,
-			"params":       req.Params,
-			"target_ids":   targetIDs,
-			"environment":  env,
-			"target_count": len(targetIDs),
+			"runbook_id":      rbID,
+			"runbook_name":    name,
+			"target":          req.Target,
+			"command":         command,
+			"risk":            risk,
+			"reason":          req.Reason,
+			"params":          req.Params,
+			"target_ids":      targetIDs,
+			"target_snapshot": targetSnapshot,
+			"environment":     env,
+			"target_count":    len(targetIDs),
 			"timeout": func() int {
 				if rbDef.Spec.Execution.TimeoutSeconds > 0 {
 					return rbDef.Spec.Execution.TimeoutSeconds
@@ -449,11 +474,27 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 				return 300
 			}(),
 		})
-		db.ExecContext(r.Context(),
+		tx, txErr := db.BeginTx(r.Context(), nil)
+		if txErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start approval transaction"})
+			return
+		}
+		defer tx.Rollback()
+		if _, txErr = tx.ExecContext(r.Context(),
 			`INSERT INTO approval_requests (id, organisation_id, requester_user_id, action_type, status, risk_level, reason, target_type, target_id, target_snapshot, request_payload, expires_at)
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now','+1 hour'))`,
-			approvalID, actor.OrganisationID, actor.UserID, "runbook", "pending", risk, req.Reason, "server", req.Target, "{}", execPayload)
-		writeAuditEvent(r.Context(), db, actor.OrganisationID, actor.UserID, "approval.requested", "approval", approvalID, "pending", map[string]any{"runbook_id": rbID})
+			approvalID, actor.OrganisationID, actor.UserID, "runbook", "pending", risk, req.Reason, "server", req.Target, jsonString(targetSnapshot), execPayload); txErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create approval request"})
+			return
+		}
+		if err := writeAuditEventTx(r.Context(), tx, actor.OrganisationID, actor.UserID, "approval.requested", "approval", approvalID, "pending", map[string]any{"runbook_id": rbID, "target_count": len(targetIDs)}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record approval audit event"})
+			return
+		}
+		if txErr = tx.Commit(); txErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit approval request"})
+			return
+		}
 		writeJSON(w, 202, map[string]string{
 			"status":      "awaiting_approval",
 			"approval_id": approvalID,
@@ -475,19 +516,42 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 	if timeout <= 0 {
 		timeout = 300
 	}
-	db.ExecContext(r.Context(),
-		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, execution_type, status, environment, risk_level, reason, command_preview, command_hash, timeout_seconds)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-		execID, actor.OrganisationID, actor.UserID, actor.Role, "runbook", "queued", env, risk, req.Reason, command, hashCmd(command), timeout)
-
-	for _, srvID := range targetIDs {
-		db.ExecContext(r.Context(),
-			`INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status)
-			VALUES (?,?,?,?,'pending')`,
-			"ext_"+shortID(), actor.OrganisationID, execID, srvID)
+	tx, err := db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start execution transaction"})
+		return
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(r.Context(),
+		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, execution_type, status, environment, risk_level, reason, command, command_preview, command_hash, timeout_seconds)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		execID, actor.OrganisationID, actor.UserID, actor.Role, "runbook", "queued", env, risk, req.Reason, command, redact.Stdout(command), hashCmd(command), timeout); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create execution"})
+		return
 	}
 
-	writeAuditEvent(r.Context(), db, actor.OrganisationID, actor.UserID, "runbook.executed", "runbook", rbID, "queued", map[string]any{"execution_id": execID, "command": redact.Stdout(command)})
+	for i, srvID := range targetIDs {
+		if _, err = tx.ExecContext(r.Context(),
+			`INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot)
+			VALUES (?,?,?,?,'pending',?)`,
+			"ext_"+shortID(), actor.OrganisationID, execID, srvID, jsonString(targetSnapshot[i])); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create execution target"})
+			return
+		}
+	}
+	if err = recordExecutionEvent(r.Context(), tx, actor.OrganisationID, execID, "", "", "queued", "runbook.queued", map[string]any{"runbook_id": rbID}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record execution timeline"})
+		return
+	}
+
+	if err = writeAuditEventTx(r.Context(), tx, actor.OrganisationID, actor.UserID, "runbook.executed", "runbook", rbID, "queued", map[string]any{"execution_id": execID, "command": redact.Stdout(command)}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record execution audit event"})
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit execution"})
+		return
+	}
 	writeJSON(w, 201, map[string]any{
 		"execution_id": execID,
 		"status":       "queued",
@@ -500,16 +564,16 @@ func handleListApprovals(w http.ResponseWriter, r *http.Request) {
 	db := dbFrom(r)
 	status := r.URL.Query().Get("status")
 
-	query := `SELECT id, requester_user_id, action_type, status, risk_level, reason, target_type, COALESCE(target_id,''), expires_at, created_at
-		FROM approval_requests WHERE organisation_id = ?`
+	query := `SELECT a.id, COALESCE(u.display_name,a.requester_user_id), a.action_type, a.status, a.risk_level, a.reason, a.target_type, COALESCE(a.target_id,''), a.expires_at, a.created_at, a.target_snapshot, COALESCE(a.decision_note,'')
+		FROM approval_requests a LEFT JOIN users u ON u.id = a.requester_user_id WHERE a.organisation_id = ?`
 	args := []any{actor.OrganisationID}
 	if status != "" {
-		query += " AND status = ?"
+		query += " AND a.status = ?"
 		args = append(args, status)
 	} else {
-		query += " AND status = 'pending'"
+		query += " AND a.status = 'pending'"
 	}
-	query += " ORDER BY created_at DESC LIMIT 50"
+	query += " ORDER BY a.created_at DESC LIMIT 50"
 
 	rows, err := db.QueryContext(r.Context(), query, args...)
 	if err != nil {
@@ -519,26 +583,63 @@ func handleListApprovals(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type approval struct {
-		ID            string `json:"id"`
-		RequesterName string `json:"requester_name"`
-		ActionType    string `json:"action_type"`
-		Status        string `json:"status"`
-		RiskLevel     string `json:"risk_level"`
-		Reason        string `json:"reason"`
-		TargetType    string `json:"target_type"`
-		TargetID      string `json:"target_id"`
-		ExpiresAt     string `json:"expires_at"`
-		CreatedAt     string `json:"created_at"`
+		ID             string `json:"id"`
+		RequesterName  string `json:"requester_name"`
+		ActionType     string `json:"action_type"`
+		Status         string `json:"status"`
+		RiskLevel      string `json:"risk_level"`
+		Reason         string `json:"reason"`
+		TargetType     string `json:"target_type"`
+		TargetID       string `json:"target_id"`
+		ExpiresAt      string `json:"expires_at"`
+		CreatedAt      string `json:"created_at"`
+		TargetSnapshot string `json:"target_snapshot"`
+		DecisionNote   string `json:"decision_note"`
 	}
 
 	results := []approval{}
 	for rows.Next() {
 		var a approval
-		rows.Scan(&a.ID, &a.RequesterName, &a.ActionType, &a.Status, &a.RiskLevel,
-			&a.Reason, &a.TargetType, &a.TargetID, &a.ExpiresAt, &a.CreatedAt)
+		if err := rows.Scan(&a.ID, &a.RequesterName, &a.ActionType, &a.Status, &a.RiskLevel,
+			&a.Reason, &a.TargetType, &a.TargetID, &a.ExpiresAt, &a.CreatedAt, &a.TargetSnapshot, &a.DecisionNote); err != nil {
+			continue
+		}
 		results = append(results, a)
 	}
 	writeJSON(w, 200, map[string]any{"approvals": results})
+}
+
+func handleGetApproval(w http.ResponseWriter, r *http.Request, approvalID string) {
+	actor, _ := authz.RequireActor(r.Context())
+	db := dbFrom(r)
+	var approval map[string]any
+	var id, requesterID, requesterName, actionType, status, risk, reason, targetType, targetID, targetSnapshot, payload, expiresAt, createdAt, decidedAt, decisionNote string
+	err := db.QueryRowContext(r.Context(), `SELECT a.id, a.requester_user_id, COALESCE(u.display_name,a.requester_user_id), a.action_type, a.status, a.risk_level, a.reason, a.target_type, COALESCE(a.target_id,''), a.target_snapshot, a.request_payload, a.expires_at, a.created_at, COALESCE(a.decided_at,''), COALESCE(a.decision_note,'')
+		FROM approval_requests a LEFT JOIN users u ON u.id = a.requester_user_id
+		WHERE a.id = ? AND a.organisation_id = ?`, approvalID, actor.OrganisationID).Scan(&id, &requesterID, &requesterName, &actionType, &status, &risk, &reason, &targetType, &targetID, &targetSnapshot, &payload, &expiresAt, &createdAt, &decidedAt, &decisionNote)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "approval not found"})
+		return
+	}
+	approval = map[string]any{"id": id, "requester_id": requesterID, "requester_name": requesterName, "action_type": actionType, "status": status, "risk_level": risk, "reason": reason, "target_type": targetType, "target_id": targetID, "target_snapshot": targetSnapshot, "request_payload": redactedApprovalPayload(payload), "expires_at": expiresAt, "created_at": createdAt, "decided_at": decidedAt, "decision_note": decisionNote}
+	writeJSON(w, http.StatusOK, map[string]any{"approval": approval})
+}
+
+func redactedApprovalPayload(raw string) map[string]any {
+	view := map[string]any{}
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		return map[string]any{"available": false}
+	}
+	if command, ok := view["command"].(string); ok {
+		view["command_preview"] = redact.Stdout(command)
+		delete(view, "command")
+	}
+	if params, ok := view["params"].(map[string]any); ok {
+		for key, value := range params {
+			params[key] = redact.Stdout(fmt.Sprint(value))
+		}
+	}
+	return view
 }
 
 func handleApprove(w http.ResponseWriter, r *http.Request, approvalID string) {
@@ -578,7 +679,13 @@ func handleApprove(w http.ResponseWriter, r *http.Request, approvalID string) {
 		return
 	}
 
-	result, err := db.ExecContext(r.Context(),
+	tx, err := db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start approval transaction"})
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(r.Context(),
 		"UPDATE approval_requests SET status = 'approved', approver_user_id = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ? AND organisation_id = ? AND status = 'pending'",
 		actor.UserID, sqlNullString(note), approvalID, actor.OrganisationID)
 	if err != nil {
@@ -591,9 +698,19 @@ func handleApprove(w http.ResponseWriter, r *http.Request, approvalID string) {
 		return
 	}
 
-	writeAuditEvent(r.Context(), db, actor.OrganisationID, actor.UserID, "approval.approved", "approval", approvalID, "approved", nil)
-
-	execID := createExecutionFromApproval(r.Context(), db, actor.OrganisationID, requesterID, actor.UserID, riskLevel, reason, payload, approvalID)
+	execID, execErr := createExecutionFromApprovalTx(r.Context(), tx, actor.OrganisationID, requesterID, actor.UserID, riskLevel, reason, payload, approvalID)
+	if execErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create execution from approval"})
+		return
+	}
+	if err = writeAuditEventTx(r.Context(), tx, actor.OrganisationID, actor.UserID, "approval.approved", "approval", approvalID, "approved", map[string]any{"execution_id": execID}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record approval audit event"})
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit approval"})
+		return
+	}
 	resp := map[string]string{"status": "approved"}
 	if execID != "" {
 		resp["execution_id"] = execID
@@ -602,26 +719,22 @@ func handleApprove(w http.ResponseWriter, r *http.Request, approvalID string) {
 	writeJSON(w, 200, resp)
 }
 
-func createExecutionFromApproval(ctx context.Context, db *sql.DB, orgID, requesterID, approverID, risk, reason, payload, approvalID string) string {
+func createExecutionFromApprovalTx(ctx context.Context, tx *sql.Tx, orgID, requesterID, approverID, risk, reason, payload, approvalID string) (string, error) {
 	var intent struct {
-		Command     string   `json:"command"`
-		RunbookID   string   `json:"runbook_id"`
-		RunbookName string   `json:"runbook_name"`
-		TargetIDs   []string `json:"target_ids"`
-		Environment string   `json:"environment"`
-		Target      string   `json:"target"`
-		Timeout     int      `json:"timeout"`
+		Command        string           `json:"command"`
+		RunbookID      string           `json:"runbook_id"`
+		RunbookName    string           `json:"runbook_name"`
+		TargetIDs      []string         `json:"target_ids"`
+		TargetSnapshot []map[string]any `json:"target_snapshot"`
+		Environment    string           `json:"environment"`
+		Target         string           `json:"target"`
+		Timeout        int              `json:"timeout"`
 	}
 	if err := json.Unmarshal([]byte(payload), &intent); err != nil || intent.Command == "" {
-		return ""
+		return "", fmt.Errorf("invalid approval payload")
 	}
 
 	env := intent.Environment
-	if env == "" {
-		if len(intent.TargetIDs) > 0 {
-			env = detectEnv(ctx, db, orgID, intent.TargetIDs)
-		}
-	}
 	if env == "" {
 		env = "development"
 	}
@@ -630,21 +743,34 @@ func createExecutionFromApproval(ctx context.Context, db *sql.DB, orgID, request
 	}
 
 	execID := "exe_" + shortID()
-	db.ExecContext(ctx,
-		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, delegated_by_user_id, approval_id, execution_type, status, environment, risk_level, reason, command_preview, command_hash, timeout_seconds)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		execID, orgID, requesterID, "junior_engineer", approverID, approvalID, "runbook", "queued", env, risk, reason, intent.Command, hashCmd(intent.Command), intent.Timeout)
-
-	for _, srvID := range intent.TargetIDs {
-		db.ExecContext(ctx,
-			`INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status)
-			VALUES (?,?,?,?,'pending')`,
-			"ext_"+shortID(), orgID, execID, srvID)
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, delegated_by_user_id, approval_id, execution_type, status, environment, risk_level, reason, command, command_preview, command_hash, timeout_seconds)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		execID, orgID, requesterID, "junior_engineer", approverID, approvalID, "runbook", "queued", env, risk, reason, intent.Command, redact.Stdout(intent.Command), hashCmd(intent.Command), intent.Timeout); err != nil {
+		return "", err
 	}
 
-	writeAuditEvent(ctx, db, orgID, requesterID, "runbook.executed", "runbook", intent.RunbookID, "queued",
-		map[string]any{"execution_id": execID, "command": redact.Stdout(intent.Command), "delegated_by": approverID})
-	return execID
+	for i, srvID := range intent.TargetIDs {
+		serverSnapshot := "{}"
+		if i < len(intent.TargetSnapshot) {
+			serverSnapshot = jsonString(intent.TargetSnapshot[i])
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot)
+			VALUES (?,?,?,?,'pending',?)`,
+			"ext_"+shortID(), orgID, execID, srvID, serverSnapshot); err != nil {
+			return "", err
+		}
+	}
+	if err := recordExecutionEvent(ctx, tx, orgID, execID, "", "", "queued", "runbook.queued", map[string]any{"runbook_id": intent.RunbookID}); err != nil {
+		return "", err
+	}
+
+	if err := writeAuditEventTx(ctx, tx, orgID, requesterID, "runbook.executed", "runbook", intent.RunbookID, "queued",
+		map[string]any{"execution_id": execID, "command": redact.Stdout(intent.Command), "delegated_by": approverID}); err != nil {
+		return "", err
+	}
+	return execID, nil
 }
 
 func handleDeny(w http.ResponseWriter, r *http.Request, approvalID string) {

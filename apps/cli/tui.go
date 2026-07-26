@@ -13,14 +13,14 @@ import (
 )
 
 var (
-	tuiAppStyle     = lipgloss.NewStyle().Padding(0, 1)
-	titleStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10")).MarginBottom(1)
-	helpStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	selectedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
-	dimStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	errorStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	tableKeyMap     = table.DefaultKeyMap()
-	listKeyMap      = list.DefaultKeyMap()
+	tuiAppStyle   = lipgloss.NewStyle().Padding(0, 1)
+	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10")).MarginBottom(1)
+	helpStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	tableKeyMap   = table.DefaultKeyMap()
+	listKeyMap    = list.DefaultKeyMap()
 )
 
 type screen int
@@ -31,43 +31,49 @@ const (
 	screenRunbooks
 	screenExecutions
 	screenApprovals
+	screenSchedules
 	screenAudit
 	screenHelp
 	screenExecutionDetail
 )
 
 type tuiModel struct {
-	screen      screen
-	width       int
-	height      int
-	err         string
-	msg         string
-	client      *client.Client
+	screen screen
+	width  int
+	height int
+	err    string
+	msg    string
+	client *client.Client
 
 	// Server browser
-	serverTable  table.Model
-	servers      []client.Server
+	serverTable table.Model
+	servers     []client.Server
 
 	// Runbook browser
-	runbookList  list.Model
-	runbooks     []client.RunbookItem
+	runbookList list.Model
+	runbooks    []client.RunbookItem
 
 	// Execution monitor
-	execTable    table.Model
-	executions   []client.ExecutionListItem
+	execTable  table.Model
+	executions []client.ExecutionListItem
 
 	// Approval queue
 	approvalTable table.Model
 	approvals     []client.ApprovalItem
 
+	// Automation schedules
+	scheduleTable table.Model
+	schedules     []client.Schedule
+
 	// Audit browser
-	auditInput   textinput.Model
-	auditEvents  []client.AuditEvent
+	auditInput  textinput.Model
+	auditEvents []client.AuditEvent
 
 	// Execution detail
 	selectedExec *client.GetExecutionResponse
+	confirm      string
 
-	quitting     bool
+	quitting bool
 }
 
 func newTUIModel(c *client.Client) tuiModel {
@@ -112,6 +118,17 @@ func newTUIModel(c *client.Client) tuiModel {
 	apts.Header = apts.Header.Bold(true).Foreground(lipgloss.Color("10"))
 	apt.SetStyles(apts)
 
+	sct := table.New(table.WithColumns([]table.Column{
+		{Title: "Name", Width: 20},
+		{Title: "Runbook", Width: 20},
+		{Title: "Target", Width: 22},
+		{Title: "Next run", Width: 20},
+		{Title: "Status", Width: 10},
+	}), table.WithHeight(12))
+	scts := table.DefaultStyles()
+	scts.Header = scts.Header.Bold(true).Foreground(lipgloss.Color("10"))
+	sct.SetStyles(scts)
+
 	ai := textinput.New()
 	ai.Placeholder = "search audits..."
 	ai.Width = 40
@@ -129,6 +146,7 @@ func newTUIModel(c *client.Client) tuiModel {
 		serverTable:   st,
 		execTable:     et,
 		approvalTable: apt,
+		scheduleTable: sct,
 		auditInput:    ai,
 		runbookList:   rbList,
 	}
@@ -143,15 +161,54 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.serverTable.SetWidth(msg.Width - 4)
-		m.execTable.SetWidth(msg.Width - 4)
-		m.approvalTable.SetWidth(msg.Width - 4)
-		m.runbookList.SetWidth(msg.Width - 4)
-		m.runbookList.SetHeight(msg.Height - 8)
+		contentWidth := msg.Width - 4
+		if contentWidth < 20 {
+			contentWidth = 20
+		}
+		contentHeight := msg.Height - 8
+		if contentHeight < 4 {
+			contentHeight = 4
+		}
+		m.serverTable.SetWidth(contentWidth)
+		m.execTable.SetWidth(contentWidth)
+		m.approvalTable.SetWidth(contentWidth)
+		m.scheduleTable.SetWidth(contentWidth)
+		m.runbookList.SetWidth(contentWidth)
+		m.runbookList.SetHeight(contentHeight)
 		return m, nil
 
 	case tea.KeyMsg:
 		if m.screen == screenAudit {
+			switch msg.String() {
+			case "ctrl+c", "q":
+				m.screen = screenHome
+				m.auditInput.Blur()
+				return m, nil
+			case "h":
+				m.screen = screenHelp
+				m.auditInput.Blur()
+				return m, nil
+			case "r", "enter":
+				actor := m.auditInput.Value()
+				events, err := m.client.ListAudit("50")
+				if err != nil {
+					m.err = "audit refresh failed: " + err.Error()
+					return m, nil
+				}
+				if actor != "" {
+					filtered := []client.AuditEvent{}
+					for _, e := range events.Events {
+						if e.ActorID == actor || e.Action == actor {
+							filtered = append(filtered, e)
+						}
+					}
+					m.auditEvents = filtered
+				} else {
+					m.auditEvents = events.Events
+				}
+				m.msg = fmt.Sprintf("Showing %d audit events", len(m.auditEvents))
+				return m, nil
+			}
 			var cmd tea.Cmd
 			m.auditInput, cmd = m.auditInput.Update(msg)
 			return m, cmd
@@ -166,6 +223,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == screenApprovals {
 			m.approvalTable, _ = m.approvalTable.Update(msg)
+		}
+		if m.screen == screenSchedules {
+			m.scheduleTable, _ = m.scheduleTable.Update(msg)
 		}
 		if m.screen == screenRunbooks {
 			m.runbookList, _ = m.runbookList.Update(msg)
@@ -222,6 +282,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "5":
+			m.screen = screenSchedules
+			m.err = ""
+			schedules, err := m.client.ListSchedules()
+			if err != nil {
+				m.err = "schedule list failed: " + err.Error()
+			} else if schedules != nil {
+				m.schedules = schedules.Schedules
+				m.scheduleTable.SetRows(scheduleRows(schedules.Schedules))
+			}
+			return m, nil
+		case "6":
 			m.screen = screenAudit
 			m.err = ""
 			m.auditInput.Focus()
@@ -248,6 +319,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if a != nil {
 					m.approvals = a.Approvals
 					m.approvalTable.SetRows(approvalRows(a.Approvals))
+				}
+			case screenSchedules:
+				s, err := m.client.ListSchedules()
+				if err != nil {
+					m.err = "schedule refresh failed: " + err.Error()
+				} else if s != nil {
+					m.schedules = s.Schedules
+					m.scheduleTable.SetRows(scheduleRows(s.Schedules))
 				}
 			case screenRunbooks:
 				r, _ := m.client.ListRunbooks()
@@ -312,6 +391,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cursor := m.approvalTable.Cursor()
 				if cursor >= 0 && cursor < len(m.approvals) {
 					approvalID := m.approvals[cursor].ID
+					if m.confirm != approvalID+":approve" {
+						m.confirm = approvalID + ":approve"
+						m.msg = "Press a again to approve " + approvalID
+						return m, nil
+					}
+					m.confirm = ""
 					_, err := m.client.ApproveApproval(approvalID)
 					if err != nil {
 						m.err = "approve failed: " + err.Error()
@@ -332,6 +417,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cursor := m.approvalTable.Cursor()
 				if cursor >= 0 && cursor < len(m.approvals) {
 					approvalID := m.approvals[cursor].ID
+					if m.confirm != approvalID+":deny" {
+						m.confirm = approvalID + ":deny"
+						m.msg = "Press d again to deny " + approvalID
+						return m, nil
+					}
+					m.confirm = ""
 					_, err := m.client.DenyApproval(approvalID)
 					if err != nil {
 						m.err = "deny failed: " + err.Error()
@@ -365,6 +456,8 @@ func (m tuiModel) View() string {
 		return m.executionsView()
 	case screenApprovals:
 		return m.approvalsView()
+	case screenSchedules:
+		return m.schedulesView()
 	case screenAudit:
 		return m.auditView()
 	case screenHelp:
@@ -381,7 +474,8 @@ func (m tuiModel) homeView() string {
 	s += "  [2] Runbooks        View and launch runbooks\n"
 	s += "  [3] Executions      Monitor running and completed jobs\n"
 	s += "  [4] Approvals       Review and decide approval requests\n"
-	s += "  [5] Audit           Search audit events\n\n"
+	s += "  [5] Schedules       View automated run schedules\n"
+	s += "  [6] Audit           Search audit events\n\n"
 	s += "  [h] Help            Show keybindings\n"
 	s += "  [q] Quit\n\n"
 	if m.err != "" {
@@ -501,6 +595,17 @@ func (m tuiModel) approvalsView() string {
 	return tuiAppStyle.Render(s)
 }
 
+func (m tuiModel) schedulesView() string {
+	s := titleStyle.Render("Schedules") + "\n"
+	if len(m.schedules) == 0 {
+		s += dimStyle.Render("No schedules found. Create one in the web console or API.") + "\n"
+	} else {
+		s += m.scheduleTable.View() + "\n"
+	}
+	s += helpStyle.Render("[q] back  [r] refresh")
+	return tuiAppStyle.Render(s)
+}
+
 func (m tuiModel) auditView() string {
 	s := titleStyle.Render("Audit Search") + "\n"
 	s += m.auditInput.View() + "\n\n"
@@ -519,7 +624,7 @@ func (m tuiModel) auditView() string {
 func (m tuiModel) helpView() string {
 	s := titleStyle.Render("Help") + "\n"
 	s += "Navigation:\n"
-	s += "  1-5        Switch to view\n"
+	s += "  1-6        Switch to view\n"
 	s += "  q          Back / Quit\n"
 	s += "  h          Help\n"
 	s += "  ↑↓ / j,k   Navigate lists\n"
@@ -551,7 +656,7 @@ func (i runbookListItem) Description() string {
 	if !i.rb.Permitted {
 		perm = " [restricted]"
 	}
-	return fmt.Sprintf("%s — %s%s", i.rb.Status, i.rb.Title, perm)
+	return fmt.Sprintf("%s - %s%s", i.rb.Status, i.rb.Title, perm)
 }
 func (i runbookListItem) FilterValue() string {
 	return i.rb.Name + " " + i.rb.Title + " " + i.rb.Command + " " + i.rb.Description + " " + i.rb.Risk + " " + i.rb.Status
@@ -578,6 +683,18 @@ func approvalRows(approvals []client.ApprovalItem) []table.Row {
 	rows := []table.Row{}
 	for _, a := range approvals {
 		rows = append(rows, table.Row{a.ID, a.RequesterName, a.ActionType, a.Status, a.Reason})
+	}
+	return rows
+}
+
+func scheduleRows(schedules []client.Schedule) []table.Row {
+	rows := []table.Row{}
+	for _, schedule := range schedules {
+		status := "enabled"
+		if !schedule.Enabled {
+			status = "disabled"
+		}
+		rows = append(rows, table.Row{schedule.Name, schedule.RunbookName, schedule.Target, schedule.NextRunAt, status})
 	}
 	return rows
 }

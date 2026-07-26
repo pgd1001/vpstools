@@ -12,13 +12,15 @@ export type Runner = { id:string; name:string; runner_type:string; status:string
 export type Runbook = {
   id: string; name: string; title: string; status: string;
   description?: string; risk_level: string; command_preview: string; created_at: string;
-  version?: number; command?: string; definition_json?: string; allowed_roles?: string;
+  version?: number; command?: string; definition_json?: string; allowed_roles?: string; permitted?: boolean;
 };
+export type RunbookParameter = { name:string; type?:string; default?:string; allowedValues?:string[]; required?:boolean; description?:string };
 
 export type Approval = {
   id: string; requester_name: string; action_type: string;
   status: string; risk_level: string; reason: string;
   target_type: string; target_id: string; created_at: string;
+  expires_at?: string; target_snapshot?: string; request_payload?: string | Record<string, unknown>; decision_note?: string;
 };
 
 export type AuditEvent = {
@@ -32,7 +34,9 @@ export type Execution = {
   requested_at: string; finished_at: string;
 };
 
-export type ExecutionDetail = Execution & { reason?: string; targets: { id:string; server_id:string; server_name:string; status:string; stdout:string; stderr:string; exit_code:number; started_at:string; finished_at:string }[] };
+export type ExecutionDetail = Execution & { reason?: string; targets: { id:string; server_id:string; server_name:string; status:string; stdout:string; stderr:string; exit_code:number; started_at:string; finished_at:string }[]; events?: {id:string;target_id:string;from_status:string;to_status:string;event_type:string;metadata:string;occurred_at:string}[] };
+export type RunbookRunResponse = { status:string; approval_required?:boolean; target_count?:number; execution_id?:string; approval_id?:string; message?:string };
+export type Schedule = { id:string; name:string; runbook_name:string; target:string; reason:string; params:string; interval_seconds:number; next_run_at:string; enabled:boolean; last_run_at:string; last_error:string };
 
 let user = '';
 
@@ -54,7 +58,7 @@ function headers(): Record<string, string> {
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(API + path, { headers: headers(), credentials: 'include' });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await errorMessage(res));
   return res.json();
 }
 
@@ -63,14 +67,24 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
     method: 'POST', headers: headers(),
     body: body ? JSON.stringify(body) : undefined, credentials: 'include',
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await errorMessage(res));
   return res.json();
 }
 
 async function mutate<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(API + path, { method, headers: headers(), body: body === undefined ? undefined : JSON.stringify(body), credentials: 'include' });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await errorMessage(res));
   return res.json();
+}
+
+async function errorMessage(res: Response): Promise<string> {
+  const raw = await res.text();
+  try {
+    const body = JSON.parse(raw) as { error?: string; message?: string; next?: string };
+    return [body.error || body.message || `Request failed (${res.status})`, body.next].filter(Boolean).join(' ');
+  } catch {
+    return raw || `Request failed (${res.status})`;
+  }
 }
 
 export const api = {
@@ -92,15 +106,19 @@ export const api = {
   updateRunbook: (name:string, body:unknown) => mutate('PUT', `/api/v1/runbooks/${encodeURIComponent(name)}`, body),
   archiveRunbook: (name:string) => mutate('DELETE', `/api/v1/runbooks/${encodeURIComponent(name)}`),
   publishRunbook: (name:string) => post(`/api/v1/runbooks/${encodeURIComponent(name)}/publish`),
-  runRunbook: (name:string, body:unknown) => post(`/api/v1/runbooks/${encodeURIComponent(name)}/run`, body),
+  runRunbook: (name:string, body:unknown) => post<RunbookRunResponse>(`/api/v1/runbooks/${encodeURIComponent(name)}/run`, body),
   approvals: () => get<{approvals:Approval[]}>('/api/v1/approvals'),
+  getApproval: (id:string) => get<{approval:Approval}>(`/api/v1/approvals/${encodeURIComponent(id)}`),
   executions: () => get<{executions:Execution[]}>('/api/v1/executions'),
   createExecution: (body:unknown) => post('/api/v1/executions', body),
   getExecution: (id:string) => get<{execution:ExecutionDetail}>(`/api/v1/executions/${encodeURIComponent(id)}`),
+  schedules: () => get<{schedules:Schedule[]}>('/api/v1/schedules'),
+  createSchedule: (body:unknown) => post('/api/v1/schedules', body),
+  disableSchedule: (id:string) => mutate('DELETE', `/api/v1/schedules/${encodeURIComponent(id)}`),
   cancelExecution: (id:string) => post(`/api/v1/executions/${encodeURIComponent(id)}/cancel`),
   audit: (actor?:string) => get<{events:AuditEvent[]}>(`/api/v1/audit?limit=50${actor?`&actor=${actor}`:''}`),
-  approve: (id:string) => post(`/api/v1/approvals/${id}/approve`),
-  deny: (id:string) => post(`/api/v1/approvals/${id}/deny`),
+  approve: (id:string, note?:string) => post(`/api/v1/approvals/${id}/approve`, note ? {note} : undefined),
+  deny: (id:string, note?:string) => post(`/api/v1/approvals/${id}/deny`, note ? {note} : undefined),
   setUser: (u:string) => { user = u; if (typeof window !== 'undefined') localStorage.setItem('vps_user', u); },
   getUser: () => getUser(),
 };

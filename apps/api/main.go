@@ -56,6 +56,8 @@ func main() {
 		logger.Error("database open failed", "error", err)
 		os.Exit(1)
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	defer db.Close()
 	apiDB = db
 	localArtifacts, err := artifacts.NewLocalStore(apiBackends.ArtifactsDir, apiBackends.ArtifactKey)
@@ -75,6 +77,7 @@ func main() {
 	}
 
 	logger.Info("database ready", "tier", apiBackends.Tier(), "database_driver", apiBackends.DatabaseDriver, "artifact_store", apiBackends.ArtifactStore, "job_dispatch", apiBackends.JobDispatch)
+	go runEmbeddedScheduler(ctx, db, logger)
 
 	mux := http.NewServeMux()
 
@@ -303,7 +306,30 @@ func main() {
 			}
 			return
 		}
+		if r.Method == http.MethodGet {
+			handleGetApproval(w, r, path)
+			return
+		}
 		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+	}))
+
+	mux.HandleFunc("/api/v1/schedules", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleListSchedules(w, r)
+		case http.MethodPost:
+			handleCreateSchedule(w, r)
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		}
+	}))
+	mux.HandleFunc("/api/v1/schedules/", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
+		scheduleID := strings.TrimPrefix(r.URL.Path, "/api/v1/schedules/")
+		if scheduleID == "" || r.Method != http.MethodDelete {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		handleDisableSchedule(w, r, scheduleID)
 	}))
 
 	addr := ":" + envOrDefault("API_PORT", "8080")
@@ -448,7 +474,6 @@ func handleListServers(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": "query failed"})
 		return
 	}
-	defer rows.Close()
 
 	type server struct {
 		ID          string `json:"id"`
@@ -480,8 +505,14 @@ func handleListServers(w http.ResponseWriter, r *http.Request) {
 			&s.Status, &s.LastSeenAt, &s.LastCheckAt, &s.CreatedAt); err != nil {
 			continue
 		}
-		s.Tags = loadTags(r.Context(), dbFrom(r), actor.OrganisationID, s.ID)
 		servers = append(servers, s)
+	}
+	if err := rows.Close(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to close server query"})
+		return
+	}
+	for i := range servers {
+		servers[i].Tags = loadTags(r.Context(), dbFrom(r), actor.OrganisationID, servers[i].ID)
 	}
 	writeJSON(w, 200, map[string]any{"servers": servers})
 }
@@ -1115,8 +1146,28 @@ func handleGetExecution(w http.ResponseWriter, r *http.Request, execID string) {
 			targets = append(targets, t)
 		}
 	}
+	type executionEvent struct {
+		ID         string `json:"id"`
+		TargetID   string `json:"target_id"`
+		FromStatus string `json:"from_status"`
+		ToStatus   string `json:"to_status"`
+		EventType  string `json:"event_type"`
+		Metadata   string `json:"metadata"`
+		OccurredAt string `json:"occurred_at"`
+	}
+	eventRows, err := db.QueryContext(r.Context(), `SELECT id, COALESCE(target_id,''), COALESCE(from_status,''), to_status, event_type, metadata, occurred_at FROM execution_events WHERE execution_id = ? AND organisation_id = ? ORDER BY occurred_at ASC, id ASC`, execID, actor.OrganisationID)
+	var events []executionEvent
+	if err == nil {
+		defer eventRows.Close()
+		for eventRows.Next() {
+			var event executionEvent
+			if eventRows.Scan(&event.ID, &event.TargetID, &event.FromStatus, &event.ToStatus, &event.EventType, &event.Metadata, &event.OccurredAt) == nil {
+				events = append(events, event)
+			}
+		}
+	}
 
-	writeJSON(w, 200, map[string]any{"execution": e, "targets": targets})
+	writeJSON(w, 200, map[string]any{"execution": e, "targets": targets, "events": events})
 }
 
 func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
@@ -1144,7 +1195,11 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	env := detectEnv(r.Context(), db, actor.OrganisationID, targetIDs)
+	env, mixed := targetEnvironment(r.Context(), db, actor.OrganisationID, targetIDs)
+	if mixed {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "targets span multiple environments; submit one environment at a time"})
+		return
+	}
 	risk := authz.ClassifyRisk(req.Command)
 
 	dec := policy.CheckExecution(r.Context(), db, actor, authz.Env(env), risk, req.Reason)
@@ -1155,10 +1210,21 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 
 	execID := "exe_" + shortID()
 
-	_, err := db.ExecContext(r.Context(),
-		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, delegated_by_user_id, execution_type, status, environment, risk_level, command_preview, command_hash, reason, timeout_seconds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		execID, actor.OrganisationID, actor.UserID, actor.Role, sqlNullString(req.DelegatedBy), "raw_command", "queued", env, string(risk), req.Command, hashCmd(req.Command), req.Reason, 300,
+	targetSnapshot := snapshotTargets(r.Context(), db, actor.OrganisationID, targetIDs)
+	if len(targetSnapshot) != len(targetIDs) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to snapshot selected targets"})
+		return
+	}
+	tx, err := db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start execution transaction"})
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(r.Context(),
+		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, delegated_by_user_id, execution_type, status, environment, risk_level, command, command_preview, command_hash, reason, timeout_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		execID, actor.OrganisationID, actor.UserID, actor.Role, sqlNullString(req.DelegatedBy), "raw_command", "queued", env, string(risk), req.Command, redact.Stdout(req.Command), hashCmd(req.Command), req.Reason, 300,
 	)
 	if err != nil {
 		slog.Error("execution create error", "error", err)
@@ -1166,16 +1232,29 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for _, srvID := range targetIDs {
-		db.ExecContext(r.Context(),
+	for i, srvID := range targetIDs {
+		if _, err = tx.ExecContext(r.Context(),
 			`INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot)
-			VALUES (?, ?, ?, ?, 'pending', '{}')`,
-			"ext_"+shortID(), actor.OrganisationID, execID, srvID)
+			VALUES (?, ?, ?, ?, 'pending', ?)`,
+			"ext_"+shortID(), actor.OrganisationID, execID, srvID, jsonString(targetSnapshot[i])); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create execution target"})
+			return
+		}
 	}
-
-	writeAuditEvent(r.Context(), db, actor.OrganisationID, actor.UserID, "execution.requested", "execution", execID, "queued", map[string]any{
+	if err = recordExecutionEvent(r.Context(), tx, actor.OrganisationID, execID, "", "", "queued", "execution.queued", map[string]any{"execution_type": "raw_command"}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record execution timeline"})
+		return
+	}
+	if err = writeAuditEventTx(r.Context(), tx, actor.OrganisationID, actor.UserID, "execution.requested", "execution", execID, "queued", map[string]any{
 		"command": redact.Stdout(req.Command), "reason": req.Reason, "target": req.Target, "risk": string(risk), "target_count": len(targetIDs),
-	})
+	}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record execution audit event"})
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit execution"})
+		return
+	}
 
 	writeJSON(w, 201, map[string]any{
 		"execution_id": execID,
@@ -1301,12 +1380,47 @@ func resolveTargets(ctx context.Context, db *sql.DB, orgID, target string) []str
 }
 
 func detectEnv(ctx context.Context, db *sql.DB, orgID string, serverIDs []string) string {
-	if len(serverIDs) == 0 {
-		return ""
-	}
-	var env string
-	db.QueryRowContext(ctx, "SELECT environment FROM servers WHERE id = ? AND organisation_id = ?", serverIDs[0], orgID).Scan(&env)
+	env, _ := targetEnvironment(ctx, db, orgID, serverIDs)
 	return env
+}
+
+func targetEnvironment(ctx context.Context, db *sql.DB, orgID string, serverIDs []string) (string, bool) {
+	if len(serverIDs) == 0 {
+		return "", false
+	}
+	environments := make(map[string]struct{})
+	for _, serverID := range serverIDs {
+		var env string
+		if err := db.QueryRowContext(ctx, "SELECT environment FROM servers WHERE id = ? AND organisation_id = ?", serverID, orgID).Scan(&env); err != nil {
+			return "", true
+		}
+		environments[env] = struct{}{}
+	}
+	if len(environments) != 1 {
+		return "", true
+	}
+	for env := range environments {
+		return env, false
+	}
+	return "", true
+}
+
+func snapshotTargets(ctx context.Context, db *sql.DB, orgID string, serverIDs []string) []map[string]any {
+	snapshots := make([]map[string]any, 0, len(serverIDs))
+	for _, serverID := range serverIDs {
+		var id, name, hostname, environment, status string
+		var port int
+		if err := db.QueryRowContext(ctx,
+			"SELECT id, name, COALESCE(hostname,''), environment, status, ssh_port FROM servers WHERE id = ? AND organisation_id = ?",
+			serverID, orgID).Scan(&id, &name, &hostname, &environment, &status, &port); err != nil {
+			return nil
+		}
+		snapshots = append(snapshots, map[string]any{
+			"id": id, "name": name, "hostname": hostname, "environment": environment,
+			"status": status, "ssh_port": port,
+		})
+	}
+	return snapshots
 }
 
 func hasSuffix(s, suffix string) bool {
@@ -1357,7 +1471,7 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 	defer tx.Rollback()
 	var targetID, execID, command, host, sshUser string
 	var sshPort, timeout int
-	err = tx.QueryRowContext(ctx, `SELECT et.id, e.id, e.command_preview, COALESCE(s.hostname, s.public_ip, ''), s.ssh_port, COALESCE(s.ssh_username,''), e.timeout_seconds
+	err = tx.QueryRowContext(ctx, `SELECT et.id, e.id, COALESCE(NULLIF(e.command,''), e.command_preview), COALESCE(s.hostname, s.public_ip, ''), s.ssh_port, COALESCE(s.ssh_username,''), e.timeout_seconds
 		FROM execution_targets et JOIN executions e ON e.id = et.execution_id JOIN servers s ON s.id = et.server_id
 		WHERE e.status IN ('queued','running') AND e.organisation_id = ?
 		AND ((et.status = 'pending' AND (et.next_attempt_at IS NULL OR et.next_attempt_at <= datetime('now')))
@@ -1381,6 +1495,10 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 	leaseID := "lease_" + shortID()
 	if _, err = tx.ExecContext(ctx, "UPDATE execution_targets SET status = 'running', runner_id = ?, lease_id = ?, lease_expires_at = datetime('now','+5 minutes'), attempt = attempt + 1, started_at = COALESCE(started_at, datetime('now')) WHERE id = ? AND status IN ('pending','running') AND attempt < max_attempts", runnerID, leaseID, targetID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to bind job to runner"})
+		return
+	}
+	if err = recordExecutionEvent(ctx, tx, runnerOrg, execID, targetID, "queued", "running", "execution.started", map[string]any{"runner_id": runnerID, "lease_id": leaseID}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record execution timeline"})
 		return
 	}
 	if err = tx.Commit(); err != nil {
@@ -1467,6 +1585,14 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 			return
 		}
 		status = finalStatus
+	}
+	if err := recordExecutionEvent(ctx, db, orgID, req.ExecutionID, req.TargetID, "running", status, "execution.target.completed", map[string]any{"exit_code": req.ExitCode, "duration_ms": req.DurationMs}); err != nil {
+		slog.Error("execution timeline write error", "error", err)
+	}
+	if remaining == 0 {
+		if err := recordExecutionEvent(ctx, db, orgID, req.ExecutionID, "", "running", status, "execution.completed", map[string]any{"failed_targets": failed}); err != nil {
+			slog.Error("execution timeline write error", "error", err)
+		}
 	}
 	action := "execution.target.completed"
 	if remaining == 0 {
