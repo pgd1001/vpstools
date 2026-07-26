@@ -54,6 +54,7 @@ Write-Color "`nStarting API server on port $APIPort..." "Cyan"
 $apiExe = Join-Path $binDir "api.exe"
 $apiEnv = @{
     API_PORT = $APIPort
+    VPS_DEV_AUTH = "true"
 }
 $apiJob = Start-Job -ScriptBlock {
     param($exe, $envVars, $wd)
@@ -88,6 +89,7 @@ $runnerExe = Join-Path $binDir "runner.exe"
 $runnerEnv = @{
     API_URL = "http://localhost:$APIPort"
     SIMULATE = "true"
+    VPS_DEV_AUTH = "true"
 }
 $runnerJob = Start-Job -ScriptBlock {
     param($exe, $envVars, $wd)

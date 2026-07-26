@@ -45,7 +45,7 @@ Use --wait to poll for completion and display results.`,
 			if reason != "" {
 				fmt.Printf("Reason:  %s\n", reason)
 			}
-			fmt.Println("\n[dry-run — execution not submitted]")
+			fmt.Println("\n[dry-run - execution not submitted]")
 			return
 		}
 

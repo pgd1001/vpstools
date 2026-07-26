@@ -1,189 +1,52 @@
 'use client';
-import { useState, useEffect } from 'react';
-import { api, Server, Runbook, Approval, AuditEvent, Execution } from './api';
 
-function Tab({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-  return (
-    <button onClick={onClick} style={{
-      padding: '8px 16px', border: 'none', cursor: 'pointer',
-      background: active ? '#0ea5e9' : '#1e293b', color: active ? '#fff' : '#94a3b8',
-      borderRadius: '6px 6px 0 0', fontWeight: active ? 600 : 400,
-    }}>{label}</button>
-  );
-}
+import { useEffect, useState } from 'react';
+import { api, Approval, AuditEvent, Execution, ExecutionDetail, Runbook, RunbookParameter, Runner, Schedule, Server } from './api';
 
-function UserSwitcher() {
-  const [user, setUser] = useState(api.getUser());
-  return (
-    <select value={user} onChange={e => { api.setUser(e.target.value); setUser(e.target.value); }}
-      style={{ padding: '4px 8px', background: '#1e293b', color: '#e2e8f0', border: '1px solid #334155', borderRadius: 6 }}>
-      <option value="user_senior">Senior Engineer</option>
-      <option value="user_junior">Junior Engineer</option>
-      <option value="user_auditor">Auditor</option>
-    </select>
-  );
-}
+type TabName = 'servers' | 'runners' | 'runbooks' | 'schedules' | 'approvals' | 'executions' | 'audit';
+type FormState = Record<string, any>;
+const senior = (role: string) => ['owner', 'admin', 'senior_engineer'].includes(role);
+const field: React.CSSProperties = { padding: '8px 10px', background: '#1e293b', color: '#e2e8f0', border: '1px solid #475569', borderRadius: 4, width: '100%', boxSizing: 'border-box', marginBottom: 8 };
+const panel: React.CSSProperties = { padding: 14, marginBottom: 14, background: '#1e293b', border: '1px solid #475569', borderRadius: 6, maxWidth: 760 };
+const good: React.CSSProperties = { padding: '5px 12px', margin: 4, background: '#166534', color: '#dcfce7', border: 0, borderRadius: 4, cursor: 'pointer' };
+const bad: React.CSSProperties = { padding: '5px 12px', margin: 4, background: '#7f1d1d', color: '#fecaca', border: 0, borderRadius: 4, cursor: 'pointer' };
+const neutral: React.CSSProperties = { padding: '5px 12px', margin: 4, background: '#334155', color: '#e2e8f0', border: '1px solid #475569', borderRadius: 4, cursor: 'pointer' };
+const td: React.CSSProperties = { padding: '8px 12px', fontSize: 13, borderBottom: '1px solid #1e293b', verticalAlign: 'top' };
+const th: React.CSSProperties = { textAlign: 'left', padding: '8px 12px', color: '#94a3b8', fontSize: 12 };
+
+function Form({ children, onSubmit, onCancel, onPreview }: { children: React.ReactNode; onSubmit: () => void; onCancel: () => void; onPreview?: () => void }) { return <div style={panel}><form onSubmit={e => { e.preventDefault(); onSubmit(); }}>{children}<div><button style={good}>Save</button>{onPreview && <button type="button" onClick={onPreview} style={neutral}>Preview</button>}<button type="button" onClick={onCancel} style={neutral}>Cancel</button></div></form></div>; }
+function Label({ name, children }: { name: string; children: React.ReactNode }) { return <label style={{ display: 'block', fontSize: 12, color: '#94a3b8', marginTop: 8 }}>{name}{children}</label>; }
+function Input({ form, name, setForm, type = 'text' }: { form: FormState; name: string; setForm: React.Dispatch<React.SetStateAction<FormState | null>>; type?: string }) { return <input id={`field-${name}`} type={type} value={form[name] ?? ''} onChange={e => setForm(current => current ? { ...current, [name]: e.target.value } : current)} style={field} />; }
+function Table({ headers, rows }: { headers: string[]; rows: React.ReactNode[] }) { return <div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse' }}><thead><tr>{headers.map(header => <th key={header} style={th}>{header}</th>)}</tr></thead><tbody>{rows}</tbody></table></div>; }
+function TaskFields({ definitions, values, onChange }: { definitions: RunbookParameter[]; values: Record<string, string>; onChange: (name: string, value: string) => void }) { return <>{definitions.map(definition => <Label key={definition.name} name={`${definition.name}${definition.required ? ' (required)' : ''}${definition.description ? `, ${definition.description}` : ''}`}>{definition.allowedValues?.length || definition.type === 'enum' ? <select value={values[definition.name] || ''} onChange={e => onChange(definition.name, e.target.value)} style={field}><option value="">Select a value</option>{(definition.allowedValues || []).map(value => <option key={value}>{value}</option>)}</select> : <input value={values[definition.name] || ''} onChange={e => onChange(definition.name, e.target.value)} type={definition.type === 'integer' || definition.type === 'number' ? 'number' : 'text'} style={field} />}</Label>)}</>; }
+function UserSwitcher() { const [user, setUser] = useState(api.getUser()); return process.env.NEXT_PUBLIC_DEV_AUTH === 'true' ? <select aria-label="Development user" value={user} onChange={e => { api.setUser(e.target.value); setUser(e.target.value); }} style={{ ...field, width: 190, display: 'inline-block', margin: '0 0 0 8px' }}><option value="user_senior">Senior Engineer</option><option value="user_junior">Junior Engineer</option><option value="user_auditor">Auditor</option></select> : <a href="/api/auth/login" style={{ color: '#7dd3fc', marginLeft: 8 }}>Sign in</a>; }
 
 export default function Home() {
-  const [tab, setTab] = useState<'servers'|'runbooks'|'approvals'|'executions'|'audit'>('servers');
-  const [servers, setServers] = useState<Server[]>([]);
-  const [runbooks, setRunbooks] = useState<Runbook[]>([]);
-  const [approvals, setApprovals] = useState<Approval[]>([]);
-  const [executions, setExecutions] = useState<Execution[]>([]);
-  const [audit, setAudit] = useState<AuditEvent[]>([]);
+  const [tab, setTab] = useState<TabName>('runbooks');
+  const [role, setRole] = useState('');
   const [status, setStatus] = useState('');
+  const [servers, setServers] = useState<Server[]>([]), [runners, setRunners] = useState<Runner[]>([]), [runbooks, setRunbooks] = useState<Runbook[]>([]), [schedules, setSchedules] = useState<Schedule[]>([]), [approvals, setApprovals] = useState<Approval[]>([]), [executions, setExecutions] = useState<Execution[]>([]), [audit, setAudit] = useState<AuditEvent[]>([]);
+  const [form, setForm] = useState<FormState | null>(null), [task, setTask] = useState<FormState | null>(null), [detail, setDetail] = useState<ExecutionDetail | null>(null), [search, setSearch] = useState('');
+  const load = async (requested: TabName = tab) => { setStatus('Loading...'); try { if (requested === 'servers') setServers((await api.servers()).servers); if (requested === 'runners') setRunners((await api.runners()).runners); if (requested === 'runbooks') setRunbooks((await api.runbooks(search)).runbooks); if (requested === 'schedules') setSchedules((await api.schedules()).schedules); if (requested === 'approvals') setApprovals((await api.approvals()).approvals); if (requested === 'executions') setExecutions((await api.executions()).executions); if (requested === 'audit') setAudit((await api.audit()).events); setStatus(''); } catch (error: any) { setStatus(error.message || 'Request failed'); } };
+  useEffect(() => { void load(tab); }, [tab]);
+  useEffect(() => { api.whoami().then(response => setRole(response.role)).catch(() => setRole('')); }, []);
+  useEffect(() => { if (tab !== 'executions') return; const timer = window.setInterval(() => void load('executions'), 5000); return () => window.clearInterval(timer); }, [tab]);
+  const act = async (fn: () => Promise<any>, refresh: TabName = tab) => { try { setStatus('Saving...'); await fn(); setForm(null); setTask(null); setDetail(null); await load(refresh); setStatus('Saved.'); } catch (error: any) { setStatus(error.message || 'Request failed'); } };
+  const openTask = async (runbook: Runbook) => { try { const response = (await api.getRunbook(runbook.name)).runbook; let definitions: RunbookParameter[] = []; try { definitions = JSON.parse(response.definition_json || '{}').spec?.parameters || []; } catch { /* API validation reports malformed definitions */ } const values: Record<string, string> = {}; definitions.forEach(parameter => { if (parameter.default) values[parameter.name] = parameter.default; }); setTask({ name: runbook.name, target: 'server:srv_demo', reason: '', params: '{}', definitions, values }); } catch (error: any) { setStatus(error.message || 'Unable to open task'); } };
+  const params = (current: FormState) => current.definitions?.length ? current.values || {} : JSON.parse(current.params || '{}');
+  const tabs: TabName[] = ['servers', 'runners', 'runbooks', 'schedules', 'approvals', 'executions', 'audit'];
 
-  const load = async (t: string) => {
-    setStatus('loading...');
-    try {
-      if (t === 'servers') setServers((await api.servers()).servers);
-      if (t === 'runbooks') setRunbooks((await api.runbooks()).runbooks);
-      if (t === 'approvals') setApprovals((await api.approvals()).approvals);
-      if (t === 'executions') setExecutions((await api.executions()).executions);
-      if (t === 'audit') setAudit((await api.audit()).events);
-      setStatus('');
-    } catch (e: any) { setStatus(e.message); }
-  };
+  let content: React.ReactNode = null;
+  if (tab === 'servers') content = <><Toolbar label="Servers" show={senior(role)} onClick={() => setForm({ name: '', hostname: '', environment: 'development', ssh_port: 22 })} />{form && <Form onCancel={() => setForm(null)} onSubmit={() => void act(() => api.createServer(form))}><Label name="Name"><Input form={form} name="name" setForm={setForm} /></Label><Label name="Hostname"><Input form={form} name="hostname" setForm={setForm} /></Label><Label name="Environment"><select value={form.environment} onChange={e => setForm(current => current ? { ...current, environment: e.target.value } : current)} style={field}><option>development</option><option>staging</option><option>production</option></select></Label></Form>}<Table headers={['Name', 'Hostname', 'Environment', 'Status', 'Actions']} rows={servers.map(server => <tr key={server.id}><td style={td}>{server.name}</td><td style={td}>{server.hostname || '-'}</td><td style={td}>{server.environment}</td><td style={td}>{server.status}</td><td style={td}>{senior(role) && <><button style={neutral} onClick={() => void act(() => api.checkServer(server.id))}>Check</button><button style={bad} onClick={() => window.confirm(`Archive ${server.name}?`) && void act(() => api.archiveServer(server.id))}>Archive</button></>}</td></tr>)}/></>;
+  if (tab === 'runners') content = <><Toolbar label="Runners" show={senior(role)} onClick={() => setForm({ name: '', runner_type: 'customer_managed' })} />{form && <Form onCancel={() => setForm(null)} onSubmit={() => void act(() => api.createRunner(form))}><Label name="Name"><Input form={form} name="name" setForm={setForm} /></Label><Label name="Type"><Input form={form} name="runner_type" setForm={setForm} /></Label></Form>}<Table headers={['Name', 'Status', 'Version', 'Host', 'Last seen', 'Actions']} rows={runners.map(runner => <tr key={runner.id}><td style={td}>{runner.name}</td><td style={td}>{runner.status}</td><td style={td}>{runner.version || '-'}</td><td style={td}>{runner.hostname || '-'}</td><td style={td}>{runner.last_seen_at || '-'}</td><td style={td}>{senior(role) && runner.status !== 'revoked' && <button style={bad} onClick={() => window.confirm(`Revoke ${runner.name}?`) && void act(() => api.revokeRunner(runner.id))}>Revoke</button>}</td></tr>)}/></>;
+  if (tab === 'runbooks') content = <><div><input aria-label="Search runbooks" value={search} onChange={e => setSearch(e.target.value)} onKeyDown={e => e.key === 'Enter' && void load('runbooks')} placeholder="Search tasks and runbooks" style={{ ...field, width: 260, display: 'inline-block' }} /><button style={neutral} onClick={() => void load('runbooks')}>Search</button>{senior(role) && <button style={neutral} onClick={() => setForm({ name: '', title: '', description: '', risk: 'medium', command: '', timeout: 300, environment: 'development' })}>New runbook</button>}</div>{form && <Form onCancel={() => setForm(null)} onSubmit={() => void act(() => api.createRunbook(form))}><Label name="Name"><Input form={form} name="name" setForm={setForm} /></Label><Label name="Title"><Input form={form} name="title" setForm={setForm} /></Label><Label name="Description"><textarea value={form.description} onChange={e => setForm(current => current ? { ...current, description: e.target.value } : current)} style={field} /></Label><Label name="Command"><textarea value={form.command} onChange={e => setForm(current => current ? { ...current, command: e.target.value } : current)} style={field} /></Label><Label name="Risk"><select value={form.risk} onChange={e => setForm(current => current ? { ...current, risk: e.target.value } : current)} style={field}><option>low</option><option>medium</option><option>high</option><option>critical</option></select></Label></Form>}<Table headers={['Name', 'Risk', 'Status', 'Command', 'Actions']} rows={runbooks.map(runbook => <tr key={runbook.id}><td style={td}><strong>{runbook.name}</strong><br />{runbook.title}</td><td style={td}>{runbook.risk_level}</td><td style={td}>{runbook.status}</td><td style={td}><code>{runbook.command_preview}</code></td><td style={td}>{runbook.permitted && <button style={good} onClick={() => void openTask(runbook)}>Run task</button>}{senior(role) && <><button style={neutral} onClick={() => void act(() => api.publishRunbook(runbook.name))}>Publish</button><button style={bad} onClick={() => window.confirm(`Archive ${runbook.name}?`) && void act(() => api.archiveRunbook(runbook.name))}>Archive</button></>}</td></tr>)}/>{task && <Form onCancel={() => setTask(null)} onPreview={async () => { try { const result = await api.runRunbook(task.name, { target: task.target, reason: task.reason, params: params(task), dry_run: true }); setStatus(`Preflight passed. ${result.approval_required ? 'Approval is required.' : 'Ready to run.'} Target count: ${result.target_count || 0}.`); } catch (error: any) { setStatus(error.message || 'Preflight failed'); } }} onSubmit={() => { try { void act(() => api.runRunbook(task.name, { target: task.target, reason: task.reason, params: params(task) }), 'executions'); } catch (error: any) { setStatus(error.message || 'Parameters must be valid'); } }}><h3>Run task: {task.name}</h3><p style={{ color: '#94a3b8' }}>Choose a permitted target and provide only the required inputs.</p><Label name="Target"><Input form={task} name="target" setForm={setTask} /></Label><Label name="Reason"><textarea value={task.reason} onChange={e => setTask(current => current ? { ...current, reason: e.target.value } : current)} style={field} /></Label>{task.definitions?.length ? <TaskFields definitions={task.definitions} values={task.values} onChange={(name, value) => setTask(current => current ? { ...current, values: { ...current.values, [name]: value } } : current)} /> : <Label name="Parameters as JSON"><textarea value={task.params} onChange={e => setTask(current => current ? { ...current, params: e.target.value } : current)} style={field} /></Label>}</Form>}</>;
+  if (tab === 'schedules') content = <><Toolbar label="Schedules" show={senior(role)} onClick={() => setForm({ name: '', runbook_name: '', target: 'server:srv_demo', reason: '', params: '{}', interval_seconds: 3600, next_run_at: '' })} />{form && <Form onCancel={() => setForm(null)} onSubmit={() => void act(() => { const params = JSON.parse(form.params || '{}'); return api.createSchedule({ ...form, params, interval_seconds: Number(form.interval_seconds), next_run_at: form.next_run_at || undefined }); })}><Label name="Name"><Input form={form} name="name" setForm={setForm} /></Label><Label name="Published runbook"><Input form={form} name="runbook_name" setForm={setForm} /></Label><Label name="Target"><Input form={form} name="target" setForm={setForm} /></Label><Label name="Reason"><Input form={form} name="reason" setForm={setForm} /></Label><Label name="Interval in seconds, minimum 60"><Input form={form} name="interval_seconds" setForm={setForm} type="number" /></Label><Label name="Parameters as JSON"><textarea value={form.params} onChange={e => setForm(current => current ? { ...current, params: e.target.value } : current)} style={field} /></Label><Label name="First run, optional RFC3339"><Input form={form} name="next_run_at" setForm={setForm} /></Label></Form>}<Table headers={['Name', 'Runbook', 'Target', 'Next run', 'Last error', 'Actions']} rows={schedules.map(schedule => <tr key={schedule.id}><td style={td}>{schedule.name}</td><td style={td}>{schedule.runbook_name}</td><td style={td}>{schedule.target}</td><td style={td}>{schedule.enabled ? schedule.next_run_at : 'Disabled'}</td><td style={{ ...td, color: schedule.last_error ? '#fca5a5' : '#94a3b8' }}>{schedule.last_error || '-'}</td><td style={td}>{senior(role) && schedule.enabled && <button style={bad} onClick={() => window.confirm(`Disable ${schedule.name}?`) && void act(() => api.disableSchedule(schedule.id), 'schedules')}>Disable</button>}</td></tr>)}/></>;
+  if (tab === 'approvals') content = <Table headers={['ID', 'Requester', 'Reason', 'Status', 'Actions']} rows={approvals.filter(approval => approval.status === 'pending').map(approval => <tr key={approval.id}><td style={td}>{approval.id}</td><td style={td}>{approval.requester_name}</td><td style={td}>{approval.reason}</td><td style={td}>{approval.status}</td><td style={td}>{senior(role) && <><button style={good} onClick={() => window.confirm(`Approve ${approval.id}?`) && void act(() => api.approve(approval.id), 'approvals')}>Approve</button><button style={bad} onClick={() => { const note = window.prompt('Reason for denial'); if (note) void act(() => api.deny(approval.id, note), 'approvals'); }}>Deny</button></>}</td></tr>)} />;
+  if (tab === 'executions') content = <><Table headers={['ID', 'Status', 'Results', 'Command', 'Requested']} rows={executions.map(execution => <tr key={execution.id}><td style={td}><button style={neutral} onClick={async () => { try { setDetail((await api.getExecution(execution.id)).execution); } catch (error: any) { setStatus(error.message); } }}>{execution.id}</button></td><td style={td}>{execution.status}</td><td style={td}>{execution.succeeded_count}/{execution.failed_count}/{execution.target_count}</td><td style={td}><code>{execution.command_preview}</code></td><td style={td}>{execution.requested_at?.slice(0, 19)}</td></tr>)} />{detail && <div style={panel}><button style={neutral} onClick={() => setDetail(null)}>Close</button><h3>{detail.id}</h3>{detail.events?.map(event => <div key={event.id} style={{ color: '#94a3b8', fontSize: 12 }}>{event.occurred_at?.slice(0, 19)} {event.event_type}: {event.from_status || 'new'} -&gt; {event.to_status}</div>)}{detail.targets?.map(target => <div key={target.id} style={{ borderTop: '1px solid #334155', padding: '10px 0' }}><strong>{target.server_id}</strong> {target.status}<pre style={{ whiteSpace: 'pre-wrap' }}>{target.stdout}{target.stderr && `\n${target.stderr}`}</pre></div>)}</div>}</>;
+  if (tab === 'audit') content = <Table headers={['Time', 'Actor', 'Action', 'Target', 'Result']} rows={audit.map(event => <tr key={event.id}><td style={td}>{event.created_at?.slice(0, 19)}</td><td style={td}>{event.actor_id}</td><td style={td}>{event.action}</td><td style={td}>{event.target_type}:{event.target_id}</td><td style={td}>{event.result}</td></tr>)} />;
 
-  useEffect(() => { load(tab); }, [tab]);
-
-  const handleApprove = async (id: string) => {
-    await api.approve(id); load('approvals');
-  };
-  const handleDeny = async (id: string) => {
-    await api.deny(id); load('approvals');
-  };
-
-  return (
-    <div style={{ minHeight: '100vh', background: '#0f172a', color: '#e2e8f0', fontFamily: 'monospace' }}>
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 20px', background: '#1e293b', borderBottom: '1px solid #334155' }}>
-        <h1 style={{ margin: 0, fontSize: 18, color: '#0ea5e9' }}>VPS Tools Console</h1>
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-          <span style={{ color: '#94a3b8', fontSize: 13 }}>User:</span>
-          <UserSwitcher />
-        </div>
-      </header>
-      <nav style={{ display: 'flex', gap: 2, padding: '0 20px', background: '#1e293b' }}>
-        {(['servers','runbooks','approvals','executions','audit'] as const).map(t =>
-          <Tab key={t} label={t.charAt(0).toUpperCase()+t.slice(1)} active={tab===t} onClick={() => setTab(t)} />
-        )}
-      </nav>
-      <main style={{ padding: 20 }}>
-        {status && <p style={{ color: '#f87171' }}>{status}</p>}
-
-        {tab === 'servers' && (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #334155' }}>
-                <th style={th}>Name</th><th style={th}>Hostname</th><th style={th}>Environment</th><th style={th}>Status</th><th style={th}>OS</th>
-              </tr>
-            </thead>
-            <tbody>
-              {servers.map(s => (
-                <tr key={s.id} style={{ borderBottom: '1px solid #1e293b' }}>
-                  <td style={td}><strong>{s.name}</strong></td>
-                  <td style={td}>{s.hostname||'-'}</td>
-                  <td style={td}>{s.environment}</td>
-                  <td style={td}>{s.status}</td>
-                  <td style={td}>{s.os_name||'-'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        {tab === 'runbooks' && (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #334155' }}>
-                <th style={th}>Name</th><th style={th}>Title</th><th style={th}>Risk</th><th style={th}>Status</th><th style={th}>Command</th>
-              </tr>
-            </thead>
-            <tbody>
-              {runbooks.map(r => (
-                <tr key={r.id} style={{ borderBottom: '1px solid #1e293b' }}>
-                  <td style={td}><strong>{r.name}</strong></td>
-                  <td style={td}>{r.title}</td>
-                  <td style={td}>{r.risk_level}</td>
-                  <td style={td}>{r.status}</td>
-                  <td style={td}><code>{r.command_preview}</code></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        {tab === 'approvals' && (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #334155' }}>
-                <th style={th}>ID</th><th style={th}>Requester</th><th style={th}>Reason</th><th style={th}>Status</th><th style={th}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {approvals.filter(a => a.status === 'pending').map(a => (
-                <tr key={a.id} style={{ borderBottom: '1px solid #1e293b' }}>
-                  <td style={td}><code>{a.id}</code></td>
-                  <td style={td}>{a.requester_name}</td>
-                  <td style={td}>{a.reason}</td>
-                  <td style={td}>{a.status}</td>
-                  <td style={td}>
-                    <button onClick={() => handleApprove(a.id)} style={btnGood}>Approve</button>
-                    <button onClick={() => handleDeny(a.id)} style={btnBad}>Deny</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        {tab === 'executions' && (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #334155' }}>
-                <th style={th}>ID</th><th style={th}>Status</th><th style={th}>Results</th><th style={th}>Command</th><th style={th}>Started</th>
-              </tr>
-            </thead>
-            <tbody>
-              {executions.map(e => (
-                <tr key={e.id} style={{ borderBottom: '1px solid #1e293b' }}>
-                  <td style={td}><code>{e.id}</code></td>
-                  <td style={td}>{e.status}</td>
-                  <td style={td}>{e.succeeded_count}/{e.failed_count}/{e.target_count}</td>
-                  <td style={td}><code>{e.command_preview}</code></td>
-                  <td style={td}>{e.requested_at?.slice(0,19)||'-'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        {tab === 'audit' && (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #334155' }}>
-                <th style={th}>Time</th><th style={th}>Actor</th><th style={th}>Action</th><th style={th}>Target</th><th style={th}>Result</th>
-              </tr>
-            </thead>
-            <tbody>
-              {audit.map(e => (
-                <tr key={e.id} style={{ borderBottom: '1px solid #1e293b' }}>
-                  <td style={td}>{e.created_at?.slice(0,19)}</td>
-                  <td style={td}>{e.actor_id}</td>
-                  <td style={td}>{e.action}</td>
-                  <td style={td}>{e.target_type}{e.target_id?':'+e.target_id:''}</td>
-                  <td style={td}>{e.result}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </main>
-    </div>
-  );
+  return <div style={{ minHeight: '100vh', background: '#0f172a', color: '#e2e8f0', fontFamily: 'monospace' }}><header style={header}><h1 style={{ margin: 0, fontSize: 18, color: '#0ea5e9' }}>VPS Tools Console</h1><div>Role: {role || 'unknown'} <UserSwitcher /></div></header><nav aria-label="Primary" style={{ display: 'flex', gap: 2, padding: '0 20px', background: '#1e293b', overflowX: 'auto' }}>{tabs.map(name => <button key={name} aria-current={tab === name ? 'page' : undefined} onClick={() => setTab(name)} style={{ ...neutral, margin: 0, border: 0, borderRadius: 0, background: tab === name ? '#0ea5e9' : '#1e293b', color: tab === name ? '#fff' : '#94a3b8' }}>{name === 'runbooks' ? 'Tasks and runbooks' : name[0].toUpperCase() + name.slice(1)}</button>)}</nav><main style={{ padding: 20 }}><div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}><span role="status" style={{ color: status.includes('failed') ? '#fca5a5' : '#94a3b8', fontSize: 13 }}>{status || 'Ready'}</span><button onClick={() => void load()} style={neutral}>Refresh</button></div>{content}</main></div>;
 }
 
-const th: React.CSSProperties = { textAlign: 'left', padding: '8px 12px', color: '#94a3b8', fontSize: 13, fontWeight: 600 };
-const td: React.CSSProperties = { padding: '8px 12px', fontSize: 14 };
-const btnGood: React.CSSProperties = { padding: '4px 12px', margin: '0 4px', background: '#166534', color: '#86efac', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 };
-const btnBad: React.CSSProperties = { padding: '4px 12px', margin: '0 4px', background: '#7f1d1d', color: '#fca5a5', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 };
+function Toolbar({ label, show, onClick }: { label: string; show: boolean; onClick: () => void }) { return <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}><h2 style={{ fontSize: 16 }}>{label}</h2>{show && <button style={neutral} onClick={onClick}>Add</button>}</div>; }
+const header: React.CSSProperties = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 20px', background: '#1e293b', borderBottom: '1px solid #334155' };

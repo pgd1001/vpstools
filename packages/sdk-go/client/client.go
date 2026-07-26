@@ -6,20 +6,23 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 )
 
 type Client struct {
-	baseURL string
-	userID  string
-	http    *http.Client
+	baseURL     string
+	userID      string
+	runnerToken string
+	http        *http.Client
 }
 
 func New(baseURL string) *Client {
 	return &Client{
-		baseURL: baseURL,
-		userID:  "user_senior",
-		http:    &http.Client{Timeout: 30 * time.Second},
+		baseURL:     baseURL,
+		userID:      "",
+		runnerToken: os.Getenv("VPS_RUNNER_TOKEN"),
+		http:        &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -246,23 +249,23 @@ func (c *Client) CreateExecution(target, command, reason string) (*CreateExecuti
 }
 
 type ExecutionDetail struct {
-	ID              string `json:"id"`
-	ActorUserID     string `json:"actor_user_id"`
-	ActorRole       string `json:"actor_role_at_time"`
-	ExecutionType   string `json:"execution_type"`
-	Status          string `json:"status"`
-	RiskLevel       string `json:"risk_level"`
-	Environment     string `json:"environment"`
-	Reason          string `json:"reason"`
-	CommandPreview  string `json:"command_preview"`
-	CommandHash     string `json:"command_hash"`
-	TimeoutSeconds  int    `json:"timeout_seconds"`
-	RequestedAt     string `json:"requested_at"`
-	StartedAt       string `json:"started_at"`
-	FinishedAt      string `json:"finished_at"`
-	ErrorSummary    string `json:"error_summary"`
-	DelegatedBy     string `json:"delegated_by_user_id"`
-	ApprovalID      string `json:"approval_id"`
+	ID             string `json:"id"`
+	ActorUserID    string `json:"actor_user_id"`
+	ActorRole      string `json:"actor_role_at_time"`
+	ExecutionType  string `json:"execution_type"`
+	Status         string `json:"status"`
+	RiskLevel      string `json:"risk_level"`
+	Environment    string `json:"environment"`
+	Reason         string `json:"reason"`
+	CommandPreview string `json:"command_preview"`
+	CommandHash    string `json:"command_hash"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+	RequestedAt    string `json:"requested_at"`
+	StartedAt      string `json:"started_at"`
+	FinishedAt     string `json:"finished_at"`
+	ErrorSummary   string `json:"error_summary"`
+	DelegatedBy    string `json:"delegated_by_user_id"`
+	ApprovalID     string `json:"approval_id"`
 }
 
 type ExecutionTarget struct {
@@ -292,20 +295,20 @@ func (c *Client) GetExecution(executionID string) (*GetExecutionResponse, error)
 }
 
 type ExecutionListItem struct {
-	ID              string `json:"id"`
-	ActorUserID     string `json:"actor_user_id"`
-	ActorRole       string `json:"actor_role_at_time"`
-	ExecutionType   string `json:"execution_type"`
-	Status          string `json:"status"`
-	CommandPreview  string `json:"command_preview"`
-	TargetCount     int    `json:"target_count"`
-	SucceededCount  int    `json:"succeeded_count"`
-	FailedCount     int    `json:"failed_count"`
-	RequestedAt     string `json:"requested_at"`
-	StartedAt       string `json:"started_at"`
-	FinishedAt      string `json:"finished_at"`
-	DelegatedBy     string `json:"delegated_by_user_id"`
-	ApprovalID      string `json:"approval_id"`
+	ID             string `json:"id"`
+	ActorUserID    string `json:"actor_user_id"`
+	ActorRole      string `json:"actor_role_at_time"`
+	ExecutionType  string `json:"execution_type"`
+	Status         string `json:"status"`
+	CommandPreview string `json:"command_preview"`
+	TargetCount    int    `json:"target_count"`
+	SucceededCount int    `json:"succeeded_count"`
+	FailedCount    int    `json:"failed_count"`
+	RequestedAt    string `json:"requested_at"`
+	StartedAt      string `json:"started_at"`
+	FinishedAt     string `json:"finished_at"`
+	DelegatedBy    string `json:"delegated_by_user_id"`
+	ApprovalID     string `json:"approval_id"`
 }
 
 type ListExecutionsResponse struct {
@@ -391,9 +394,64 @@ func (c *Client) ListAudit(limit string) (*ListAuditResponse, error) {
 	return &resp, nil
 }
 
+type Schedule struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	RunbookName     string `json:"runbook_name"`
+	Target          string `json:"target"`
+	Reason          string `json:"reason"`
+	Params          string `json:"params"`
+	IntervalSeconds int    `json:"interval_seconds"`
+	NextRunAt       string `json:"next_run_at"`
+	Enabled         bool   `json:"enabled"`
+	LastRunAt       string `json:"last_run_at"`
+	LastError       string `json:"last_error"`
+}
+
+type ListSchedulesResponse struct {
+	Schedules []Schedule `json:"schedules"`
+}
+
+type CreateScheduleRequest struct {
+	Name            string            `json:"name"`
+	RunbookName     string            `json:"runbook_name"`
+	Target          string            `json:"target"`
+	Reason          string            `json:"reason"`
+	Params          map[string]string `json:"params"`
+	IntervalSeconds int               `json:"interval_seconds"`
+	NextRunAt       string            `json:"next_run_at,omitempty"`
+}
+
+func (c *Client) ListSchedules() (*ListSchedulesResponse, error) {
+	var resp ListSchedulesResponse
+	if err := c.get("/api/v1/schedules", &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) CreateSchedule(req CreateScheduleRequest) (map[string]string, error) {
+	var resp map[string]string
+	if err := c.post("/api/v1/schedules", req, &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (c *Client) DisableSchedule(scheduleID string) (map[string]string, error) {
+	var resp map[string]string
+	if err := c.delete("/api/v1/schedules/"+url.PathEscape(scheduleID), &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
 func (c *Client) get(path string, out any) error {
 	req, _ := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
 	req.Header.Set("X-VPS-User", c.userID)
+	if c.runnerToken != "" {
+		req.Header.Set("X-VPS-Runner-Token", c.runnerToken)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
@@ -410,6 +468,29 @@ func (c *Client) post(path string, body, out any) error {
 	req, _ := http.NewRequest(http.MethodPost, c.baseURL+path, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-VPS-User", c.userID)
+	if c.runnerToken != "" {
+		req.Header.Set("X-VPS-Runner-Token", c.runnerToken)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return c.parseError(resp)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *Client) delete(path string, out any) error {
+	req, _ := http.NewRequest(http.MethodDelete, c.baseURL+path, nil)
+	req.Header.Set("X-VPS-User", c.userID)
+	if c.runnerToken != "" {
+		req.Header.Set("X-VPS-Runner-Token", c.runnerToken)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
@@ -574,18 +655,27 @@ func (c *Client) ListApprovals(status string) (*ListApprovalsResponse, error) {
 	return &resp, nil
 }
 
-func (c *Client) ApproveApproval(approvalID string) (map[string]string, error) {
+func (c *Client) ApproveApproval(approvalID string, note ...string) (map[string]string, error) {
 	var resp map[string]string
-	if err := c.post("/api/v1/approvals/"+approvalID+"/approve", nil, &resp); err != nil {
+	body := approvalNoteBody(note)
+	if err := c.post("/api/v1/approvals/"+approvalID+"/approve", body, &resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
 }
 
-func (c *Client) DenyApproval(approvalID string) (map[string]string, error) {
+func (c *Client) DenyApproval(approvalID string, note ...string) (map[string]string, error) {
 	var resp map[string]string
-	if err := c.post("/api/v1/approvals/"+approvalID+"/deny", nil, &resp); err != nil {
+	body := approvalNoteBody(note)
+	if err := c.post("/api/v1/approvals/"+approvalID+"/deny", body, &resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
+}
+
+func approvalNoteBody(note []string) any {
+	if len(note) == 0 || note[0] == "" {
+		return nil
+	}
+	return map[string]string{"note": note[0]}
 }

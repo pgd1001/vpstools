@@ -1,0 +1,4 @@
+interface:
+  display_name: "VPS Tools Operations"
+  short_description: "Safely inspect and operate VPS Tools through MCP"
+  default_prompt: "Use VPS Tools to inspect the current identity and health, discover the correct runbook, preflight the requested operation, and ask for confirmation before any state-changing action."

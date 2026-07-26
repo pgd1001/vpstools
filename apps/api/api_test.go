@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pgd1001/svrtools/packages/redact"
 	_ "modernc.org/sqlite"
@@ -21,6 +22,8 @@ func testAPI(t *testing.T) (*sql.DB, *http.ServeMux, func()) {
 	if err != nil {
 		t.Fatalf("db open: %v", err)
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	ctx := context.Background()
 	if err := migrate(ctx, db); err != nil {
 		db.Close()
@@ -29,6 +32,10 @@ func testAPI(t *testing.T) (*sql.DB, *http.ServeMux, func()) {
 	if err := seed(ctx, db); err != nil {
 		db.Close()
 		t.Fatalf("seed: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO runner_credentials (id, organisation_id, token_hash, expires_at) VALUES ('rct_test','org_demo',?,datetime('now','+1 hour'))`, hashToken("test-runner-token")); err != nil {
+		db.Close()
+		t.Fatalf("runner credential: %v", err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +152,21 @@ func testAPI(t *testing.T) (*sql.DB, *http.ServeMux, func()) {
 			}
 			return
 		}
+		if r.Method == http.MethodGet {
+			handleGetApproval(w, r, path)
+			return
+		}
 		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+	}))
+	mux.HandleFunc("/api/v1/schedules", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			handleListSchedules(w, r)
+			return
+		}
+		handleCreateSchedule(w, r)
+	}))
+	mux.HandleFunc("/api/v1/schedules/", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
+		handleDisableSchedule(w, r, strings.TrimPrefix(r.URL.Path, "/api/v1/schedules/"))
 	}))
 	return db, mux, func() { db.Close() }
 }
@@ -161,6 +182,9 @@ func doRequest(t *testing.T, mux *http.ServeMux, method, path, body, user string
 	}
 	if user != "" {
 		req.Header.Set("X-VPS-User", user)
+	}
+	if strings.HasPrefix(path, "/api/v1/jobs/") {
+		req.Header.Set("X-VPS-Runner-Token", "test-runner-token")
 	}
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
@@ -303,7 +327,8 @@ func TestRunnerScopeClaimByOrg(t *testing.T) {
 	doRequest(t, mux, http.MethodPost, "/api/v1/executions",
 		`{"target":"server:srv_demo","command":"echo test"}`, "user_senior")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/next?organisation_id=org_demo", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/next?runner_id=rnr_local", nil)
+	req.Header.Set("X-VPS-Runner-Token", "test-runner-token")
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != 200 {
@@ -356,7 +381,7 @@ func TestApprovalPipelineCreatesExecution(t *testing.T) {
 		t.Fatalf("runbook publish failed: %s", w.Body.String())
 	}
 
-	// Junior runs it on production — should require approval
+	// Junior runs it on production - should require approval
 	w = doRequest(t, mux, http.MethodPost, "/api/v1/runbooks/restart-prod/run",
 		`{"target":"server:prod-srv","reason":"deployment"}`, "user_junior")
 	if w.Code != 202 {
@@ -369,7 +394,7 @@ func TestApprovalPipelineCreatesExecution(t *testing.T) {
 		t.Fatal("approval_id missing in response")
 	}
 
-	// Senior approves — should auto-create execution
+	// Senior approves - should auto-create execution
 	w = doRequest(t, mux, http.MethodPost, "/api/v1/approvals/"+approvalID+"/approve", "", "user_senior")
 	if w.Code != 200 {
 		t.Fatalf("approve failed: %s", w.Body.String())
@@ -413,7 +438,7 @@ func TestRunbookScopingDeniesJunior(t *testing.T) {
 		t.Fatalf("publish failed: %s", w.Body.String())
 	}
 
-	// Junior tries to run it — should be denied
+	// Junior tries to run it - should be denied
 	w = doRequest(t, mux, http.MethodPost, "/api/v1/runbooks/senior-only/run",
 		`{"target":"server:srv_demo"}`, "user_junior")
 	if w.Code != 403 {
@@ -431,11 +456,14 @@ func TestStdoutStderrStoredOnSubmit(t *testing.T) {
 	if w.Code != 201 {
 		t.Fatalf("exec create failed: %s", w.Body.String())
 	}
-	var createResp struct{ ExecutionID string `json:"execution_id"` }
+	var createResp struct {
+		ExecutionID string `json:"execution_id"`
+	}
 	json.NewDecoder(w.Body).Decode(&createResp)
 
 	// Runner claims job
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/next?organisation_id=org_demo", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/next?runner_id=rnr_local", nil)
+	req.Header.Set("X-VPS-Runner-Token", "test-runner-token")
 	w2 := httptest.NewRecorder()
 	mux.ServeHTTP(w2, req)
 	if w2.Code != 200 {
@@ -443,8 +471,13 @@ func TestStdoutStderrStoredOnSubmit(t *testing.T) {
 	}
 
 	// Runner submits result with stdout/stderr
+	var claimResp struct {
+		TargetID string `json:"target_id"`
+		LeaseID  string `json:"lease_id"`
+	}
+	json.NewDecoder(w2.Body).Decode(&claimResp)
 	w3 := doRequest(t, mux, http.MethodPost, "/api/v1/jobs/result",
-		fmt.Sprintf(`{"execution_id":"%s","exit_code":0,"stdout":"hello output\n","stderr":"","duration_ms":100}`, createResp.ExecutionID), "")
+		fmt.Sprintf(`{"runner_id":"rnr_local","target_id":"%s","execution_id":"%s","lease_id":"%s","exit_code":0,"stdout":"hello output\n","stderr":"","duration_ms":100}`, claimResp.TargetID, createResp.ExecutionID, claimResp.LeaseID), "")
 	if w3.Code != 200 {
 		t.Fatalf("submit result failed: %s", w3.Body.String())
 	}
@@ -464,5 +497,182 @@ func TestStdoutStderrStoredOnSubmit(t *testing.T) {
 	}
 	if !strings.Contains(execResp.Targets[0].Stdout, "hello output") {
 		t.Errorf("stdout not stored: got %q", execResp.Targets[0].Stdout)
+	}
+}
+
+func TestRunnerJobsRequireCredential(t *testing.T) {
+	_, mux, cleanup := testAPI(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/next?runner_id=rnr_local", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated runner claim to return 401, got %d", w.Code)
+	}
+}
+
+func TestRunbookRejectsInvalidParametersBeforeQueueing(t *testing.T) {
+	_, mux, cleanup := testAPI(t)
+	defer cleanup()
+
+	w := doRequest(t, mux, http.MethodPost, "/api/v1/runbooks",
+		`{"name":"service-check","title":"Service check","command":"systemctl is-active ${service}","risk":"low","environment":"development"}`, "user_senior")
+	// The compact create form does not define parameters, so the placeholder is
+	// rejected when the runbook is run rather than silently expanded by a shell.
+	if w.Code != http.StatusCreated {
+		t.Fatalf("runbook create failed: %s", w.Body.String())
+	}
+	doRequest(t, mux, http.MethodPost, "/api/v1/runbooks/service-check/publish", "", "user_senior")
+	w = doRequest(t, mux, http.MethodPost, "/api/v1/runbooks/service-check/run", `{"target":"server:srv_demo","params":{"service":"nginx; touch /tmp/pwned"}}`, "user_senior")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid runbook parameters to return 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRunbookRejectsMixedEnvironmentTargets(t *testing.T) {
+	_, mux, cleanup := testAPI(t)
+	defer cleanup()
+
+	doRequest(t, mux, http.MethodPost, "/api/v1/servers", `{"name":"staging-srv","hostname":"staging.local","environment":"staging","tags":[{"key":"role","value":"app"}]}`, "user_senior")
+	w := doRequest(t, mux, http.MethodPost, "/api/v1/runbooks", `{"name":"mixed-check","title":"Mixed check","command":"uptime","risk":"low","environment":"*","allowed_roles":"[\"senior_engineer\",\"admin\",\"owner\"]"}`, "user_senior")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("runbook create failed: %s", w.Body.String())
+	}
+	doRequest(t, mux, http.MethodPost, "/api/v1/runbooks/mixed-check/publish", "", "user_senior")
+	w = doRequest(t, mux, http.MethodPost, "/api/v1/runbooks/mixed-check/run", `{"target":"tag:role=app"}`, "user_senior")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected mixed environments to return 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestApprovalStoresTargetSnapshot(t *testing.T) {
+	_, mux, cleanup := testAPI(t)
+	defer cleanup()
+
+	doRequest(t, mux, http.MethodPost, "/api/v1/servers", `{"name":"prod-srv","hostname":"prod.local","environment":"production"}`, "user_senior")
+	w := doRequest(t, mux, http.MethodPost, "/api/v1/runbooks", `{"name":"restart-service","title":"Restart service","command":"systemctl restart app","risk":"high","environment":"production","allowed_roles":"[\"junior_engineer\",\"senior_engineer\",\"admin\",\"owner\"]"}`, "user_senior")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("runbook create failed: %s", w.Body.String())
+	}
+	doRequest(t, mux, http.MethodPost, "/api/v1/runbooks/restart-service/publish", "", "user_senior")
+	w = doRequest(t, mux, http.MethodPost, "/api/v1/runbooks/restart-service/run", `{"target":"server:prod-srv","reason":"approved maintenance"}`, "user_junior")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected approval request, got %d: %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.NewDecoder(w.Body).Decode(&response)
+	w = doRequest(t, mux, http.MethodGet, "/api/v1/approvals/"+response.ApprovalID, "", "user_senior")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "prod-srv") {
+		t.Fatalf("approval target snapshot missing: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRunbookPreflightDoesNotQueueExecution(t *testing.T) {
+	db, mux, cleanup := testAPI(t)
+	defer cleanup()
+
+	w := doRequest(t, mux, http.MethodPost, "/api/v1/runbooks", `{"name":"preflight-check","title":"Preflight check","command":"uptime","risk":"low","environment":"development"}`, "user_senior")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("runbook create failed: %s", w.Body.String())
+	}
+	doRequest(t, mux, http.MethodPost, "/api/v1/runbooks/preflight-check/publish", "", "user_senior")
+	w = doRequest(t, mux, http.MethodPost, "/api/v1/runbooks/preflight-check/run", `{"target":"server:srv_demo","dry_run":true}`, "user_senior")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"preflight"`) {
+		t.Fatalf("expected preflight response, got %d: %s", w.Code, w.Body.String())
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM executions WHERE organisation_id = 'org_demo'").Scan(&count); err != nil {
+		t.Fatalf("count executions: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("preflight queued %d executions", count)
+	}
+}
+
+func TestEmbeddedSchedulerQueuesSafeRunbook(t *testing.T) {
+	db, mux, cleanup := testAPI(t)
+	defer cleanup()
+
+	past := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	w := doRequest(t, mux, http.MethodPost, "/api/v1/schedules", fmt.Sprintf(`{"name":"uptime-every-minute","runbook_name":"check-uptime","target":"server:srv_demo","reason":"routine health check","interval_seconds":60,"next_run_at":%q}`, past), "user_senior")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("schedule create failed: %d %s", w.Code, w.Body.String())
+	}
+	if err := runDueSchedulesOnce(context.Background(), db); err != nil {
+		t.Fatalf("scheduler cycle failed: %v", err)
+	}
+	var executionID, actorRole, commandPreview, command string
+	if err := db.QueryRow("SELECT id, actor_role_at_time, command_preview, command FROM executions WHERE execution_type = 'runbook' ORDER BY requested_at DESC LIMIT 1").Scan(&executionID, &actorRole, &commandPreview, &command); err != nil {
+		t.Fatalf("scheduled execution missing: %v", err)
+	}
+	if executionID == "" || actorRole != "automation" || commandPreview != "uptime" || command != "uptime" {
+		t.Fatalf("unexpected scheduled execution: id=%s role=%s preview=%s command=%s", executionID, actorRole, commandPreview, command)
+	}
+	var actorType string
+	if err := db.QueryRow("SELECT actor_type FROM audit_events WHERE action = 'automation.execution.queued' ORDER BY occurred_at DESC LIMIT 1").Scan(&actorType); err != nil {
+		t.Fatalf("automation audit event missing: %v", err)
+	}
+	if actorType != "automation" {
+		t.Fatalf("expected automation audit actor, got %q", actorType)
+	}
+}
+
+func TestScheduleCRUDRequiresSeniorAndCanBeDisabled(t *testing.T) {
+	db, mux, cleanup := testAPI(t)
+	defer cleanup()
+
+	past := time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
+	w := doRequest(t, mux, http.MethodPost, "/api/v1/schedules", fmt.Sprintf(`{"name":"junior-schedule","runbook_name":"check-uptime","target":"server:srv_demo","reason":"routine","interval_seconds":60,"next_run_at":%q}`, past), "user_junior")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected junior schedule creation to be denied, got %d: %s", w.Code, w.Body.String())
+	}
+	w = doRequest(t, mux, http.MethodPost, "/api/v1/schedules", fmt.Sprintf(`{"name":"disable-me","runbook_name":"check-uptime","target":"server:srv_demo","reason":"routine","interval_seconds":60,"next_run_at":%q}`, past), "user_senior")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("schedule creation failed: %d %s", w.Code, w.Body.String())
+	}
+	w = doRequest(t, mux, http.MethodGet, "/api/v1/schedules", "", "user_senior")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "disable-me") {
+		t.Fatalf("schedule list failed: %d %s", w.Code, w.Body.String())
+	}
+	var scheduleID string
+	if err := db.QueryRow("SELECT id FROM automation_schedules WHERE name = 'disable-me'").Scan(&scheduleID); err != nil {
+		t.Fatalf("schedule lookup failed: %v", err)
+	}
+	w = doRequest(t, mux, http.MethodDelete, "/api/v1/schedules/"+scheduleID, "", "user_senior")
+	if w.Code != http.StatusOK {
+		t.Fatalf("schedule disable failed: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSchedulerDoesNotAutoExecuteHighRiskRunbook(t *testing.T) {
+	db, mux, cleanup := testAPI(t)
+	defer cleanup()
+
+	server := doRequest(t, mux, http.MethodPost, "/api/v1/servers", `{"name":"prod-srv","hostname":"prod.local","environment":"production"}`, "user_senior")
+	if server.Code != http.StatusCreated {
+		t.Fatalf("server create failed: %s", server.Body.String())
+	}
+	w := doRequest(t, mux, http.MethodPost, "/api/v1/runbooks", `{"name":"dangerous-check","title":"Dangerous check","command":"systemctl restart app","risk":"high","environment":"production"}`, "user_senior")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("runbook create failed: %s", w.Body.String())
+	}
+	doRequest(t, mux, http.MethodPost, "/api/v1/runbooks/dangerous-check/publish", "", "user_senior")
+	past := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	w = doRequest(t, mux, http.MethodPost, "/api/v1/schedules", fmt.Sprintf(`{"name":"dangerous-schedule","runbook_name":"dangerous-check","target":"server:prod-srv","reason":"maintenance","interval_seconds":60,"next_run_at":%q}`, past), "user_senior")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("schedule create failed: %s", w.Body.String())
+	}
+	if err := runDueSchedulesOnce(context.Background(), db); err != nil {
+		t.Fatalf("scheduler cycle failed: %v", err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM executions WHERE execution_type = 'runbook' AND command_preview LIKE 'systemctl restart%'").Scan(&count); err != nil {
+		t.Fatalf("count scheduled high-risk executions: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("high-risk schedule queued %d executions", count)
 	}
 }

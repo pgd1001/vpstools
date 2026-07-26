@@ -50,8 +50,9 @@ var approvalApproveCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		output, _ := cmd.Flags().GetString("output")
+		note, _ := cmd.Flags().GetString("note")
 
-		resp, err := apiClient.ApproveApproval(args[0])
+		resp, err := apiClient.ApproveApproval(args[0], note)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -72,8 +73,13 @@ var approvalDenyCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		output, _ := cmd.Flags().GetString("output")
+		note, _ := cmd.Flags().GetString("note")
 
-		resp, err := apiClient.DenyApproval(args[0])
+		if note == "" {
+			fmt.Fprintln(os.Stderr, "error: --note is required when denying an approval")
+			os.Exit(1)
+		}
+		resp, err := apiClient.DenyApproval(args[0], note)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -93,8 +99,10 @@ func init() {
 	approvalListCmd.Flags().String("output", "table", "Output format (table, json)")
 
 	approvalApproveCmd.Flags().String("output", "table", "Output format (table, json)")
+	approvalApproveCmd.Flags().String("note", "", "Optional approval note")
 
 	approvalDenyCmd.Flags().String("output", "table", "Output format (table, json)")
+	approvalDenyCmd.Flags().String("note", "", "Required reason for denial")
 
 	approvalCmd.AddCommand(approvalListCmd)
 	approvalCmd.AddCommand(approvalApproveCmd)
