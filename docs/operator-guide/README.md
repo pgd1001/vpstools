@@ -1,4 +1,6 @@
-# VPS Tools — Operator Guide
+# VPS Tools: Operator Guide
+
+Start with the [documentation hub](../README.md) for the full product guide. This page is the practical operator reference for local installation, daily workflows, CLI usage, TUI navigation, and configuration.
 
 ## Product improvement tracking
 
@@ -110,7 +112,7 @@ $env:VPS_USER = "user_junior"
 4. Run (requires approval):
 ```bash
 .\bin\vps.exe runbook run restart-nginx --target server:web-prod --reason "deploy v2.3"
-# Output: Approval required — ID: apr_xxxxxxxxxx
+# Output: Approval required, ID: apr_xxxxxxxxxx
 ```
 
 5. Approve:
@@ -166,9 +168,9 @@ Full details in `docs/runbooks/README.md`.
 
 ## Target Formats
 
-- `server:<id|name>` — single server
-- `tag:<key>=<value>` — all servers matching tag
-- `<name>` — direct server name match
+- `server:<id|name>`: single server
+- `tag:<key>=<value>`: all servers matching tag
+- `<name>`: direct server name match
 
 ## Configuration
 

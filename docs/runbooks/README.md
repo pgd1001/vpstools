@@ -37,7 +37,7 @@ Read-only system health and inventory. Safe to run on any server, any role.
 
 ## Provisioning (7)
 
-Server setup and baseline configuration. High/critical risk — requires senior approval for production.
+Server setup and baseline configuration. High/critical risk, requires senior approval for production.
 
 | Name | Risk | Tags | Description |
 |---|---|---|---|
@@ -53,7 +53,7 @@ Server setup and baseline configuration. High/critical risk — requires senior 
 
 ## AI Stack (6)
 
-Self-hosted AI infrastructure. Medium-to-high risk — many pull external images and open ports.
+Self-hosted AI infrastructure. Medium-to-high risk, many pull external images and open ports.
 
 | Name | Risk | Tags | Description |
 |---|---|---|---|

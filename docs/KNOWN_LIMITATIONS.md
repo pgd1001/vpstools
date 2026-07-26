@@ -1,4 +1,4 @@
-# VPS Tools — Known Limitations (MVP)
+# VPS Tools: Known Limitations (MVP)
 
 ## Authentication & Identity
 
@@ -31,6 +31,7 @@
 - **Approval expiry is 1 hour hardcoded.** Configurable expiry deferred.
 - **No delegation chains.** Approvals are single-level. No multi-level approval workflows.
 - **AI provider boundary only.** The code has a vendor-neutral provider contract and redaction wrapper, but there is no user-facing AI assistant, configured model adapter, evidence retrieval service, or local-model administration workflow yet.
+- **MCP is a local stdio integration.** The MCP server exposes the current API capabilities and is intended to run on a trusted host. It does not yet provide hosted MCP transport, streaming execution output, dynamic resources, or a packaged installer. Writes are disabled by default and remain limited to API-backed actions.
 
 ## Infrastructure
 

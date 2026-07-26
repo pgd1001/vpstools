@@ -1,9 +1,11 @@
 # Developer Guide
 
+The [documentation hub](../README.md) links to the user, operator, API, automation, AI, security, and migration guides. This page focuses on the repository, local development, interfaces, and extension points.
+
 ## Prerequisites
 
 - **Go 1.24+**
-- **Docker** (optional — only needed for PostgreSQL and SSH test target)
+- **Docker** (optional, only needed for PostgreSQL and SSH test target)
 
 ## Quick start (self-contained, no Docker)
 
@@ -149,6 +151,14 @@ The configuration loader recognises PostgreSQL, S3-compatible storage, JetStream
 Schedules use a fixed interval and the same runbook policy checks as manual execution. Each queued scheduled execution records `user_automation` as its actor and includes a schedule reference in the audit metadata. High and critical risk schedules are rejected from unattended execution.
 
 The `packages/ai` package defines a provider interface and a redacting wrapper for prompts, evidence, and responses. It is a foundation for local and managed model adapters. There is not yet a user-facing AI endpoint or evidence retrieval service.
+
+### MCP and agent integration
+
+The `mcp/` package provides a local stdio MCP server for compatible AI clients. It exposes identity, health, inventory, runbook discovery, preflight, approvals, execution monitoring, schedules, and audit search.
+
+Read tools are enabled by default. State-changing tools require both `VPS_MCP_ALLOW_WRITES=true` and a tool-level `confirm=true` supplied only after explicit user confirmation. The MCP server does not expose arbitrary shell execution.
+
+See [the MCP setup guide](../../mcp/README.md) and [the VPS Tools agent skill](../../skills/vpstools-operations/SKILL.md) for configuration and operating rules.
 # Self-contained deployment
 
 The default API deployment requires no PostgreSQL, object storage, or message broker.

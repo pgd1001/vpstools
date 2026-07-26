@@ -60,6 +60,7 @@ The first implementation slice is complete and verified. These items are now imp
 - Interval-based schedules are available through the API and embedded scheduler in the self-contained tier. Scheduled executions use an explicit automation identity, target snapshots, audit events, and the normal runbook policy checks.
 - High and critical risk runbooks are blocked from unattended scheduling until an approval workflow is connected.
 - A vendor-neutral AI provider interface now carries redacted prompts, evidence, responses, and usage metadata.
+- A local stdio MCP server exposes 17 read and controlled-write VPS Tools operations. Writes are disabled by default, require an explicit confirmation field, and never expose arbitrary shell execution.
 - Full Go tests, `go vet`, and the web production build pass.
 
 The remaining items in this document are still planned unless explicitly marked here or in a future release note. The schedule and AI changes are foundations, not complete end-user features.
@@ -329,6 +330,8 @@ Failure states should include `Failed`, `Partially succeeded`, `Cancelled`, `Exp
 - Prompt injection and untrusted output handling are tested explicitly.
 
 **Implementation note:** The provider and redaction boundary is now present in `packages/ai`. Model configuration, evidence retrieval, AI endpoints, local-model adapters, and human-reviewed draft workflows remain to be built.
+
+The MCP server and `skills/vpstools-operations` agent skill provide the first usable AI-tool integration. They operate through the existing API policy and audit path rather than creating a second execution authority.
 
 **Acceptance criteria**
 
