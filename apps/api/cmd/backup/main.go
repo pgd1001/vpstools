@@ -366,7 +366,7 @@ func readManifest(dir string) (manifest, error) {
 	return m, nil
 }
 func validateRelativePath(p string) error {
-	normalized := strings.ReplaceAll(p, "\\\\", "/")
+	normalized := strings.ReplaceAll(p, "\\", "/")
 	clean := path.Clean(normalized)
 	if p == "" || strings.HasPrefix(normalized, "/") || filepath.IsAbs(filepath.FromSlash(normalized)) || clean != normalized || clean == ".." || strings.HasPrefix(clean, "../") || (len(clean) >= 2 && clean[1] == ':') {
 		return fmt.Errorf("unsafe manifest path %q", p)
