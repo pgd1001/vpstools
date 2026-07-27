@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -220,6 +221,50 @@ func (s *S3Store) Delete(id string) error {
 		return fmt.Errorf("delete artifact %q: %w", id, err)
 	}
 	return nil
+}
+
+// SignedGetURL returns a short-lived SigV4 URL for a read-only artifact
+// download. It is intended for API responses that need to hand a report to an
+// authenticated operator without proxying the bytes through the API process.
+func (s *S3Store) SignedGetURL(id string, expiry time.Duration) (string, error) {
+	if err := validateArtifactID(id); err != nil {
+		return "", err
+	}
+	if s.accessKey == "" || s.secretKey == "" {
+		return "", errors.New("S3 access key and secret key are required for signed URLs")
+	}
+	if expiry <= 0 || expiry > 7*24*time.Hour {
+		return "", errors.New("signed URL expiry must be between 1 second and 7 days")
+	}
+	now := time.Now().UTC()
+	date := now.Format("20060102")
+	amzDate := now.Format("20060102T150405Z")
+	scope := date + "/" + s.region + "/s3/aws4_request"
+	query := url.Values{}
+	query.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+	query.Set("X-Amz-Credential", s.accessKey+"/"+scope)
+	query.Set("X-Amz-Date", amzDate)
+	query.Set("X-Amz-Expires", strconv.FormatInt(int64(expiry/time.Second), 10))
+	query.Set("X-Amz-SignedHeaders", "host")
+	if s.sessionToken != "" {
+		query.Set("X-Amz-Security-Token", s.sessionToken)
+	}
+	req, err := http.NewRequest(http.MethodGet, s.objectPath(id), nil)
+	if err != nil {
+		return "", err
+	}
+	req.URL.RawQuery = query.Encode()
+	canonicalHeaders := "host:" + req.URL.Host + "\n"
+	canonicalRequest := strings.Join([]string{http.MethodGet, req.URL.EscapedPath(), req.URL.RawQuery, canonicalHeaders, "host", "UNSIGNED-PAYLOAD"}, "\n")
+	canonicalHash := sha256.Sum256([]byte(canonicalRequest))
+	stringToSign := strings.Join([]string{"AWS4-HMAC-SHA256", amzDate, scope, hex.EncodeToString(canonicalHash[:])}, "\n")
+	kDate := hmacSum([]byte("AWS4"+s.secretKey), []byte(date))
+	kRegion := hmacSum(kDate, []byte(s.region))
+	kService := hmacSum(kRegion, []byte("s3"))
+	kSigning := hmacSum(kService, []byte("aws4_request"))
+	query.Set("X-Amz-Signature", hex.EncodeToString(hmacSum(kSigning, []byte(stringToSign))))
+	req.URL.RawQuery = query.Encode()
+	return req.URL.String(), nil
 }
 
 // Check validates configuration and verifies that the configured bucket is reachable.

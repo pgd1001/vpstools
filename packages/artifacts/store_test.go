@@ -7,12 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestS3StoreRoundTripEncryptionAndCRUD(t *testing.T) {
@@ -219,6 +221,40 @@ func TestS3StoreSignsAuthenticatedRequests(t *testing.T) {
 	}
 	if _, err := store.Put("signed", "", []byte("data")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestS3StoreCreatesBoundedSignedGetURL(t *testing.T) {
+	store, err := NewS3Store(S3Config{Endpoint: "https://s3.example.test", Bucket: "bucket", AccessKeyID: "access", SecretAccessKey: "secret", Region: "eu-west-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.SignedGetURL("report-1", 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	for _, key := range []string{"X-Amz-Algorithm", "X-Amz-Credential", "X-Amz-Date", "X-Amz-Expires", "X-Amz-SignedHeaders", "X-Amz-Signature"} {
+		if query.Get(key) == "" {
+			t.Fatalf("signed URL missing %s: %s", key, value)
+		}
+	}
+	if query.Get("X-Amz-Expires") != "900" || query.Get("X-Amz-SignedHeaders") != "host" {
+		t.Fatalf("unexpected signed URL query: %s", value)
+	}
+	if _, err := store.SignedGetURL("report-1", 8*24*time.Hour); err == nil {
+		t.Fatal("expiry beyond seven days was accepted")
+	}
+	unsigned, err := NewS3Store(S3Config{Endpoint: "https://s3.example.test", Bucket: "bucket"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unsigned.SignedGetURL("report-1", time.Minute); err == nil {
+		t.Fatal("unsigned store created a signed URL")
 	}
 }
 

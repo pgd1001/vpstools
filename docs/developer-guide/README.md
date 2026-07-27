@@ -132,7 +132,7 @@ spec:
 - `API_PORT` env var (defaults to `8080`)
 - `DATABASE_DRIVER` and `DATABASE_URL` select the metadata database. The default is SQLite at `./svrtools.db`.
 - `ARTIFACT_STORE` and `ARTIFACTS_DIR` select encrypted output storage. The default is local storage at `./data/artifacts`.
-- When `ARTIFACT_STORE=s3`, set `S3_ENDPOINT`, `S3_BUCKET`, and, when required by the service, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`. `S3_REGION`, `S3_PREFIX`, `S3_ENCRYPTION_KEY`, `S3_SERVER_SIDE_ENCRYPTION`, `S3_SSE_KMS_KEY_ID`, `S3_TIMEOUT`, `S3_MAX_RETRIES`, and `S3_RETRY_BACKOFF` are optional tuning and protection settings.
+- When `ARTIFACT_STORE=s3`, set `S3_ENDPOINT`, `S3_BUCKET`, and, when required by the service, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`. `S3_REGION`, `S3_PREFIX`, `S3_ENCRYPTION_KEY`, `S3_SERVER_SIDE_ENCRYPTION`, `S3_SSE_KMS_KEY_ID`, `S3_TIMEOUT`, `S3_MAX_RETRIES`, and `S3_RETRY_BACKOFF` are optional tuning and protection settings. The artifact store can issue seven-day-or-shorter SigV4 read URLs when access keys are configured.
 - `JOB_DISPATCH`, `SCHEDULER`, and `EVENT_BUS` select queue, scheduler, and event settings. Defaults are `database`, `embedded`, and `disabled`.
 - `ARTIFACT_ENCRYPTION_KEY` can provide a base64-encoded 32-byte key. If omitted, the local store creates `ARTIFACTS_DIR/.key`.
 

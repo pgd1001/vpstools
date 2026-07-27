@@ -1,6 +1,6 @@
 # Moving from self-contained to extended deployment
 
-The self-contained tier is the default because it is easy to install, back up, and understand. The application reserves a path for larger teams to move to PostgreSQL, S3-compatible storage, and JetStream without changing the CLI, web console, runbooks, or AI tools. S3 artefact storage and a database-authoritative JetStream notification bridge are explicit runtime options. PostgreSQL metadata, external scheduling, NATS event publishing, and the full independent JetStream queue model are not shipped as supported runtime features in the current release.
+The self-contained tier is the default because it is easy to install, back up, and understand. The application reserves a path for larger teams to move to PostgreSQL, S3-compatible storage, and JetStream without changing the CLI, web console, runbooks, or AI tools. PostgreSQL metadata, S3 artefact storage, signed object access, and a database-authoritative JetStream notification bridge are explicit runtime options. Row-level security, external scheduling, NATS event publishing, and the full independent JetStream queue model are not shipped as supported runtime features in the current release.
 
 ## Target configuration
 
