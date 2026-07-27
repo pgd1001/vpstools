@@ -38,6 +38,8 @@ export type ExecutionDetail = Execution & { reason?: string; targets: { id:strin
 export type RunbookRunResponse = { status:string; approval_required?:boolean; target_count?:number; execution_id?:string; approval_id?:string; message?:string };
 export type Schedule = { id:string; name:string; runbook_name:string; target:string; reason:string; params:string; interval_seconds:number; next_run_at:string; enabled:boolean; last_run_at:string; last_error:string };
 export type AutomationStatus = { paused:boolean; paused_at?:string; paused_by?:string; reason?:string };
+export type Health = { status:string; database:string; version?:string; deployment_tier?:string; database_driver?:string; artifact_store?:string; job_dispatch?:string };
+export type Readiness = { status:string; database:string; artifacts:string };
 
 let user = '';
 
@@ -89,6 +91,8 @@ async function errorMessage(res: Response): Promise<string> {
 }
 
 export const api = {
+  health: () => get<Health>('/api/v1/health'),
+  ready: () => get<Readiness>('/api/v1/ready'),
   whoami: () => get<{user_id:string;email:string;role:string}>('/api/v1/whoami'),
   authMe: () => get<{authenticated:boolean;email?:string;name?:string}>('/api/auth/me'),
   servers: () => get<{servers:Server[]}>('/api/v1/servers'),

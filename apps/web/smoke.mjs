@@ -59,7 +59,9 @@ await page.route('**/api/proxy/**', async route => {
   const role = user === 'user_junior' ? 'junior' : user === 'user_auditor' ? 'auditor' : 'senior_engineer';
   let body;
 
-  if (path === '/api/v1/whoami') body = { user_id: user, email: `${user}@example.test`, role };
+  if (path === '/api/v1/health') body = { status: 'ok', database: 'ok', deployment_tier: 'self-contained' };
+  else if (path === '/api/v1/ready') body = { status: 'ready', database: 'ok', artifacts: 'ok' };
+  else if (path === '/api/v1/whoami') body = { user_id: user, email: `${user}@example.test`, role };
   else if (path === '/api/v1/runbooks/check-nginx') body = { runbook: { ...runbook, definition_json: JSON.stringify({ spec: { parameters: [] } }) } };
   else if (path === '/api/v1/runbooks/check-nginx/run' && route.request().method() === 'POST') body = { status: 'preflight', approval_required: false, target_count: 1 };
   else if (path === '/api/v1/runbooks') body = { runbooks: [runbook] };
@@ -86,6 +88,7 @@ await page.route('**/api/proxy/**', async route => {
 try {
   await page.goto(baseURL, { waitUntil: 'domcontentloaded' });
   await page.getByRole('heading', { name: 'VPS Tools Console' }).waitFor();
+  await page.getByRole('status', { name: 'Control plane status' }).filter({ hasText: 'Control plane ready' }).waitFor();
   await page.waitForTimeout(1000);
   assert.equal(await page.getByRole('button', { name: 'Tasks and runbooks' }).getAttribute('aria-current'), 'page');
 
