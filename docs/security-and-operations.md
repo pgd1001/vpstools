@@ -53,7 +53,7 @@ go run ./apps/api/cmd/backup -mode verify -input .\backups\nightly
 go run ./apps/api/cmd/backup -mode restore -input .\backups\nightly -db .\restore\svrtools.db -artifacts .\restore\artifacts
 ```
 
-The systemd deployment can replicate backups to a separately mounted destination under `/var/lib/vps-tools`. Signed manifests, object-store replication, and an off-host recovery drill remain release extensions that must be completed before broad production rollout.
+The systemd deployment can replicate backups to a separately mounted destination under `/var/lib/vps-tools`. Extended deployments can retain and verify a PostgreSQL dump together with the S3 artifact manifest using `extended-backup.sh` and `extended-restore.sh`. S3 versioning, retention, key custody, and the off-host recovery drill still need to be configured and completed before broad production rollout.
 
 Keep backup retention separate from artefact retention. Protect the encryption key independently from the backup files. A database backup without referenced artefacts is incomplete, and artefacts without their metadata are difficult to interpret. The systemd backup job writes an atomic status record after verification, and monitoring should run `scripts/check-backup-freshness.sh` against it.
 

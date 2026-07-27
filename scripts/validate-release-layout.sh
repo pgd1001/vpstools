@@ -19,7 +19,7 @@ for archive in $archives; do
     for file in README.md deploy/README.md \
         scripts/install-systemd.sh scripts/production-acceptance.sh scripts/upgrade-systemd.sh scripts/rollback-systemd.sh \
         scripts/backup-systemd.sh scripts/backup-alert.sh scripts/check-backup-freshness.sh scripts/healthcheck.sh \
-        scripts/postgres-backup.sh scripts/postgres-restore.sh \
+        scripts/postgres-backup.sh scripts/postgres-restore.sh scripts/extended-backup.sh scripts/extended-restore.sh \
         migrations/postgres/001_initial_schema.sql migrations/postgres/008_ai_analysis.sql \
         deploy/systemd/api.env.example deploy/systemd/runner.env.example deploy/systemd/backup.env.example \
         deploy/systemd/vps-tools-api.service deploy/systemd/vps-tools-runner.service \
@@ -32,11 +32,11 @@ for archive in $archives; do
 
     archive_lower=$(basename "$archive" | tr '[:upper:]' '[:lower:]')
     if printf '%s' "$archive_lower" | grep -q '_windows_'; then
-        for binary in api.exe runner.exe backup.exe vps.exe; do
+        for binary in api.exe runner.exe backup.exe artifact-migrate.exe vps.exe; do
             [ -f "$tmp/$binary" ] || { echo "$(basename "$archive") is missing $binary" >&2; exit 1; }
         done
     else
-        for binary in api runner backup vps; do
+        for binary in api runner backup artifact-migrate vps; do
             [ -x "$tmp/$binary" ] || { echo "$(basename "$archive") has a non-executable or missing binary: $binary" >&2; exit 1; }
         done
     fi

@@ -64,6 +64,26 @@ verifies a live SQL connection after completion. Restore into a disposable
 database first. Keep the database credentials, S3 artefact manifest, S3
 encryption key, and PostgreSQL dump together as one recovery record.
 
+For a combined PostgreSQL and S3 recovery record, retain the verified S3
+manifest and run the packaged extended helper:
+
+```sh
+DATABASE_URL='postgres://...' \
+ARTIFACT_MANIFEST=/var/lib/vps-tools/backups/artifacts.json \
+EXTENDED_BACKUP_DIR=/var/lib/vps-tools/backups/extended \
+./scripts/extended-backup.sh
+
+CONFIRM_RESTORE=YES DATABASE_URL='postgres://...' \
+EXTENDED_BACKUP=/var/lib/vps-tools/backups/extended/svrtools-20260727T020000Z \
+./scripts/extended-restore.sh
+```
+
+The extended record contains the PostgreSQL dump, checksums, the S3 manifest,
+and the verification log. Restore verifies the dump and the S3 objects before
+it reports success. Set `RESTORE_ARTIFACTS_DIR` during a rehearsal to create a
+verified encrypted local fallback as well. This is still a recovery rehearsal
+tool, not proof that a particular production host has met its RPO or RTO.
+
 ## Incident recovery order
 
 1. Pause scheduled automation with `vps automation pause --reason "recovery"`.

@@ -14,6 +14,7 @@ foreach ($archive in $archives) {
       'api.exe',
       'runner.exe',
       'backup.exe',
+      'artifact-migrate.exe',
       'vps.exe',
       'README.md',
       'deploy/README.md',
@@ -25,6 +26,8 @@ foreach ($archive in $archives) {
       'scripts/backup-alert.sh',
       'scripts/check-backup-freshness.sh',
       'scripts/healthcheck.sh',
+      'scripts/extended-backup.sh',
+      'scripts/extended-restore.sh',
       'scripts/validate-release-layout.ps1',
       'deploy/systemd/api.env.example',
       'deploy/systemd/runner.env.example',
@@ -47,6 +50,8 @@ foreach ($archive in $archives) {
     if ($LASTEXITCODE -ne 0) { throw "Packaged vps.exe failed --help in $($archive.Name)" }
     & (Join-Path $packageDir 'backup.exe') -h | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Packaged backup.exe failed -h in $($archive.Name)" }
+    & (Join-Path $packageDir 'artifact-migrate.exe') -h | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Packaged artifact-migrate.exe failed -h in $($archive.Name)" }
     Write-Output "release archive layout verified: $($archive.FullName)"
   } finally {
     if (Test-Path -LiteralPath $packageDir) {

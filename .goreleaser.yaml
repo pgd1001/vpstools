@@ -50,9 +50,21 @@ builds:
       - -s -w
       - -X main.version={{.Version}}
 
+  - id: artifact-migrate
+    main: ./apps/api/cmd/artifact-migrate
+    binary: artifact-migrate
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
 archives:
   - id: default
-    ids: [vps, api, runner, backup]
+    ids: [vps, api, runner, backup, artifact-migrate]
     formats: [tar.gz, zip]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
@@ -71,6 +83,8 @@ archives:
       - scripts/validate-release.ps1
       - scripts/postgres-backup.sh
       - scripts/postgres-restore.sh
+      - scripts/extended-backup.sh
+      - scripts/extended-restore.sh
       - migrations/postgres/*
 
 checksum:

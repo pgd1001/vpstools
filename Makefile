@@ -1,4 +1,4 @@
-.PHONY: dev-up dev-down build test vet lint generate clean backup backup-run backup-verify backup-restore runbook-validate deployment-manifests release-check release-evidence-test
+.PHONY: dev-up dev-down build test vet lint generate clean backup backup-run backup-verify backup-restore extended-backup extended-restore runbook-validate deployment-manifests release-check release-evidence-test
 
 BACKUP ?= ./backups/latest
 DB_PATH ?= ./svrtools.db
@@ -55,6 +55,12 @@ backup-verify:
 
 backup-restore:
 	go run ./apps/api/cmd/backup -mode restore -input "$(BACKUP)" -db "$(DB_PATH)" -artifacts "$(ARTIFACTS_DIR)"
+
+extended-backup:
+	sh ./scripts/extended-backup.sh
+
+extended-restore:
+	sh ./scripts/extended-restore.sh
 
 runbook-validate:
 	go test ./runbooks -count=1

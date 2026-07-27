@@ -1,6 +1,6 @@
 # Single-host Linux service packaging
 
-This directory contains the production-shaped packaging for a single Linux host running the API and one customer-managed runner. It assumes systemd, `curl`, a dedicated `vps-tools` service account, and a release bundle containing `api`, `runner`, `backup`, and `vps`.
+This directory contains the production-shaped packaging for a single Linux host running the API and one customer-managed runner. It assumes systemd, `curl`, a dedicated `vps-tools` service account, and a release bundle containing `api`, `runner`, `backup`, `artifact-migrate`, and `vps`.
 
 The installer keeps immutable releases in `/opt/vps-tools/releases/<version>` and points `/opt/vps-tools/current` at the active release. Runtime state belongs to `/var/lib/vps-tools`. Configuration and secrets belong in these root-owned files, both mode `0600`.
 
@@ -47,7 +47,7 @@ The backup timer runs daily at 02:15 UTC, verifies the manifest immediately afte
 
 After configuring production identity, services, monitoring, and backups on the target host, run `/usr/local/libexec/vps-tools/production-acceptance.sh`. It checks production mode, authenticated `vps doctor` output, API and runner health, metrics endpoints, active systemd services, and backup freshness. Set `PRODUCTION_EVIDENCE_FILE=/var/lib/vps-tools/evidence/production-acceptance.md` to retain a redacted acceptance report with the release evidence. The command is a gate for the host checks, not a substitute for a restore rehearsal, alert-routing test, or measured RPO and RTO.
 
-For a clean self-contained smoke test on Windows after building the four service binaries, run `powershell -ExecutionPolicy Bypass -File scripts/self-contained-smoke.ps1`. On Linux, run `sh scripts/self-contained-smoke.sh` against executable `api`, `runner`, `backup`, and `vps` binaries. Both scripts start the API and simulated runner in an isolated temporary directory, submit a CLI execution, verify a replicated backup, restore it into disposable paths, check readiness, and remove the temporary state. GoReleaser packages all four service binaries for Windows, Linux, and macOS. Validate a Windows package with `powershell -ExecutionPolicy Bypass -File scripts/validate-release-layout.ps1`.
+For a clean self-contained smoke test on Windows after building the four service binaries, run `powershell -ExecutionPolicy Bypass -File scripts/self-contained-smoke.ps1`. On Linux, run `sh scripts/self-contained-smoke.sh` against executable `api`, `runner`, `backup`, and `vps` binaries. Both scripts start the API and simulated runner in an isolated temporary directory, submit a CLI execution, verify a replicated backup, restore it into disposable paths, check readiness, and remove the temporary state. GoReleaser packages the five service and migration binaries for Windows, Linux, and macOS. Validate a Windows package with `powershell -ExecutionPolicy Bypass -File scripts/validate-release-layout.ps1`.
 
 ## Upgrade
 

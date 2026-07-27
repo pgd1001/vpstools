@@ -77,7 +77,7 @@ EVENT_BUS=disabled
 
 SQLite runs in WAL mode with a single-writer-safe connection limit. Artefacts are encrypted locally, written atomically, and referenced by stable IDs. Use `make backup` to include database metadata, artefact files, and the manifest.
 
-The configuration shape below documents the extended-tier boundary. Incomplete S3 settings fail at startup rather than silently falling back. S3 artifact storage is selectable, while PostgreSQL, JetStream, external scheduling, and NATS remain fail-closed until their runtime adapters and migration tests are shipped.
+The configuration shape below documents the extended-tier boundary. Incomplete S3, PostgreSQL, or JetStream settings fail at startup rather than silently falling back. PostgreSQL metadata, S3 artifact storage, and the database-authoritative JetStream notification bridge are selectable extensions. External scheduling, NATS event publishing, and a fully independent queue remain separate enterprise milestones.
 
 ```text
 DATABASE_DRIVER=postgres
@@ -141,7 +141,7 @@ Interval schedules are available to senior engineers through the API and web con
 
 The current implementation includes the CLI to API to runner vertical slice, inventory, runner registration, execution, runbooks, approvals, RBAC, audit events, the TUI, the web console, schedules, local encrypted artefacts, MCP tools, and the self-contained deployment path.
 
-The extended PostgreSQL and JetStream adapters, complete S3 backup and cutover tooling, and unattended high-risk approval flow remain planned. Local-to-S3 artefact migration and bounded read-only AI analysis are available as explicit features. See [known limitations](docs/KNOWN_LIMITATIONS.md) and the [product improvement plan](docs/PRODUCT_IMPROVEMENT_PLAN.md) for the current boundary.
+The extended PostgreSQL and JetStream adapters, verified S3 migration path, combined PostgreSQL and S3 recovery helpers, and bounded read-only AI analysis are available as explicit features. External scheduling, fully independent queue execution, and unattended high-risk approval remain outside the current release boundary. See [known limitations](docs/KNOWN_LIMITATIONS.md) and the [product improvement plan](docs/PRODUCT_IMPROVEMENT_PLAN.md) for the current boundary.
 
 ## Development checks
 

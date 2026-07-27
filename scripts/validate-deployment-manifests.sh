@@ -11,6 +11,8 @@ prometheus_file="$root/deploy/monitoring/prometheus.yml"
 alerts_file="$root/deploy/monitoring/vps-tools-alerts.yml"
 postgres_backup="$root/scripts/postgres-backup.sh"
 postgres_restore="$root/scripts/postgres-restore.sh"
+extended_backup="$root/scripts/extended-backup.sh"
+extended_restore="$root/scripts/extended-restore.sh"
 
 failures=0
 fail() {
@@ -34,6 +36,8 @@ for file in \
 done
 require_file "$postgres_backup"
 require_file "$postgres_restore"
+require_file "$extended_backup"
+require_file "$extended_restore"
 
 check_contains() {
     file=$1
@@ -44,6 +48,8 @@ check_contains() {
 
 check_contains "$postgres_backup" '^pg_dump_bin=' 'PostgreSQL backup helper has no pg_dump configuration'
 check_contains "$postgres_restore" 'CONFIRM_RESTORE' 'PostgreSQL restore helper lacks explicit confirmation'
+check_contains "$extended_backup" 'ARTIFACT_MANIFEST' 'Extended backup helper does not require an S3 artifact manifest'
+check_contains "$extended_restore" 'CONFIRM_RESTORE' 'Extended restore helper lacks explicit confirmation'
 
 # Every installed systemd helper referenced by ExecStart must exist in the
 # source scripts directory and be included by the installer.
