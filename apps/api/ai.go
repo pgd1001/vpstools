@@ -127,7 +127,7 @@ func evidenceBytes(items []ai.Evidence) int {
 }
 
 func executionAIEvidence(ctx context.Context, db *sql.DB, orgID, executionID string) ([]ai.Evidence, error) {
-	rows, err := db.QueryContext(ctx, `SELECT et.id, s.name, et.stdout, et.stderr FROM execution_targets et JOIN executions e ON e.id = et.execution_id JOIN servers s ON s.id = et.server_id WHERE e.id = ? AND e.organisation_id = ? ORDER BY et.id`, executionID, orgID)
+	rows, err := apiQuery(ctx, db, `SELECT et.id, s.name, et.stdout, et.stderr FROM execution_targets et JOIN executions e ON e.id = et.execution_id JOIN servers s ON s.id = et.server_id WHERE e.id = ? AND e.organisation_id = ? ORDER BY et.id`, executionID, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -158,12 +158,12 @@ func persistAIRequest(ctx context.Context, db *sql.DB, id string, actor *authz.A
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO ai_requests (id, organisation_id, actor_user_id, status, request_json, response_text, model, provider_request_id, duration_ms, error_summary) VALUES (?,?,?,?,?,?,?,?,?,?)`, id, actor.OrganisationID, actor.UserID, status, string(requestJSON), response, model, providerRequestID, duration, errorSummary)
+	_, err = apiExec(ctx, tx, `INSERT INTO ai_requests (id, organisation_id, actor_user_id, status, request_json, response_text, model, provider_request_id, duration_ms, error_summary) VALUES (?,?,?,?,?,?,?,?,?,?)`, id, actor.OrganisationID, actor.UserID, status, string(requestJSON), response, model, providerRequestID, duration, errorSummary)
 	if err != nil {
 		return fmt.Errorf("insert AI request: %w", err)
 	}
 	for i, item := range request.Evidence {
-		_, err = tx.ExecContext(ctx, `INSERT INTO ai_evidence (id, request_id, organisation_id, ordinal, kind, title, content, source_uri) VALUES (?,?,?,?,?,?,?,?)`, id+"_ev_"+fmt.Sprint(i+1), id, actor.OrganisationID, i, item.Kind, redact.Stdout(item.Title), redact.Stdout(item.Content), item.SourceURI)
+		_, err = apiExec(ctx, tx, `INSERT INTO ai_evidence (id, request_id, organisation_id, ordinal, kind, title, content, source_uri) VALUES (?,?,?,?,?,?,?,?)`, id+"_ev_"+fmt.Sprint(i+1), id, actor.OrganisationID, i, item.Kind, redact.Stdout(item.Title), redact.Stdout(item.Content), item.SourceURI)
 		if err != nil {
 			return fmt.Errorf("insert AI evidence: %w", err)
 		}

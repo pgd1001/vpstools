@@ -42,6 +42,8 @@ func TestSQLiteAndPostgresStorageContract(t *testing.T) {
 		"automation_schedules":      {"created_by_user_id", "runbook_name", "params", "interval_seconds", "next_run_at", "enabled", "last_run_at", "last_error"},
 		"automation_controls":       {"paused", "paused_at", "paused_by_user_id", "reason", "updated_at"},
 		"audit_events":              {"actor_user_id", "metadata", "previous_hash", "event_hash", "occurred_at"},
+		"ai_requests":               {"actor_user_id", "status", "request_json", "response_text", "model", "provider_request_id", "duration_ms", "error_summary", "created_at"},
+		"ai_evidence":               {"request_id", "organisation_id", "ordinal", "kind", "title", "content", "source_uri", "created_at"},
 	}
 	for table, columns := range contract {
 		for _, column := range columns {
