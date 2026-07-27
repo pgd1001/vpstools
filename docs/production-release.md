@@ -1,6 +1,6 @@
 # Production release checklist
 
-This checklist defines the minimum bar for a supported self-contained production release. PostgreSQL, S3, and JetStream remain a separate enterprise milestone until their adapters and migration tests are implemented. The repository does not assume a software licence. Choose and add the appropriate licence before a public release.
+This checklist defines the minimum bar for a supported self-contained production release. Local SQLite and encrypted artefacts are the supported default. S3-compatible artefact storage and the database-authoritative JetStream notification bridge are available as controlled extensions. Full PostgreSQL API operation, external scheduling, complete object-store backup and restore, and horizontally independent queue execution remain separate enterprise milestones. The repository does not assume a software licence. Choose and add the appropriate licence before a public release.
 
 ## Release gates
 
