@@ -122,6 +122,7 @@ func writeAuditEventTx(ctx context.Context, exec auditExec, orgID, actorID, acti
 }
 
 func writeAuditEventTypeTx(ctx context.Context, exec auditExec, orgID, actorID, actorType, action, targetType, targetID, result string, metadata map[string]any) error {
+	runtime := metadataRuntime()
 	b, err := json.Marshal(metadata)
 	if err != nil {
 		return err
@@ -137,14 +138,14 @@ func writeAuditEventTypeTx(ctx context.Context, exec auditExec, orgID, actorID, 
 		Action: action, TargetType: targetType, TargetID: targetID, Result: result,
 		Metadata: string(b), OccurredAt: occurredAt, PreviousHash: previousHash,
 	})
-	_, err = exec.ExecContext(ctx,
-		"INSERT INTO audit_events (id, organisation_id, actor_user_id, actor_type, action, target_type, target_id, result, metadata, occurred_at, previous_hash, event_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+	_, err = runtime.ExecContext(ctx, exec,
+		"INSERT INTO audit_events (id, organisation_id, actor_user_id, actor_type, action, target_type, target_id, result, metadata, occurred_at, previous_hash, event_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, "+runtime.JSONParameter()+", ?, ?, ?)",
 		id, orgID, sqlNullString(actorID), actorType, action, targetType, targetID, result, string(b), occurredAt, previousHash, eventHash)
 	return err
 }
 
 func latestAuditHash(ctx context.Context, exec auditExec, orgID string) (string, error) {
-	rows, err := exec.QueryContext(ctx, "SELECT COALESCE(event_hash,'') FROM audit_events WHERE organisation_id = ? ORDER BY occurred_at DESC, id DESC LIMIT 1", orgID)
+	rows, err := metadataRuntime().QueryContext(ctx, exec, "SELECT COALESCE(event_hash,'') FROM audit_events WHERE organisation_id = ? ORDER BY occurred_at DESC, id DESC LIMIT 1", orgID)
 	if err != nil {
 		return "", err
 	}
@@ -223,12 +224,13 @@ func verifyAuditHashChain(ctx context.Context, db *sql.DB, orgID string) (int, e
 }
 
 func recordExecutionEvent(ctx context.Context, exec auditExec, orgID, executionID, targetID, fromStatus, toStatus, eventType string, metadata map[string]any) error {
+	runtime := metadataRuntime()
 	b, err := json.Marshal(metadata)
 	if err != nil {
 		return err
 	}
-	_, err = exec.ExecContext(ctx,
-		"INSERT INTO execution_events (id, organisation_id, execution_id, target_id, from_status, to_status, event_type, metadata, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+	_, err = runtime.ExecContext(ctx, exec,
+		"INSERT INTO execution_events (id, organisation_id, execution_id, target_id, from_status, to_status, event_type, metadata, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, "+runtime.JSONParameter()+", "+runtime.CurrentTime()+")",
 		"evt_"+shortID(), orgID, executionID, sqlNullString(targetID), sqlNullString(fromStatus), toStatus, eventType, string(b))
 	return err
 }

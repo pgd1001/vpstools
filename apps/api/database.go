@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pgd1001/svrtools/packages/config"
+	dbruntime "github.com/pgd1001/svrtools/packages/db"
 	_ "modernc.org/sqlite"
 )
 
@@ -56,4 +57,18 @@ func validatePostgresURL(connString string) error {
 		return fmt.Errorf("invalid PostgreSQL database URL")
 	}
 	return nil
+}
+
+func metadataRuntime() *dbruntime.Runtime {
+	driver := apiBackends.DatabaseDriver
+	if driver == "" {
+		driver = "sqlite"
+	}
+	runtime, err := dbruntime.NewRuntime(driver)
+	if err != nil {
+		// Configuration validation rejects this before serving requests. The
+		// SQLite fallback keeps isolated unit tests using their in-memory DBs.
+		runtime, _ = dbruntime.NewRuntime("sqlite")
+	}
+	return runtime
 }

@@ -2,14 +2,16 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"time"
 )
 
 // reconcileExpiredLeases moves abandoned work back to the pending queue while
 // there are attempts left. Work that has exhausted its budget is dead-lettered
 // so it cannot leave an execution in running forever.
 func reconcileExpiredLeases(ctx context.Context, exec auditExec, orgID string) error {
-	rows, err := exec.QueryContext(ctx, `
+	runtime := metadataRuntime()
+	now := runtime.CurrentTime()
+	rows, err := runtime.QueryContext(ctx, exec, `
 		SELECT et.id, et.execution_id, et.attempt, et.max_attempts
 		FROM execution_targets et
 		JOIN executions e ON e.id = et.execution_id
@@ -17,7 +19,7 @@ func reconcileExpiredLeases(ctx context.Context, exec auditExec, orgID string) e
 		  AND e.status IN ('queued','running')
 		  AND et.status = 'running'
 		  AND et.lease_expires_at IS NOT NULL
-		  AND et.lease_expires_at <= datetime('now')`, orgID, orgID)
+		  AND et.lease_expires_at <= `+now, orgID, orgID)
 	if err != nil {
 		return err
 	}
@@ -41,9 +43,9 @@ func reconcileExpiredLeases(ctx context.Context, exec auditExec, orgID string) e
 
 	for _, target := range expired {
 		if target.attempt >= target.max {
-			if _, err := exec.ExecContext(ctx, `UPDATE execution_targets
+			if _, err := runtime.ExecContext(ctx, exec, `UPDATE execution_targets
 				SET status = 'dead_letter', runner_id = NULL, lease_id = NULL,
-				    lease_expires_at = NULL, finished_at = datetime('now'),
+				    lease_expires_at = NULL, finished_at = `+now+`,
 				    error_summary = 'runner lease expired after maximum attempts'
 				WHERE id = ? AND status = 'running'`, target.id); err != nil {
 				return err
@@ -57,10 +59,10 @@ func reconcileExpiredLeases(ctx context.Context, exec auditExec, orgID string) e
 		}
 
 		backoff := retryBackoffSeconds(target.attempt)
-		if _, err := exec.ExecContext(ctx, `UPDATE execution_targets
+		if _, err := runtime.ExecContext(ctx, exec, `UPDATE execution_targets
 			SET status = 'pending', runner_id = NULL, lease_id = NULL,
-			    lease_expires_at = NULL, next_attempt_at = datetime('now', ? || ' seconds')
-			WHERE id = ? AND status = 'running'`, fmt.Sprintf("+%d", backoff), target.id); err != nil {
+			    lease_expires_at = NULL, next_attempt_at = ?
+			WHERE id = ? AND status = 'running'`, time.Now().UTC().Add(time.Duration(backoff)*time.Second), target.id); err != nil {
 			return err
 		}
 		if err := recordExecutionEvent(ctx, exec, orgID, target.executionID, target.id, "running", "pending", "execution.target.lease_expired", map[string]any{
@@ -87,8 +89,9 @@ func retryBackoffSeconds(attempt int) int {
 }
 
 func finalizeReconciledExecutions(ctx context.Context, exec auditExec, orgID string) error {
-	_, err := exec.ExecContext(ctx, `UPDATE executions
-		SET status = 'failed', finished_at = datetime('now'),
+	runtime := metadataRuntime()
+	_, err := runtime.ExecContext(ctx, exec, `UPDATE executions
+		SET status = 'failed', finished_at = `+runtime.CurrentTime()+`,
 		    error_summary = 'one or more targets were dead-lettered'
 		WHERE organisation_id = ? AND status IN ('queued','running')
 		  AND NOT EXISTS (SELECT 1 FROM execution_targets et WHERE et.execution_id = executions.id AND et.status IN ('pending','running'))

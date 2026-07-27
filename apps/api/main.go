@@ -1996,6 +1996,7 @@ func loadTags(ctx context.Context, db *sql.DB, orgID, serverID string) []tag {
 }
 
 func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	runtime := metadataRuntime()
 	runnerOrg, err := authenticateRunner(db, r)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
@@ -2018,11 +2019,11 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 	}
 	var targetID, execID, command, host, sshUser, sourceStatus string
 	var sshPort, timeout int
-	err = tx.QueryRowContext(ctx, `SELECT et.id, e.id, et.status, COALESCE(NULLIF(e.command,''), e.command_preview), COALESCE(s.hostname, s.public_ip, ''), s.ssh_port, COALESCE(s.ssh_username,''), e.timeout_seconds
+	err = runtime.QueryRowContext(ctx, tx, `SELECT et.id, e.id, et.status, COALESCE(NULLIF(e.command,''), e.command_preview), COALESCE(s.hostname, s.public_ip, ''), s.ssh_port, COALESCE(s.ssh_username,''), e.timeout_seconds
 		FROM execution_targets et JOIN executions e ON e.id = et.execution_id JOIN servers s ON s.id = et.server_id
 		WHERE e.status IN ('queued','running') AND e.organisation_id = ?
-		AND ((et.status = 'pending' AND (et.next_attempt_at IS NULL OR et.next_attempt_at <= datetime('now')))
-			OR (et.status = 'running' AND et.lease_expires_at IS NOT NULL AND et.lease_expires_at <= datetime('now')))
+		AND ((et.status = 'pending' AND (et.next_attempt_at IS NULL OR et.next_attempt_at <= `+runtime.CurrentTime()+`))
+			OR (et.status = 'running' AND et.lease_expires_at IS NOT NULL AND et.lease_expires_at <= `+runtime.CurrentTime()+`))
 		AND et.attempt < et.max_attempts
 		AND EXISTS (SELECT 1 FROM runners rn JOIN runner_scopes rs ON rs.runner_id = rn.id
 			WHERE rn.id = ? AND rn.organisation_id = ? AND rn.status = 'active'
@@ -2035,13 +2036,19 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		writeJSON(w, 404, map[string]string{"status": "no_jobs"})
 		return
 	}
-	if _, err = tx.ExecContext(ctx, "UPDATE executions SET status = 'running', started_at = COALESCE(started_at, datetime('now')) WHERE id = ? AND status IN ('queued','running')", execID); err != nil {
+	leaseID := "lease_" + shortID()
+	leaseExpires := time.Now().UTC().Add(5 * time.Minute)
+	claimResult, err := runtime.ExecContext(ctx, tx, "UPDATE execution_targets SET status = 'running', runner_id = ?, lease_id = ?, lease_expires_at = ?, attempt = attempt + 1, started_at = COALESCE(started_at, "+runtime.CurrentTime()+") WHERE id = ? AND status = ? AND attempt < max_attempts AND ((status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= "+runtime.CurrentTime()+")) OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= "+runtime.CurrentTime()+"))", runnerID, leaseID, leaseExpires, targetID, sourceStatus)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to claim job"})
+		return
+	}
+	if affected, _ := claimResult.RowsAffected(); affected != 1 {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "job was claimed by another runner"})
 		return
 	}
-	leaseID := "lease_" + shortID()
-	if _, err = tx.ExecContext(ctx, "UPDATE execution_targets SET status = 'running', runner_id = ?, lease_id = ?, lease_expires_at = datetime('now','+5 minutes'), attempt = attempt + 1, started_at = COALESCE(started_at, datetime('now')) WHERE id = ? AND status IN ('pending','running') AND attempt < max_attempts", runnerID, leaseID, targetID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to bind job to runner"})
+	if _, err = runtime.ExecContext(ctx, tx, "UPDATE executions SET status = 'running', started_at = COALESCE(started_at, "+runtime.CurrentTime()+") WHERE id = ? AND status IN ('queued','running')", execID); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "job was claimed by another runner"})
 		return
 	}
 	if err = recordExecutionEvent(ctx, tx, runnerOrg, execID, targetID, sourceStatus, "running", "execution.started", map[string]any{"runner_id": runnerID, "lease_id": leaseID}); err != nil {
@@ -2262,6 +2269,7 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 }
 
 func handleRenewLease(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	runtime := metadataRuntime()
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	var req struct {
 		ExecutionID string `json:"execution_id"`
@@ -2277,15 +2285,16 @@ func handleRenewLease(ctx context.Context, db *sql.DB, w http.ResponseWriter, r 
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
-	result, err := db.ExecContext(ctx, `UPDATE execution_targets
-		SET lease_expires_at = datetime('now','+5 minutes')
+	leaseExpires := time.Now().UTC().Add(5 * time.Minute)
+	claimed, err := runtime.CheckedExecContext(ctx, db, `UPDATE execution_targets
+		SET lease_expires_at = ?
 		WHERE id = ? AND execution_id = ? AND runner_id = ? AND lease_id = ? AND status = 'running'`,
-		req.TargetID, req.ExecutionID, req.RunnerID, req.LeaseID)
+		leaseExpires, req.TargetID, req.ExecutionID, req.RunnerID, req.LeaseID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to renew lease"})
 		return
 	}
-	if n, _ := result.RowsAffected(); n == 0 {
+	if !claimed {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "lease is no longer active"})
 		return
 	}
