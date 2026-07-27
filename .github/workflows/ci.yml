@@ -106,11 +106,11 @@ jobs:
         shell: pwsh
         run: |
           ./scripts/validate-release-layout.ps1 -DistDirectory dist
-          $archive = Get-ChildItem dist -Filter '*windows_amd64.zip' | Select-Object -First 1
-          if (-not $archive) { throw 'Windows amd64 release archive is missing' }
+          $windowsArchive = Get-ChildItem dist -Filter '*windows_amd64.zip' | Select-Object -First 1
+          if (-not $windowsArchive) { throw 'Windows amd64 release archive is missing' }
           $packageDir = Join-Path $env:RUNNER_TEMP 'vps-tools-packaged-windows'
           New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
-          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $packageDir -Force
+          Expand-Archive -LiteralPath $windowsArchive.FullName -DestinationPath $packageDir -Force
           ./scripts/self-contained-smoke.ps1 `
             -ApiBinary (Join-Path $packageDir 'api.exe') `
             -RunnerBinary (Join-Path $packageDir 'runner.exe') `
