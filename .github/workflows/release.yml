@@ -178,7 +178,7 @@ jobs:
           sh ./scripts/self-contained-smoke.sh
 
       - name: Attest release checksums
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/checksums.txt
 
