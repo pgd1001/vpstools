@@ -1499,7 +1499,7 @@ func handleListExecutions(w http.ResponseWriter, r *http.Request) {
 	query += " ORDER BY e.requested_at DESC LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := dbFrom(r).QueryContext(r.Context(), query, args...)
+	rows, err := apiQuery(r.Context(), dbFrom(r), query, args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "query failed"})
 		return
@@ -1561,7 +1561,7 @@ func handleGetExecution(w http.ResponseWriter, r *http.Request, execID string) {
 		DelegatedBy    string `json:"delegated_by_user_id"`
 		ApprovalID     string `json:"approval_id"`
 	}
-	err := db.QueryRowContext(r.Context(),
+	err := apiQueryRow(r.Context(), db,
 		`SELECT id, actor_user_id, actor_role_at_time, execution_type, status,
 		risk_level, environment, reason, command_preview, command_hash,
 		timeout_seconds, COALESCE(requested_at,''), COALESCE(started_at,''), COALESCE(finished_at,''),
@@ -1590,7 +1590,7 @@ func handleGetExecution(w http.ResponseWriter, r *http.Request, execID string) {
 		StdoutArtifactID string `json:"-"`
 		StderrArtifactID string `json:"-"`
 	}
-	rows, err := db.QueryContext(r.Context(),
+	rows, err := apiQuery(r.Context(), db,
 		`SELECT id, server_id, COALESCE(runner_id,''), status, COALESCE(exit_code,0),
 		stdout, stderr, COALESCE(stdout_artifact_id,''), COALESCE(stderr_artifact_id,''), COALESCE(started_at,''), COALESCE(finished_at,''), COALESCE(error_summary,'')
 		FROM execution_targets WHERE execution_id = ? ORDER BY server_id`, execID)
@@ -1623,7 +1623,7 @@ func handleGetExecution(w http.ResponseWriter, r *http.Request, execID string) {
 		Metadata   string `json:"metadata"`
 		OccurredAt string `json:"occurred_at"`
 	}
-	eventRows, err := db.QueryContext(r.Context(), `SELECT id, COALESCE(target_id,''), COALESCE(from_status,''), to_status, event_type, metadata, occurred_at FROM execution_events WHERE execution_id = ? AND organisation_id = ? ORDER BY occurred_at ASC, id ASC`, execID, actor.OrganisationID)
+	eventRows, err := apiQuery(r.Context(), db, `SELECT id, COALESCE(target_id,''), COALESCE(from_status,''), to_status, event_type, metadata, occurred_at FROM execution_events WHERE execution_id = ? AND organisation_id = ? ORDER BY occurred_at ASC, id ASC`, execID, actor.OrganisationID)
 	var events []executionEvent
 	if err == nil {
 		defer eventRows.Close()
@@ -1703,7 +1703,7 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(r.Context(),
+	_, err = apiExec(r.Context(), tx,
 		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, delegated_by_user_id, execution_type, status, environment, risk_level, command, command_preview, command_hash, reason, timeout_seconds)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		execID, actor.OrganisationID, actor.UserID, actor.Role, sqlNullString(req.DelegatedBy), "raw_command", "queued", env, string(risk), req.Command, redact.Stdout(req.Command), hashCmd(req.Command), req.Reason, 300,
@@ -1715,7 +1715,7 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for i, srvID := range targetIDs {
-		if _, err = tx.ExecContext(r.Context(),
+		if _, err = apiExec(r.Context(), tx,
 			`INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot)
 			VALUES (?, ?, ?, ?, 'pending', ?)`,
 			"ext_"+shortID(), actor.OrganisationID, execID, srvID, jsonString(targetSnapshot[i])); err != nil {
@@ -1740,7 +1740,7 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 		"target_count": len(targetIDs),
 	})
 	if idempotencyKey != "" {
-		if _, err = tx.ExecContext(r.Context(),
+		if _, err = apiExec(r.Context(), tx,
 			`INSERT INTO execution_idempotency (organisation_id, user_id, idempotency_key, payload_hash, execution_id, response_body) VALUES (?,?,?,?,?,?)`,
 			actor.OrganisationID, actor.UserID, idempotencyKey, payloadHash, execID, responseBody); err != nil {
 			_ = tx.Rollback()
@@ -1761,7 +1761,7 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 
 func replayIdempotentExecution(ctx context.Context, db *sql.DB, orgID, userID, key, payloadHash string, w http.ResponseWriter) (bool, error) {
 	var storedHash, responseBody string
-	err := db.QueryRowContext(ctx,
+	err := apiQueryRow(ctx, db,
 		`SELECT payload_hash, response_body FROM execution_idempotency WHERE organisation_id = ? AND user_id = ? AND idempotency_key = ?`,
 		orgID, userID, key).Scan(&storedHash, &responseBody)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1783,7 +1783,7 @@ func handleCancelExecution(w http.ResponseWriter, r *http.Request, execID string
 	actor, _ := authz.RequireActor(r.Context())
 	db := dbFrom(r)
 	var requesterID string
-	if err := db.QueryRowContext(r.Context(),
+	if err := apiQueryRow(r.Context(), db,
 		"SELECT actor_user_id FROM executions WHERE id = ? AND organisation_id = ? AND status IN ('created','queued')",
 		execID, actor.OrganisationID).Scan(&requesterID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1797,9 +1797,9 @@ func handleCancelExecution(w http.ResponseWriter, r *http.Request, execID string
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the requester or a senior operator can cancel this execution"})
 		return
 	}
-	result, err := db.ExecContext(r.Context(),
-		"UPDATE executions SET status = 'cancelled', finished_at = datetime('now') WHERE id = ? AND organisation_id = ? AND status IN ('created','queued')",
-		execID, actor.OrganisationID)
+	result, err := apiExec(r.Context(), db,
+		"UPDATE executions SET status = 'cancelled', finished_at = ? WHERE id = ? AND organisation_id = ? AND status IN ('created','queued')",
+		time.Now().UTC(), execID, actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to cancel"})
 		return
@@ -1809,7 +1809,7 @@ func handleCancelExecution(w http.ResponseWriter, r *http.Request, execID string
 		writeJSON(w, 400, map[string]string{"error": "execution not cancellable"})
 		return
 	}
-	db.ExecContext(r.Context(), "UPDATE execution_targets SET status = 'cancelled' WHERE execution_id = ?", execID)
+	_, _ = apiExec(r.Context(), db, "UPDATE execution_targets SET status = 'cancelled' WHERE execution_id = ?", execID)
 	writeAuditEvent(r.Context(), db, actor.OrganisationID, actor.UserID, "execution.cancelled", "execution", execID, "cancelled", nil)
 	writeJSON(w, 200, map[string]string{"status": "cancelled"})
 }
@@ -1897,7 +1897,7 @@ func resolveTargets(ctx context.Context, db *sql.DB, orgID, target string) []str
 	if strings.HasPrefix(target, "server:") {
 		serverID := target[len("server:"):]
 		var exists string
-		err := db.QueryRowContext(ctx, "SELECT id FROM servers WHERE (id = ? OR name = ?) AND organisation_id = ? AND status != 'archived'",
+		err := apiQueryRow(ctx, db, "SELECT id FROM servers WHERE (id = ? OR name = ?) AND organisation_id = ? AND status != 'archived'",
 			serverID, serverID, orgID).Scan(&exists)
 		if err != nil {
 			return nil
@@ -1909,7 +1909,7 @@ func resolveTargets(ctx context.Context, db *sql.DB, orgID, target string) []str
 		if len(parts) != 2 {
 			return nil
 		}
-		rows, err := db.QueryContext(ctx,
+		rows, err := apiQuery(ctx, db,
 			"SELECT server_id FROM server_tags WHERE organisation_id = ? AND key = ? AND value = ?", orgID, parts[0], parts[1])
 		if err != nil {
 			return nil
@@ -1924,7 +1924,7 @@ func resolveTargets(ctx context.Context, db *sql.DB, orgID, target string) []str
 		return ids
 	}
 	var exists string
-	err := db.QueryRowContext(ctx, "SELECT id FROM servers WHERE name = ? AND organisation_id = ? AND status != 'archived'",
+	err := apiQueryRow(ctx, db, "SELECT id FROM servers WHERE name = ? AND organisation_id = ? AND status != 'archived'",
 		target, orgID).Scan(&exists)
 	if err != nil {
 		return nil
@@ -1944,7 +1944,7 @@ func targetEnvironment(ctx context.Context, db *sql.DB, orgID string, serverIDs 
 	environments := make(map[string]struct{})
 	for _, serverID := range serverIDs {
 		var env string
-		if err := db.QueryRowContext(ctx, "SELECT environment FROM servers WHERE id = ? AND organisation_id = ?", serverID, orgID).Scan(&env); err != nil {
+		if err := apiQueryRow(ctx, db, "SELECT environment FROM servers WHERE id = ? AND organisation_id = ?", serverID, orgID).Scan(&env); err != nil {
 			return "", true
 		}
 		environments[env] = struct{}{}
@@ -1963,7 +1963,7 @@ func snapshotTargets(ctx context.Context, db *sql.DB, orgID string, serverIDs []
 	for _, serverID := range serverIDs {
 		var id, name, hostname, environment, status string
 		var port int
-		if err := db.QueryRowContext(ctx,
+		if err := apiQueryRow(ctx, db,
 			"SELECT id, name, COALESCE(hostname,''), environment, status, ssh_port FROM servers WHERE id = ? AND organisation_id = ?",
 			serverID, orgID).Scan(&id, &name, &hostname, &environment, &status, &port); err != nil {
 			return nil
@@ -2135,7 +2135,7 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 	defer tx.Rollback()
 	var receiptHash, receiptBody string
 	var receiptCode int
-	if err := tx.QueryRowContext(ctx, `SELECT payload_hash, response_code, response_body
+	if err := apiQueryRow(ctx, tx, `SELECT payload_hash, response_code, response_body
 		FROM execution_result_receipts WHERE target_id = ? AND lease_id = ?`, req.TargetID, req.LeaseID).
 		Scan(&receiptHash, &receiptCode, &receiptBody); err == nil {
 		if receiptHash != hash {
@@ -2157,7 +2157,7 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 
 	var attempt, maxAttempts int
 	var currentStatus string
-	if err := tx.QueryRowContext(ctx, `SELECT status, attempt, max_attempts FROM execution_targets
+	if err := apiQueryRow(ctx, tx, `SELECT status, attempt, max_attempts FROM execution_targets
 		WHERE id = ? AND execution_id = ? AND runner_id = ? AND lease_id = ? AND status = 'running'`,
 		req.TargetID, req.ExecutionID, req.RunnerID, req.LeaseID).Scan(&currentStatus, &attempt, &maxAttempts); err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "target is not assigned to this runner"})
@@ -2179,26 +2179,31 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 		status = "dead_letter"
 	}
 
-	targetResult, err := tx.ExecContext(ctx, "UPDATE execution_targets SET status = ?, exit_code = ?, error_summary = ?, stdout = ?, stderr = ?, stdout_artifact_id = ?, stderr_artifact_id = ?, stdout_bytes = ?, stderr_bytes = ?, lease_expires_at = NULL, finished_at = datetime('now') WHERE id = ? AND execution_id = ? AND runner_id = ? AND lease_id = ? AND status = 'running' AND EXISTS (SELECT 1 FROM executions e WHERE e.id = execution_targets.execution_id AND e.organisation_id = ?) AND EXISTS (SELECT 1 FROM runners rn WHERE rn.id = execution_targets.runner_id AND rn.organisation_id = ?)",
-		status, req.ExitCode, sqlNullString(req.Error), storedStdout, storedStderr, sqlNullString(stdoutArtifactID), sqlNullString(stderrArtifactID), len(req.Stdout), len(req.Stderr), req.TargetID, req.ExecutionID, req.RunnerID, req.LeaseID, orgID, orgID)
+	targetResult, err := apiExec(ctx, tx, "UPDATE execution_targets SET status = ?, exit_code = ?, error_summary = ?, stdout = ?, stderr = ?, stdout_artifact_id = ?, stderr_artifact_id = ?, stdout_bytes = ?, stderr_bytes = ?, lease_expires_at = NULL, finished_at = ? WHERE id = ? AND execution_id = ? AND runner_id = ? AND lease_id = ? AND status = 'running' AND EXISTS (SELECT 1 FROM executions e WHERE e.id = execution_targets.execution_id AND e.organisation_id = ?) AND EXISTS (SELECT 1 FROM runners rn WHERE rn.id = execution_targets.runner_id AND rn.organisation_id = ?)",
+		status, req.ExitCode, sqlNullString(req.Error), storedStdout, storedStderr, sqlNullString(stdoutArtifactID), sqlNullString(stderrArtifactID), len(req.Stdout), len(req.Stderr), time.Now().UTC(), req.TargetID, req.ExecutionID, req.RunnerID, req.LeaseID, orgID, orgID)
 	if err != nil || func() bool { n, _ := targetResult.RowsAffected(); return n == 0 }() {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "target is not assigned to this runner"})
 		return
 	}
 	if status == "dead_letter" {
-		if _, err := tx.ExecContext(ctx, "UPDATE execution_targets SET error_summary = COALESCE(NULLIF(error_summary,''), 'maximum attempts exhausted') WHERE id = ?", req.TargetID); err != nil {
+		if _, err := apiExec(ctx, tx, "UPDATE execution_targets SET error_summary = COALESCE(NULLIF(error_summary,''), 'maximum attempts exhausted') WHERE id = ?", req.TargetID); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to mark dead-letter job"})
 			return
 		}
 	}
 	if status == "failed" && attempt < maxAttempts {
 		backoff := retryBackoffSeconds(attempt)
-		if _, err := tx.ExecContext(ctx, `UPDATE execution_targets
+		retryResult, err := apiExec(ctx, tx, `UPDATE execution_targets
 			SET status = 'pending', runner_id = NULL, lease_id = NULL,
 			    lease_expires_at = NULL, finished_at = NULL,
-			    next_attempt_at = datetime('now', ? || ' seconds')
-			WHERE id = ? AND status = 'failed'`, fmt.Sprintf("+%d", backoff), req.TargetID); err != nil {
+			    next_attempt_at = ?
+			WHERE id = ? AND status = 'failed'`, time.Now().UTC().Add(time.Duration(backoff)*time.Second), req.TargetID)
+		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to schedule retry"})
+			return
+		}
+		if affected, _ := retryResult.RowsAffected(); affected != 1 {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "target retry state changed"})
 			return
 		}
 		if err := recordExecutionEvent(ctx, tx, orgID, req.ExecutionID, req.TargetID, "failed", "pending", "execution.target.retry_scheduled", map[string]any{
@@ -2226,11 +2231,11 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 		return
 	}
 	var remaining, failed int
-	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM execution_targets WHERE execution_id = ? AND status IN ('pending','running')", req.ExecutionID).Scan(&remaining); err != nil {
+	if err := apiQueryRow(ctx, tx, "SELECT COUNT(*) FROM execution_targets WHERE execution_id = ? AND status IN ('pending','running')", req.ExecutionID).Scan(&remaining); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to inspect execution state"})
 		return
 	}
-	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM execution_targets WHERE execution_id = ? AND status IN ('failed','dead_letter')", req.ExecutionID).Scan(&failed); err != nil {
+	if err := apiQueryRow(ctx, tx, "SELECT COUNT(*) FROM execution_targets WHERE execution_id = ? AND status IN ('failed','dead_letter')", req.ExecutionID).Scan(&failed); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to inspect execution result"})
 		return
 	}
@@ -2239,8 +2244,13 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 		if failed > 0 {
 			finalStatus = "failed"
 		}
-		if _, err := tx.ExecContext(ctx, "UPDATE executions SET status = ?, finished_at = datetime('now'), error_summary = ? WHERE id = ? AND organisation_id = ? AND status = 'running'", finalStatus, sqlNullString(req.Error), req.ExecutionID, orgID); err != nil {
+		finalizeResult, err := apiExec(ctx, tx, "UPDATE executions SET status = ?, finished_at = ?, error_summary = ? WHERE id = ? AND organisation_id = ? AND status = 'running'", finalStatus, time.Now().UTC(), sqlNullString(req.Error), req.ExecutionID, orgID)
+		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to finalize execution"})
+			return
+		}
+		if affected, _ := finalizeResult.RowsAffected(); affected != 1 {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "execution is no longer running"})
 			return
 		}
 		status = finalStatus
@@ -2322,7 +2332,7 @@ func insertResultReceipt(ctx context.Context, tx *sql.Tx, orgID string, req stru
 	Error       string `json:"error"`
 	DurationMs  int64  `json:"duration_ms"`
 }, payloadHash, responseBody string) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO execution_result_receipts
+	_, err := apiExec(ctx, tx, `INSERT INTO execution_result_receipts
 		(organisation_id, execution_id, target_id, lease_id, runner_id, payload_hash, response_code, response_body)
 		VALUES (?, ?, ?, ?, ?, ?, 200, ?)`, orgID, req.ExecutionID, req.TargetID, req.LeaseID, req.RunnerID, payloadHash, responseBody)
 	return err
@@ -2348,7 +2358,12 @@ func persistExecutionArtifacts(ctx context.Context, db auditExec, orgID, executi
 		if backend == "" {
 			backend = "local"
 		}
-		if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO artifact_records (id, organisation_id, owner_type, owner_id, content_type, byte_size, sha256, backend) VALUES (?,?,?,?,?,?,?,?)`, id, orgID, "execution_target_"+kind, targetID, meta.ContentType, meta.Size, meta.SHA256, backend); err != nil {
+		if _, err := apiExec(ctx, db, `INSERT INTO artifact_records (id, organisation_id, owner_type, owner_id, content_type, byte_size, sha256, backend)
+			VALUES (?,?,?,?,?,?,?,?)
+			ON CONFLICT (id) DO UPDATE SET organisation_id = excluded.organisation_id,
+			owner_type = excluded.owner_type, owner_id = excluded.owner_id,
+			content_type = excluded.content_type, byte_size = excluded.byte_size,
+			sha256 = excluded.sha256, backend = excluded.backend`, id, orgID, "execution_target_"+kind, targetID, meta.ContentType, meta.Size, meta.SHA256, backend); err != nil {
 			return "", err
 		}
 		return id, nil
