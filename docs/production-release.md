@@ -18,7 +18,7 @@ This checklist defines the minimum bar for a supported self-contained production
 
 - [x] SQLite uses WAL mode, foreign keys, a bounded connection pool, and tested lease recovery.
 - [x] Local artefacts are encrypted with `ARTIFACT_ENCRYPTION_KEY` or a protected generated key.
-- [x] Backups include the database, encrypted artefacts, key-recovery guidance, checksum manifest, and artifact inventory.
+- [x] Local backups include the database, encrypted artefacts, key-recovery guidance, checksum manifest, and artifact inventory. Local-to-S3 migration can produce and verify a separate stable-object manifest, but a complete S3-backed deployment backup still needs to be rehearsed.
 - [ ] Backup integrity can be checked and a complete restore has been rehearsed. The isolated smoke tests exercise local backup, replication, verification, restore, restored API startup, encrypted artefact readiness, identity, execution history, and audit history. A release still needs the same sequence against the production host and its real encryption-key recovery path.
 - [ ] Retention, off-host replication, RPO, and RTO are documented. The systemd deployment supports a separately mounted replication destination, but each production installation still needs measured RPO/RTO and an exercised restore from the replicated copy.
 - [x] A failed backup produces an operator-visible alert through systemd journal failure handling, with an optional HTTPS webhook.
