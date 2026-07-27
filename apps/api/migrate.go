@@ -8,6 +8,10 @@ import (
 )
 
 func migrate(ctx context.Context, db *sql.DB) error {
+	if apiBackends.DatabaseDriver == "postgres" {
+		return migratePostgres(ctx, db)
+	}
+
 	schema := `
 	CREATE TABLE IF NOT EXISTS organisations (
 		id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
@@ -338,6 +342,10 @@ func addColumnIgnoreErr(ctx context.Context, db *sql.DB, table, column, def stri
 }
 
 func seed(ctx context.Context, db *sql.DB) error {
+	if apiBackends.DatabaseDriver == "postgres" {
+		return seedPostgres(ctx, db)
+	}
+
 	stmt := `
 	INSERT OR IGNORE INTO organisations (id, name, slug) VALUES ('org_demo', 'Demo Org', 'demo');
 	INSERT OR IGNORE INTO users (id, email, display_name) VALUES ('user_senior', 'senior@demo.local', 'Senior Engineer');

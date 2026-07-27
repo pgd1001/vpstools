@@ -36,11 +36,21 @@ func TestPostgresRuntimeIntegration(t *testing.T) {
 	if err := goose.SetDialect("postgres"); err != nil {
 		t.Fatal(err)
 	}
-	if err := goose.UpContext(ctx, db, postgresIntegrationMigrationPath(t)); err != nil {
+	previousBackends := apiBackends
+	apiBackends.DatabaseDriver = "postgres"
+	defer func() { apiBackends = previousBackends }()
+	if err := migratePostgres(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyPostgresSchema(ctx, db); err != nil {
+	if err := seedPostgres(ctx, db); err != nil {
 		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM organisations WHERE id = 'org_demo'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("seeded organisation count = %d, want 1", count)
 	}
 }
 

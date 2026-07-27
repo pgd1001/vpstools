@@ -25,7 +25,7 @@ NATS_DUPLICATE_WINDOW=2m
 
 Both services fail closed at startup when the selected dispatcher is unsupported, the NATS URL is missing, the stream settings are incomplete, or the JetStream stream and consumer have incompatible settings. The stream uses file storage, work-queue retention, a seven-day age limit, and server-side message ID de-duplication. The consumer is durable, pull-based, subject-filtered, explicit-ack, and bounded to one outstanding acknowledgement.
 
-The existing API currently supports SQLite metadata only. `DATABASE_DRIVER=postgres`, `EVENT_BUS=nats`, and `SCHEDULER=external` remain unsupported combinations in this repository and are rejected at API startup. JetStream does not change that boundary.
+The API supports PostgreSQL metadata as an opt-in backend and applies its versioned migrations at startup. `EVENT_BUS=nats` and `SCHEDULER=external` remain unsupported combinations in this repository and are rejected at API startup. JetStream does not change that boundary.
 
 ## Exact limitations
 

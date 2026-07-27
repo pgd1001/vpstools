@@ -57,12 +57,8 @@ func main() {
 		logger.Error("backend configuration invalid", "error", err)
 		os.Exit(1)
 	}
-	if apiBackends.DatabaseDriver != "sqlite" {
-		logger.Error("database backend is configured but the current API handlers require the self-contained SQLite tier", "database_driver", apiBackends.DatabaseDriver)
-		os.Exit(1)
-	}
 	if apiBackends.Scheduler != "embedded" || apiBackends.EventBus != "disabled" {
-		logger.Error("an unsupported extended runtime backend was selected", "artifact_store", apiBackends.ArtifactStore, "job_dispatch", apiBackends.JobDispatch, "scheduler", apiBackends.Scheduler, "event_bus", apiBackends.EventBus)
+		logger.Error("an unsupported scheduler or event backend was selected", "artifact_store", apiBackends.ArtifactStore, "job_dispatch", apiBackends.JobDispatch, "scheduler", apiBackends.Scheduler, "event_bus", apiBackends.EventBus)
 		os.Exit(1)
 	}
 	db, err := openMetadataDatabase(ctx, apiBackends)

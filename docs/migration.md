@@ -52,7 +52,7 @@ Do not delete the local source stores as part of the first migration. Storage cl
 
 ## Current implementation boundary
 
-The self-contained SQLite, local artefact, database polling, and embedded scheduler path is the supported default. PostgreSQL and external scheduling remain configuration targets. S3 and the JetStream notification bridge are available as controlled extensions. The artifact helper is intentionally limited to local-to-S3 transfer and read-back verification. It doesn't migrate database metadata, delete local files, reconcile objects missing from the local source, or perform cutover.
+The self-contained SQLite, local artefact, database polling, and embedded scheduler path is the supported default. PostgreSQL is now an opt-in metadata backend. The API applies the versioned PostgreSQL migrations and verifies the live schema before serving requests. Row-level security, independent external scheduling, and a horizontally independent queue are still separate hardening milestones. S3 and the JetStream notification bridge are available as controlled extensions. The artifact helper is intentionally limited to local-to-S3 transfer and read-back verification. It doesn't migrate database metadata, delete local files, reconcile objects missing from the local source, or perform cutover.
 
 ## Local-to-S3 artifact migration
 
