@@ -5,7 +5,7 @@ CREATE TABLE execution_idempotency (
     idempotency_key TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
     execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
-    response_body JSONB NOT NULL,
+    response_body TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (organisation_id, idempotency_key)
 );

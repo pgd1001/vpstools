@@ -7,7 +7,7 @@ CREATE TABLE execution_result_receipts (
     runner_id TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
     response_code INTEGER NOT NULL DEFAULT 200,
-    response_body JSONB NOT NULL,
+    response_body TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (target_id, lease_id)
 );

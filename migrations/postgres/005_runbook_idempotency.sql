@@ -7,7 +7,7 @@ CREATE TABLE runbook_idempotency (
     resource_type TEXT NOT NULL,
     resource_id TEXT NOT NULL,
     response_status INTEGER NOT NULL,
-    response_body JSONB NOT NULL,
+    response_body TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (organisation_id, idempotency_key)
 );

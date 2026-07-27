@@ -101,9 +101,23 @@ CREATE TABLE runner_scopes (
 CREATE TABLE runner_credentials (
     id              TEXT PRIMARY KEY,
     organisation_id TEXT NOT NULL REFERENCES organisations(id),
+    runner_id       TEXT REFERENCES runners(id) ON DELETE CASCADE,
     token_hash      TEXT NOT NULL UNIQUE,
     expires_at      TIMESTAMPTZ NOT NULL,
     revoked_at      TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE api_tokens (
+    id              TEXT PRIMARY KEY,
+    organisation_id TEXT NOT NULL REFERENCES organisations(id),
+    user_id         TEXT NOT NULL REFERENCES users(id),
+    name            TEXT NOT NULL,
+    token_prefix    TEXT NOT NULL,
+    token_hash      TEXT NOT NULL UNIQUE,
+    expires_at      TIMESTAMPTZ NOT NULL,
+    revoked_at      TIMESTAMPTZ,
+    last_used_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -119,6 +133,7 @@ CREATE TABLE executions (
     risk_level      TEXT NOT NULL DEFAULT 'medium',
     environment     TEXT,
     reason          TEXT,
+    command         TEXT NOT NULL DEFAULT '',
     command_preview TEXT,
     command_hash    TEXT,
     timeout_seconds INTEGER NOT NULL DEFAULT 300,
@@ -270,6 +285,9 @@ CREATE INDEX idx_runners_org_status ON runners(organisation_id, status);
 CREATE INDEX idx_runners_last_seen ON runners(organisation_id, last_seen_at DESC);
 CREATE INDEX idx_runner_scopes_runner ON runner_scopes(runner_id);
 CREATE INDEX idx_runner_credentials_hash ON runner_credentials(token_hash);
+CREATE INDEX idx_runner_credentials_runner ON runner_credentials(runner_id);
+CREATE INDEX idx_api_tokens_hash ON api_tokens(token_hash);
+CREATE INDEX idx_api_tokens_org_user ON api_tokens(organisation_id, user_id);
 CREATE INDEX idx_executions_org_status ON executions(organisation_id, status);
 CREATE INDEX idx_executions_actor ON executions(actor_user_id, requested_at DESC);
 CREATE INDEX idx_execution_targets_exec ON execution_targets(execution_id);
