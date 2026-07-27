@@ -700,8 +700,15 @@ func authenticateRunnerCredential(db *sql.DB, r *http.Request) (string, string, 
 		return "", "", fmt.Errorf("invalid or expired runner registration credential")
 	}
 	if runnerID != "" {
+		statusRequest := r
+		statusContext, cleanup, bindErr := bindTenantConnection(r.Context(), db, orgID)
+		if bindErr != nil {
+			return "", "", bindErr
+		}
+		defer cleanup()
+		statusRequest = r.WithContext(statusContext)
 		var status string
-		if err := apiQueryRow(r.Context(), db, "SELECT status FROM runners WHERE id = ? AND organisation_id = ?", runnerID, orgID).Scan(&status); err != nil || status == "revoked" {
+		if err := apiQueryRow(statusRequest.Context(), db, "SELECT status FROM runners WHERE id = ? AND organisation_id = ?", runnerID, orgID).Scan(&status); err != nil || status == "revoked" {
 			return "", "", fmt.Errorf("runner credential is no longer valid")
 		}
 	}
@@ -2049,6 +2056,13 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
+	ctx, cleanup, err := bindTenantConnection(ctx, db, runnerOrg)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tenant database context unavailable"})
+		return
+	}
+	defer cleanup()
+	r = r.WithContext(ctx)
 	runnerID := r.URL.Query().Get("runner_id")
 	if runnerID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "runner_id is required"})
@@ -2127,6 +2141,13 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
+	ctx, cleanup, err := bindTenantConnection(ctx, db, orgID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tenant database context unavailable"})
+		return
+	}
+	defer cleanup()
+	r = r.WithContext(ctx)
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var req struct {
 		ExecutionID string `json:"execution_id"`
@@ -2328,7 +2349,6 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 }
 
 func handleRenewLease(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
-	runtime := metadataRuntime()
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	var req struct {
 		ExecutionID string `json:"execution_id"`
@@ -2340,12 +2360,20 @@ func handleRenewLease(ctx context.Context, db *sql.DB, w http.ResponseWriter, r 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid lease renewal body"})
 		return
 	}
-	if _, err := authenticateRunnerForID(db, r, req.RunnerID); err != nil {
+	orgID, err := authenticateRunnerForID(db, r, req.RunnerID)
+	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
+	ctx, cleanup, err := bindTenantConnection(ctx, db, orgID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tenant database context unavailable"})
+		return
+	}
+	defer cleanup()
+	r = r.WithContext(ctx)
 	leaseExpires := time.Now().UTC().Add(5 * time.Minute)
-	claimed, err := runtime.CheckedExecContext(ctx, db, `UPDATE execution_targets
+	claimed, err := apiCheckedExec(ctx, db, `UPDATE execution_targets
 		SET lease_expires_at = ?
 		WHERE id = ? AND execution_id = ? AND runner_id = ? AND lease_id = ? AND status = 'running'`,
 		leaseExpires, req.TargetID, req.ExecutionID, req.RunnerID, req.LeaseID)

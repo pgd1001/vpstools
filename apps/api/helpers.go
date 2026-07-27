@@ -201,7 +201,7 @@ func backfillAuditHashChain(ctx context.Context, db *sql.DB) error {
 }
 
 func verifyAuditHashChain(ctx context.Context, db *sql.DB, orgID string) (int, error) {
-	rows, err := metadataRuntime().QueryContext(ctx, db, `SELECT id, organisation_id, COALESCE(actor_user_id,''), actor_type, action, COALESCE(target_type,''), COALESCE(target_id,''), result, metadata, occurred_at, COALESCE(previous_hash,''), COALESCE(event_hash,'') FROM audit_events WHERE organisation_id = ? ORDER BY occurred_at, id`, orgID)
+	rows, err := apiQuery(ctx, db, `SELECT id, organisation_id, COALESCE(actor_user_id,''), actor_type, action, COALESCE(target_type,''), COALESCE(target_id,''), result, metadata, occurred_at, COALESCE(previous_hash,''), COALESCE(event_hash,'') FROM audit_events WHERE organisation_id = ? ORDER BY occurred_at, id`, orgID)
 	if err != nil {
 		return 0, err
 	}

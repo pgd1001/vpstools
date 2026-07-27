@@ -80,6 +80,15 @@ func apiExec(ctx context.Context, execer dbruntime.Execer, query string, args ..
 	return apiRuntime().ExecContext(ctx, execer, query, args...)
 }
 
+func apiCheckedExec(ctx context.Context, execer dbruntime.Execer, query string, args ...any) (bool, error) {
+	if conn := tenantConnection(ctx); conn != nil {
+		if _, isDB := execer.(*sql.DB); isDB {
+			execer = conn
+		}
+	}
+	return apiRuntime().CheckedExecContext(ctx, execer, query, args...)
+}
+
 func apiQuery(ctx context.Context, queryer dbruntime.Queryer, query string, args ...any) (*sql.Rows, error) {
 	if conn := tenantConnection(ctx); conn != nil {
 		if _, isDB := queryer.(*sql.DB); isDB {

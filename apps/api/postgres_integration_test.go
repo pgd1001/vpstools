@@ -73,6 +73,17 @@ func TestPostgresRuntimeIntegration(t *testing.T) {
 	if currentOrganisation != "org_demo" {
 		t.Fatalf("current organisation = %q, want org_demo", currentOrganisation)
 	}
+	tenantCtx, cleanup, err := bindTenantConnection(ctx, db, "org_demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := apiQueryRow(tenantCtx, db, `SELECT vps_current_organisation()`).Scan(&currentOrganisation); err != nil {
+		t.Fatal(err)
+	}
+	if currentOrganisation != "org_demo" {
+		t.Fatalf("bound tenant organisation = %q, want org_demo", currentOrganisation)
+	}
 }
 
 func postgresIntegrationMigrationPath(t *testing.T) string {
