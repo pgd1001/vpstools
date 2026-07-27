@@ -101,7 +101,7 @@ jobs:
           install-only: true
       - name: Build Windows release archive
         shell: pwsh
-        run: goreleaser release --snapshot --clean
+        run: goreleaser release --snapshot --clean --skip=sbom
       - name: Validate and run packaged Windows smoke
         shell: pwsh
         run: |
