@@ -18,7 +18,8 @@ Read-only tools cover health, identity, servers, runbooks, preflight, approvals,
 The server currently provides:
 
 ```text
-vps_health                 vps_whoami              vps_list_servers
+vps_health                 vps_doctor              vps_whoami
+vps_list_servers
 vps_list_runbooks          vps_get_runbook         vps_preflight_runbook
 vps_execute_runbook        vps_list_approvals      vps_get_approval
 vps_approve_request        vps_deny_request        vps_list_executions

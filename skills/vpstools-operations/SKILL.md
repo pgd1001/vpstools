@@ -9,7 +9,7 @@ Use the VPS Tools MCP server as the control plane for infrastructure work. Treat
 
 ## Operating sequence
 
-1. Call `vps_whoami` and `vps_health` before acting.
+1. Call `vps_doctor` before acting. It reports API health, service readiness, and the authenticated identity.
 2. Discover the relevant runbook with `vps_list_runbooks` and `vps_get_runbook`.
 3. Inspect target scope with `vps_list_servers`. Do not guess server IDs or environments.
 4. Call `vps_preflight_runbook`. It is read-only and never queues work.

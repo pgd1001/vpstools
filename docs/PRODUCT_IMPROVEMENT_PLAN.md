@@ -60,7 +60,7 @@ The first implementation slice is complete and verified. These items are now imp
 - Interval-based schedules are available through the API and embedded scheduler in the self-contained tier. Scheduled executions use an explicit automation identity, target snapshots, audit events, and the normal runbook policy checks.
 - High and critical risk runbooks are blocked from unattended scheduling until an approval workflow is connected.
 - A vendor-neutral AI provider interface now carries redacted prompts, evidence, responses, and usage metadata.
-- A local stdio MCP server exposes 22 read and controlled-write VPS Tools operations, including audit-chain verification, execution cancellation, and organisation-wide automation pause and resume. Writes are disabled by default, require an explicit confirmation field, and never expose arbitrary shell execution.
+- A local stdio MCP server exposes 23 read and controlled-write VPS Tools operations, including the read-only production doctor, audit-chain verification, execution cancellation, and organisation-wide automation pause and resume. Writes are disabled by default, require an explicit confirmation field, and never expose arbitrary shell execution.
 - Expiring API bearer tokens are now supported for CLI, SDK, and automation clients. Tokens are hashed at rest, scoped to an active organisation membership, revocable, and shown only once.
 - Self-contained backups now include checksums and support verification and restore modes. The web build is now explicitly covered by CI, alongside MCP checks and release snapshot validation.
 - Runner registration credentials are short-lived, runner-bound, revocable, and rotatable through the API, CLI, SDK, and web console.

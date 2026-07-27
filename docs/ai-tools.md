@@ -87,7 +87,7 @@ The confirmation flag is an explicit acknowledgement by the calling agent. It do
 
 An operations agent should follow this sequence for any potentially disruptive task:
 
-1. Call `vps_health` and `vps_whoami`.
+1. Call `vps_doctor` to check health, readiness, and the authenticated identity in one read-only operation.
 2. Inspect the target with `vps_list_servers`.
 3. Find the published runbook with `vps_list_runbooks` and `vps_get_runbook`.
 4. Run `vps_preflight_runbook` with the target and parameters.

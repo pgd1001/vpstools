@@ -59,6 +59,12 @@ function requireWriteConfirmation(confirm: boolean) {
 
 server.registerTool('vps_health', {description: 'Read the VPS Tools API health and active deployment tier.', inputSchema: {}}, async () => safe(() => client.get('/api/v1/health')));
 
+server.registerTool('vps_doctor', {description: 'Run a read-only production preflight covering API health, service readiness, and the authenticated identity.', inputSchema: {}}, async () => safe(async () => ({
+  health: await client.get('/api/v1/health'),
+  readiness: await client.get('/api/v1/ready'),
+  identity: await client.get('/api/v1/whoami'),
+})));
+
 server.registerTool('vps_whoami', {description: 'Read the current VPS Tools identity, organisation, and role.', inputSchema: {}}, async () => safe(() => client.get('/api/v1/whoami')));
 
 server.registerTool('vps_list_servers', {description: 'List servers visible to the current actor. Filter by environment or tag when useful.', inputSchema: {environment: z.string().optional(), tag_key: z.string().optional(), tag_value: z.string().optional()}}, async ({environment, tag_key, tag_value}) => {
