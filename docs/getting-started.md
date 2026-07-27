@@ -34,7 +34,7 @@ SCHEDULER=embedded
 EVENT_BUS=disabled
 ```
 
-The local artefact store creates `data/artifacts/.key` with service-account permissions. Protect this key with the database backup. Without it, encrypted artefacts cannot be restored.
+The local artefact store creates `data/artifacts/.key` with service-account permissions. Production backups wrap this generated key in `artifacts/.key.enc` using a separate `BACKUP_ENCRYPTION_KEY`. Keep that wrapping key outside the backup destination. Without the wrapping key, encrypted artefacts cannot be restored.
 
 Verify the service:
 

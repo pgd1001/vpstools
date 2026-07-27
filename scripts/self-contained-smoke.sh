@@ -38,6 +38,7 @@ export VPS_DEV_AUTH=true
 export VPS_API_URL="http://127.0.0.1:$port"
 export VPS_USER=user_senior
 export VPS_API_TOKEN=
+export BACKUP_ENCRYPTION_KEY=YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI=
 
 "$api_bin" >"$root/api.out" 2>"$root/api.err" &
 api_pid=$!

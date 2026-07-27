@@ -1,6 +1,6 @@
 # Backup and recovery runbook
 
-The self-contained deployment backs up the SQLite database, the local encrypted artefact directory, and a checksum manifest. The artefact encryption key is either `artifacts/.key` or the externally supplied `ARTIFACT_ENCRYPTION_KEY`. Losing that key makes encrypted output unrecoverable, so it must be stored separately when an external key is configured.
+The self-contained deployment backs up the SQLite database, the local encrypted artefact directory, and a checksum manifest. If the API generated `artifacts/.key`, the backup stores an authenticated encrypted envelope at `artifacts/.key.enc`, wrapped with the separately protected `BACKUP_ENCRYPTION_KEY`. The plaintext artefact key is never copied into a backup. If `ARTIFACT_ENCRYPTION_KEY` is configured, keep that original key in the external secret store and set `BACKUP_ENCRYPTION_KEY` only when a generated local key needs wrapping.
 
 ## Create and verify a backup
 
@@ -12,6 +12,8 @@ The self-contained deployment backs up the SQLite database, the local encrypted 
 ```
 
 The systemd timer runs the same sequence daily. It retains the configured local window and reports failures through systemd and the optional HTTPS webhook.
+
+Set `BACKUP_ENCRYPTION_KEY` in the protected backup service environment before creating or restoring a backup that contains a generated local artefact key. It must be a separate base64-encoded 32-byte key. A backup with `artifacts/.key.enc` cannot be restored without it.
 
 ## Restore rehearsal
 
@@ -45,7 +47,7 @@ Do not use the same disk, credentials, or failure domain for the off-host copy. 
 2. Stop API and runner services if the live store may be changing.
 3. Preserve the current database and artefact directory before replacing them.
 4. Verify the selected backup manifest and checksums.
-5. Restore the database, artefacts, and encryption key together.
+5. Provide `BACKUP_ENCRYPTION_KEY` when the manifest contains `artifacts/.key.enc`, then restore the database, artefacts, and encryption key together.
 6. Start the API, check readiness, then start the runner.
 7. Reconcile execution, artefact, and audit state before resuming automation.
 8. Record the restore result, elapsed time, and any data loss in the incident record.

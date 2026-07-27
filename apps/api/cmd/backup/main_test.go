@@ -2,14 +2,18 @@ package main
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
 )
 
 func TestBackupVerifyAndRestore(t *testing.T) {
+	artifactKey := []byte(strings.Repeat("k", 32))
+	t.Setenv("BACKUP_ENCRYPTION_KEY", base64.RawStdEncoding.EncodeToString([]byte(strings.Repeat("b", 32))))
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "source.db")
 	db, err := sql.Open("sqlite", dbPath)
@@ -26,7 +30,7 @@ func TestBackupVerifyAndRestore(t *testing.T) {
 	if err := os.MkdirAll(artifacts, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(artifacts, ".key"), []byte("key-data"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(artifacts, ".key"), artifactKey, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(artifacts, "output.bin"), []byte("binary-data"), 0600); err != nil {
@@ -35,6 +39,12 @@ func TestBackupVerifyAndRestore(t *testing.T) {
 	backup := filepath.Join(root, "backup")
 	if err := createBackup(dbPath, artifacts, backup); err != nil {
 		t.Fatal(err)
+	}
+	if exists(filepath.Join(backup, "artifacts", ".key")) {
+		t.Fatal("backup contains the plaintext artifact key")
+	}
+	if !exists(filepath.Join(backup, "artifacts", ".key.enc")) {
+		t.Fatal("backup does not contain the encrypted artifact key")
 	}
 	if err := verifyBackup(backup); err != nil {
 		t.Fatal(err)
@@ -49,13 +59,17 @@ func TestBackupVerifyAndRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(filepath.Join(backup, "artifacts", ".key"), []byte("changed"), 0600); err != nil {
+	keyCiphertext, err := os.ReadFile(filepath.Join(backup, "artifacts", ".key.enc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "artifacts", ".key.enc"), append(keyCiphertext, []byte("tamper")...), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := verifyBackup(backup); err == nil {
 		t.Fatal("verify succeeded after artifact tampering")
 	}
-	if err := os.WriteFile(filepath.Join(backup, "artifacts", ".key"), []byte("key-data"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(backup, "artifacts", ".key.enc"), keyCiphertext, 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -78,8 +92,34 @@ func TestBackupVerifyAndRestore(t *testing.T) {
 	if err := restored.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := os.ReadFile(filepath.Join(restoredArtifacts, ".key")); err != nil || string(got) != "key-data" {
+	if got, err := os.ReadFile(filepath.Join(restoredArtifacts, ".key")); err != nil || string(got) != string(artifactKey) {
 		t.Fatalf("restored artifact = %q, err=%v", got, err)
+	}
+}
+
+func TestBackupRequiresSeparateKeyForGeneratedArtifactKey(t *testing.T) {
+	t.Setenv("BACKUP_ENCRYPTION_KEY", "")
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "source.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TABLE example (value TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := filepath.Join(root, "artifacts")
+	if err := os.MkdirAll(artifacts, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifacts, ".key"), []byte(strings.Repeat("k", 32)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := createBackup(dbPath, artifacts, filepath.Join(root, "backup")); err == nil || !strings.Contains(err.Error(), "BACKUP_ENCRYPTION_KEY") {
+		t.Fatalf("expected separate backup key error, got %v", err)
 	}
 }
 

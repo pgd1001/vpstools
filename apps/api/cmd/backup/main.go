@@ -1,8 +1,12 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,6 +24,8 @@ import (
 )
 
 const manifestVersion = 1
+
+const encryptedArtifactKeyPath = "artifacts/.key.enc"
 
 var version = "dev"
 
@@ -112,12 +118,43 @@ func createBackup(dbPath, artifactsDir, outputDir string) error {
 	}
 	files := append([]file{databaseFile}, artifactFiles...)
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	keyRecovery := "Restore artifacts/.key with the artifact directory, or provide the original ARTIFACT_ENCRYPTION_KEY from the configured secret manager before starting the API."
+	keyRecovery := "For generated artifact keys, provide BACKUP_ENCRYPTION_KEY from a separate protected secret store to restore artifacts/.key. For externally supplied artifact keys, provide the original ARTIFACT_ENCRYPTION_KEY."
 	encryptionKey := ""
-	if _, err := os.Stat(filepath.Join(artifactsDir, ".key")); err == nil {
-		encryptionKey = "artifacts/.key"
+	key, keyErr := os.ReadFile(filepath.Join(artifactsDir, ".key"))
+	if keyErr == nil {
+		if strings.TrimSpace(os.Getenv("ARTIFACT_ENCRYPTION_KEY")) != "" {
+			key = nil
+		} else {
+			if len(key) != 32 {
+				return fmt.Errorf("artifact key has invalid length: got %d bytes, want 32", len(key))
+			}
+			wrappingKey, err := configuredBackupKey()
+			if err != nil {
+				return err
+			}
+			encrypted, err := encryptBackupKey(key, wrappingKey)
+			if err != nil {
+				return fmt.Errorf("encrypt artifact key for backup: %w", err)
+			}
+			keyPath := filepath.Join(tmp, filepath.FromSlash(encryptedArtifactKeyPath))
+			if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(keyPath, encrypted, 0600); err != nil {
+				return fmt.Errorf("write encrypted artifact key: %w", err)
+			}
+			keyFile, err := describeFile(keyPath, encryptedArtifactKeyPath)
+			if err != nil {
+				return err
+			}
+			files = append(files, keyFile)
+			sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+			encryptionKey = encryptedArtifactKeyPath
+		}
+	} else if !errors.Is(keyErr, os.ErrNotExist) {
+		return fmt.Errorf("read artifact key: %w", keyErr)
 	}
-	m := manifest{Version: manifestVersion, CreatedAt: time.Now().UTC().Format(time.RFC3339), Database: "svrtools.db", ArtifactsDir: "artifacts", ArtifactFiles: len(artifactFiles), EncryptionKey: encryptionKey, KeyRecovery: keyRecovery, Files: files}
+	m := manifest{Version: manifestVersion, CreatedAt: time.Now().UTC().Format(time.RFC3339), Database: "svrtools.db", ArtifactsDir: "artifacts", ArtifactFiles: len(files) - 1, EncryptionKey: encryptionKey, KeyRecovery: keyRecovery, Files: files}
 	contents, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
@@ -133,7 +170,7 @@ func createBackup(dbPath, artifactsDir, outputDir string) error {
 	if err := os.Rename(tmp, outputDir); err != nil {
 		return fmt.Errorf("publish backup: %w", err)
 	}
-	fmt.Printf("backup created at %s (%d artifact files)\n", outputDir, len(artifactFiles))
+	fmt.Printf("backup created at %s (%d artifact files)\n", outputDir, len(files)-1)
 	return nil
 }
 
@@ -219,9 +256,29 @@ func restoreBackup(dir, dbTarget, artifactsTarget string, force bool) error {
 	defer os.RemoveAll(tmpArtifacts)
 	for _, f := range m.Files {
 		if strings.HasPrefix(f.Path, m.ArtifactsDir+"/") {
+			if f.Path == m.EncryptionKey && m.EncryptionKey == encryptedArtifactKeyPath {
+				continue
+			}
 			if err := copyFile(filepath.Join(dir, filepath.FromSlash(f.Path)), filepath.Join(tmpArtifacts, filepath.FromSlash(strings.TrimPrefix(f.Path, m.ArtifactsDir+"/")))); err != nil {
 				return err
 			}
+		}
+	}
+	if m.EncryptionKey == encryptedArtifactKeyPath {
+		wrappingKey, err := configuredBackupKey()
+		if err != nil {
+			return err
+		}
+		encoded, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(encryptedArtifactKeyPath)))
+		if err != nil {
+			return fmt.Errorf("read encrypted artifact key: %w", err)
+		}
+		key, err := decryptBackupKey(encoded, wrappingKey)
+		if err != nil {
+			return fmt.Errorf("decrypt artifact key: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpArtifacts, ".key"), key, 0600); err != nil {
+			return fmt.Errorf("restore artifact key: %w", err)
 		}
 	}
 	if force {
@@ -291,7 +348,7 @@ func copyTree(source, destination string) ([]file, error) {
 		if info.IsDir() {
 			return os.MkdirAll(filepath.Join(destination, mustRel(source, path)), 0700)
 		}
-		if info.Name() != ".key" && filepath.Ext(info.Name()) != ".bin" {
+		if info.Name() == ".key" || filepath.Ext(info.Name()) != ".bin" {
 			return nil
 		}
 		rel := mustRel(source, path)
@@ -307,6 +364,60 @@ func copyTree(source, destination string) ([]file, error) {
 		return nil
 	})
 	return files, err
+}
+
+func configuredBackupKey() ([]byte, error) {
+	value := strings.TrimSpace(os.Getenv("BACKUP_ENCRYPTION_KEY"))
+	if value == "" {
+		return nil, errors.New("BACKUP_ENCRYPTION_KEY is required when artifacts/.key is present; keep it in a separate protected secret store")
+	}
+	decoded, err := base64.RawStdEncoding.DecodeString(value)
+	if err != nil {
+		decoded, err = base64.StdEncoding.DecodeString(value)
+	}
+	if err != nil || len(decoded) != 32 {
+		return nil, errors.New("BACKUP_ENCRYPTION_KEY must be a base64-encoded 32-byte key")
+	}
+	return decoded, nil
+}
+
+func encryptBackupKey(key, wrappingKey []byte) ([]byte, error) {
+	block, err := aes.NewCipher(wrappingKey)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	return append(nonce, aead.Seal(nil, nonce, key, []byte(encryptedArtifactKeyPath))...), nil
+}
+
+func decryptBackupKey(encoded, wrappingKey []byte) ([]byte, error) {
+	block, err := aes.NewCipher(wrappingKey)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) < aead.NonceSize() {
+		return nil, errors.New("encrypted artifact key is truncated")
+	}
+	nonce, ciphertext := encoded[:aead.NonceSize()], encoded[aead.NonceSize():]
+	key, err := aead.Open(nil, nonce, ciphertext, []byte(encryptedArtifactKeyPath))
+	if err != nil {
+		return nil, errors.New("backup encryption key does not match")
+	}
+	if len(key) != 32 {
+		return nil, errors.New("decrypted artifact key has invalid length")
+	}
+	return key, nil
 }
 
 func describeFile(path, manifestPath string) (file, error) {

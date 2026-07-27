@@ -18,7 +18,7 @@ $api = $null
 $runner = $null
 $restoredApi = $null
 $old = @{}
-foreach ($name in @('DATABASE_URL','VPS_ARTIFACTS_DIR','ARTIFACTS_DIR','API_PORT','VPS_ENV','VPS_DEV_AUTH','VPS_API_URL','VPS_USER','VPS_API_TOKEN','API_URL','SIMULATE','VPS_RUNNER_TOKEN','RUNNER_NAME','RUNNER_HEALTH_ADDR','VPS_MCP_SMOKE_LIVE')) {
+foreach ($name in @('DATABASE_URL','VPS_ARTIFACTS_DIR','ARTIFACTS_DIR','BACKUP_ENCRYPTION_KEY','API_PORT','VPS_ENV','VPS_DEV_AUTH','VPS_API_URL','VPS_USER','VPS_API_TOKEN','API_URL','SIMULATE','VPS_RUNNER_TOKEN','RUNNER_NAME','RUNNER_HEALTH_ADDR','VPS_MCP_SMOKE_LIVE')) {
   $old[$name] = [Environment]::GetEnvironmentVariable($name)
 }
 
@@ -26,6 +26,7 @@ try {
   $env:DATABASE_URL = Join-Path $root 'svrtools.db'
   $env:VPS_ARTIFACTS_DIR = Join-Path $root 'artifacts'
   $env:ARTIFACTS_DIR = $env:VPS_ARTIFACTS_DIR
+  $env:BACKUP_ENCRYPTION_KEY = 'YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI='
   $env:API_PORT = [string]$Port
   $env:VPS_ENV = 'development'
   $env:VPS_DEV_AUTH = 'true'
