@@ -36,6 +36,7 @@ install -m 0755 "$script_dir/healthcheck.sh" /usr/local/libexec/vps-tools/health
 install -m 0755 "$script_dir/backup-systemd.sh" /usr/local/libexec/vps-tools/backup-systemd.sh
 install -m 0755 "$script_dir/backup-alert.sh" /usr/local/libexec/vps-tools/backup-alert.sh
 install -m 0755 "$script_dir/check-backup-freshness.sh" /usr/local/libexec/vps-tools/check-backup-freshness.sh
+install -m 0755 "$script_dir/production-acceptance.sh" /usr/local/libexec/vps-tools/production-acceptance.sh
 for unit in "$project_dir"/deploy/systemd/*.service "$project_dir"/deploy/systemd/*.timer; do install -m 0644 "$unit" "/etc/systemd/system/$(basename "$unit")"; done
 for env in api runner backup; do
     if [ ! -e "/etc/vps-tools/$env.env" ]; then install -m 0600 "$project_dir/deploy/systemd/$env.env.example" "/etc/vps-tools/$env.env"; fi
