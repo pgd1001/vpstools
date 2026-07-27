@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -365,9 +366,9 @@ func readManifest(dir string) (manifest, error) {
 	return m, nil
 }
 func validateRelativePath(p string) error {
-	local := filepath.FromSlash(p)
-	clean := filepath.Clean(local)
-	if p == "" || strings.HasPrefix(p, "/") || filepath.IsAbs(local) || clean != local || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	normalized := strings.ReplaceAll(p, "\\\\", "/")
+	clean := path.Clean(normalized)
+	if p == "" || strings.HasPrefix(normalized, "/") || filepath.IsAbs(filepath.FromSlash(normalized)) || clean != normalized || clean == ".." || strings.HasPrefix(clean, "../") || (len(clean) >= 2 && clean[1] == ':') {
 		return fmt.Errorf("unsafe manifest path %q", p)
 	}
 	return nil

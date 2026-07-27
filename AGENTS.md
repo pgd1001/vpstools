@@ -8,7 +8,7 @@
 
 **Post-Phase-7 additions:** 24 maintenance runbook templates (diagnostics, maintenance, security, recovery) — 41 runbooks total. Runbook search via TUI (`/` key filter) and API (`?search=` query param).
 
-**Go module:** `github.com/pgd1001/svrtools` (Go 1.26.3)  
+**Go module:** `github.com/pgd1001/svrtools` (Go 1.26.5)
 **Build output:** `bin/vps.exe`, `bin/api.exe`, `bin/runner.exe`
 
 The three planning files remain authoritative for future phases:
