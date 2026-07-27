@@ -37,6 +37,9 @@ func main() {
 	}
 	defer db.Close()
 	ctx := context.Background()
+	if err := db.PingContext(ctx); err != nil {
+		fail(fmt.Errorf("unable to verify SQLite connection: %w", err))
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		fail(err)

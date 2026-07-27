@@ -10,11 +10,11 @@ import (
 	"testing"
 )
 
-// TestSQLiteRuntimeAndPostgresMigrationsAgree is deliberately text based. It
-// validates the contract without requiring PostgreSQL, Docker, or a network.
-// The SQLite schema remains owned by apps/api, so this test reads that source
-// and compares the fields that have historically drifted between runtimes.
-func TestSQLiteRuntimeAndPostgresMigrationsAgree(t *testing.T) {
+// TestSQLiteAndPostgresStorageContract is deliberately text based. It checks
+// the shared storage contract without requiring PostgreSQL, Docker, or a
+// network. It does not claim that the API handlers support PostgreSQL. The
+// startup guard remains the authority for that runtime decision.
+func TestSQLiteAndPostgresStorageContract(t *testing.T) {
 	_, here, _, _ := runtime.Caller(0)
 	root := filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))
 	runtimeSQL := readTestFile(t, filepath.Join(root, "apps", "api", "migrate.go"))
@@ -26,12 +26,12 @@ func TestSQLiteRuntimeAndPostgresMigrationsAgree(t *testing.T) {
 	sort.Strings(paths)
 	var postgresSQL strings.Builder
 	for _, path := range paths {
-		postgresSQL.Write(readTestFile(t, path))
+		postgresSQL.Write(extractGooseUp(readTestFile(t, path)))
 		postgresSQL.WriteByte('\n')
 	}
 
-	// These are the current runtime fields most likely to be missed when a
-	// migration is added after the original PostgreSQL baseline.
+	// These are fields deliberately shared by the SQLite runtime and the
+	// PostgreSQL schema. This is a storage check, not a PostgreSQL support list.
 	contract := map[string][]string{
 		"runner_credentials":        {"runner_id", "token_hash", "expires_at", "revoked_at"},
 		"api_tokens":                {"user_id", "token_prefix", "token_hash", "expires_at", "revoked_at", "last_used_at"},
@@ -74,6 +74,22 @@ func hasColumn(schema []byte, table, column string) bool {
 		}
 	}
 	// Upgrade migrations may add a field without repeating the table body.
-	alter := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+` + tableExpr + `.*?ADD\s+COLUMN(?:\s+IF\s+NOT\s+EXISTS)?\s+` + columnExpr)
-	return alter.Match(schema)
+	alter := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+` + tableExpr + `\s+ADD\s+COLUMN(?:\s+IF\s+NOT\s+EXISTS)?\s+` + columnExpr + `[^;]*;`)
+	if alter.Match(schema) {
+		return true
+	}
+	// PostgreSQL permits one ALTER TABLE statement to add several columns.
+	// In that form the requested column may occur after the first ADD COLUMN.
+	batchedAlter := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+` + tableExpr + `[^;]*\bADD\s+COLUMN[^;]*\b` + columnExpr + `\b[^;]*;`)
+	return batchedAlter.Match(schema)
+}
+
+func extractGooseUp(schema []byte) []byte {
+	var up strings.Builder
+	for _, section := range strings.Split(string(schema), "-- +goose ") {
+		if strings.HasPrefix(section, "Up") {
+			up.WriteString(strings.TrimPrefix(section, "Up"))
+		}
+	}
+	return []byte(up.String())
 }

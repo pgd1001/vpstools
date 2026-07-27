@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	dbruntime "github.com/pgd1001/svrtools/packages/db"
 )
 
 // apiMetrics deliberately keeps a small fixed set of counters. Metrics must
@@ -49,7 +51,7 @@ func metricsHandlerWithDB(db *sql.DB, artifactDirs ...string) http.HandlerFunc {
 			pending := queryMetric(ctx, db, "SELECT COUNT(*) FROM execution_targets WHERE status = 'pending'")
 			leased := queryMetric(ctx, db, "SELECT COUNT(*) FROM execution_targets WHERE status = 'running' AND lease_id IS NOT NULL")
 			deadLetter := queryMetric(ctx, db, "SELECT COUNT(*) FROM execution_targets WHERE status = 'dead_letter'")
-			activeRunners := queryMetric(ctx, db, "SELECT COUNT(*) FROM runners WHERE status = 'active' AND last_seen_at >= datetime('now','-2 minutes')")
+			activeRunners := queryMetric(ctx, db, "SELECT COUNT(*) FROM runners WHERE status = 'active' AND last_seen_at >= ?", time.Now().UTC().Add(-2*time.Minute).Format("2006-01-02 15:04:05"))
 			enabledSchedules := queryMetric(ctx, db, "SELECT COUNT(*) FROM schedules WHERE enabled = 1")
 			fmt.Fprintf(w, "# HELP svrtools_queue_pending_jobs Jobs waiting for a runner.\n# TYPE svrtools_queue_pending_jobs gauge\nsvrtools_queue_pending_jobs %d\n", pending)
 			fmt.Fprintf(w, "# HELP svrtools_queue_leased_jobs Jobs currently leased by a runner.\n# TYPE svrtools_queue_leased_jobs gauge\nsvrtools_queue_leased_jobs %d\n", leased)
@@ -67,9 +69,25 @@ func metricsHandlerWithDB(db *sql.DB, artifactDirs ...string) http.HandlerFunc {
 	}
 }
 
-func queryMetric(ctx context.Context, db *sql.DB, query string) int64 {
+func apiRuntime() *dbruntime.Runtime { return metadataRuntime() }
+
+func apiExec(ctx context.Context, execer dbruntime.Execer, query string, args ...any) (sql.Result, error) {
+	return apiRuntime().ExecContext(ctx, execer, query, args...)
+}
+
+func apiQuery(ctx context.Context, queryer dbruntime.Queryer, query string, args ...any) (*sql.Rows, error) {
+	return apiRuntime().QueryContext(ctx, queryer, query, args...)
+}
+
+func apiQueryRow(ctx context.Context, queryer dbruntime.QueryRower, query string, args ...any) *sql.Row {
+	return apiRuntime().QueryRowContext(ctx, queryer, query, args...)
+}
+
+func apiCurrentTime() string { return apiRuntime().CurrentTime() }
+
+func queryMetric(ctx context.Context, db *sql.DB, query string, args ...any) int64 {
 	var value int64
-	if err := db.QueryRowContext(ctx, query).Scan(&value); err != nil {
+	if err := apiQueryRow(ctx, db, query, args...).Scan(&value); err != nil {
 		return 0
 	}
 	return value

@@ -29,7 +29,7 @@ type automationControl struct {
 func readAutomationControl(ctx context.Context, db *sql.DB, organisationID string) (automationControl, error) {
 	var control automationControl
 	var paused int
-	err := db.QueryRowContext(ctx, `SELECT paused, COALESCE(paused_at,''), COALESCE(paused_by_user_id,''), COALESCE(reason,'') FROM automation_controls WHERE organisation_id = ?`, organisationID).Scan(&paused, &control.PausedAt, &control.PausedBy, &control.Reason)
+	err := apiQueryRow(ctx, db, `SELECT paused, COALESCE(paused_at,''), COALESCE(paused_by_user_id,''), COALESCE(reason,'') FROM automation_controls WHERE organisation_id = ?`, organisationID).Scan(&paused, &control.PausedAt, &control.PausedBy, &control.Reason)
 	if err == sql.ErrNoRows {
 		return control, nil
 	}
@@ -71,7 +71,7 @@ func handlePauseAutomation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	db := dbFrom(r)
-	_, err := db.ExecContext(r.Context(), `INSERT INTO automation_controls (organisation_id, paused, paused_at, paused_by_user_id, reason, updated_at) VALUES (?,1,datetime('now'),?,?,datetime('now')) ON CONFLICT(organisation_id) DO UPDATE SET paused=1, paused_at=datetime('now'), paused_by_user_id=excluded.paused_by_user_id, reason=excluded.reason, updated_at=datetime('now')`, actor.OrganisationID, actor.UserID, strings.TrimSpace(req.Reason))
+	_, err := apiExec(r.Context(), db, `INSERT INTO automation_controls (organisation_id, paused, paused_at, paused_by_user_id, reason, updated_at) VALUES (?,1,`+apiCurrentTime()+`,?,?,`+apiCurrentTime()+`) ON CONFLICT(organisation_id) DO UPDATE SET paused=1, paused_at=`+apiCurrentTime()+`, paused_by_user_id=excluded.paused_by_user_id, reason=excluded.reason, updated_at=`+apiCurrentTime(), actor.OrganisationID, actor.UserID, strings.TrimSpace(req.Reason))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to pause automation"})
 		return
@@ -87,7 +87,7 @@ func handleResumeAutomation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db := dbFrom(r)
-	_, err := db.ExecContext(r.Context(), `INSERT INTO automation_controls (organisation_id, paused, reason, updated_at) VALUES (?,0,'',datetime('now')) ON CONFLICT(organisation_id) DO UPDATE SET paused=0, reason='', updated_at=datetime('now')`, actor.OrganisationID)
+	_, err := apiExec(r.Context(), db, `INSERT INTO automation_controls (organisation_id, paused, reason, updated_at) VALUES (?,0,'',`+apiCurrentTime()+`) ON CONFLICT(organisation_id) DO UPDATE SET paused=0, reason='', updated_at=`+apiCurrentTime(), actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to resume automation"})
 		return
@@ -98,7 +98,7 @@ func handleResumeAutomation(w http.ResponseWriter, r *http.Request) {
 
 func handleListSchedules(w http.ResponseWriter, r *http.Request) {
 	actor, _ := authz.RequireActor(r.Context())
-	rows, err := dbFrom(r).QueryContext(r.Context(), `SELECT id, name, runbook_name, target, reason, params, interval_seconds, next_run_at, enabled, COALESCE(last_run_at,''), COALESCE(last_error,'') FROM automation_schedules WHERE organisation_id = ? ORDER BY name`, actor.OrganisationID)
+	rows, err := apiQuery(r.Context(), dbFrom(r), `SELECT id, name, runbook_name, target, reason, params, interval_seconds, next_run_at, enabled, COALESCE(last_run_at,''), COALESCE(last_error,'') FROM automation_schedules WHERE organisation_id = ? ORDER BY name`, actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list schedules"})
 		return
@@ -163,7 +163,7 @@ func handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db := dbFrom(r)
-	_, err := db.ExecContext(r.Context(), `INSERT INTO automation_schedules (id, organisation_id, created_by_user_id, name, runbook_name, target, reason, params, interval_seconds, next_run_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, "sch_"+shortID(), actor.OrganisationID, actor.UserID, schedule.Name, schedule.RunbookName, schedule.Target, schedule.Reason, jsonString(schedule.Params), schedule.IntervalSeconds, formatScheduleTime(schedule.NextRunAt))
+	_, err := apiExec(r.Context(), db, `INSERT INTO automation_schedules (id, organisation_id, created_by_user_id, name, runbook_name, target, reason, params, interval_seconds, next_run_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, "sch_"+shortID(), actor.OrganisationID, actor.UserID, schedule.Name, schedule.RunbookName, schedule.Target, schedule.Reason, jsonString(schedule.Params), schedule.IntervalSeconds, formatScheduleTime(schedule.NextRunAt))
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "schedule name already exists or could not be created"})
 		return
@@ -178,7 +178,7 @@ func handleDisableSchedule(w http.ResponseWriter, r *http.Request, scheduleID st
 		writeDenial(w, r, actor, "automation.schedule.disabled", "automation_schedule", scheduleID, authz.Deny("schedule_requires_senior", "Changing schedules requires senior engineer or above."))
 		return
 	}
-	result, err := dbFrom(r).ExecContext(r.Context(), "UPDATE automation_schedules SET enabled = 0, updated_at = datetime('now') WHERE id = ? AND organisation_id = ?", scheduleID, actor.OrganisationID)
+	result, err := apiExec(r.Context(), dbFrom(r), "UPDATE automation_schedules SET enabled = 0, updated_at = "+apiCurrentTime()+" WHERE id = ? AND organisation_id = ?", scheduleID, actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to disable schedule"})
 		return
@@ -208,7 +208,7 @@ func runEmbeddedScheduler(ctx context.Context, db *sql.DB, logger *slog.Logger) 
 }
 
 func runDueSchedulesOnce(ctx context.Context, db *sql.DB) error {
-	orgRows, err := db.QueryContext(ctx, `SELECT DISTINCT organisation_id FROM automation_schedules WHERE enabled = 1 AND next_run_at <= datetime('now')`)
+	orgRows, err := apiQuery(ctx, db, `SELECT DISTINCT organisation_id FROM automation_schedules WHERE enabled = 1 AND next_run_at <= `+apiCurrentTime())
 	if err != nil {
 		return err
 	}
@@ -235,7 +235,7 @@ func runDueSchedulesOnce(ctx context.Context, db *sql.DB) error {
 	if len(pausedOrgs) == 0 {
 		return nil
 	}
-	rows, err := db.QueryContext(ctx, `SELECT id, organisation_id, created_by_user_id, name, runbook_name, target, reason, params, interval_seconds, next_run_at FROM automation_schedules WHERE enabled = 1 AND next_run_at <= datetime('now') ORDER BY next_run_at LIMIT 20`)
+	rows, err := apiQuery(ctx, db, `SELECT id, organisation_id, created_by_user_id, name, runbook_name, target, reason, params, interval_seconds, next_run_at FROM automation_schedules WHERE enabled = 1 AND next_run_at <= `+apiCurrentTime()+` ORDER BY next_run_at LIMIT 20`)
 	if err != nil {
 		return err
 	}
@@ -271,7 +271,7 @@ func runDueSchedulesOnce(ctx context.Context, db *sql.DB) error {
 			continue
 		}
 		next := schedule.NextAfter(time.Now().UTC())
-		claimed, err := db.ExecContext(ctx, `UPDATE automation_schedules SET next_run_at = ?, last_run_at = datetime('now'), last_error = NULL, updated_at = datetime('now') WHERE id = ? AND enabled = 1 AND next_run_at <= datetime('now')`, formatScheduleTime(next), schedule.ID)
+		claimed, err := apiExec(ctx, db, `UPDATE automation_schedules SET next_run_at = ?, last_run_at = `+apiCurrentTime()+`, last_error = NULL, updated_at = `+apiCurrentTime()+` WHERE id = ? AND enabled = 1 AND next_run_at <= `+apiCurrentTime(), formatScheduleTime(next), schedule.ID)
 		if err != nil {
 			return err
 		}
@@ -280,7 +280,7 @@ func runDueSchedulesOnce(ctx context.Context, db *sql.DB) error {
 			continue
 		}
 		if err := executeScheduledRun(ctx, db, schedule); err != nil {
-			_, updateErr := db.ExecContext(ctx, "UPDATE automation_schedules SET last_error = ?, updated_at = datetime('now') WHERE id = ?", err.Error(), schedule.ID)
+			_, updateErr := apiExec(ctx, db, "UPDATE automation_schedules SET last_error = ?, updated_at = "+apiCurrentTime()+" WHERE id = ?", err.Error(), schedule.ID)
 			if updateErr != nil {
 				return updateErr
 			}
@@ -291,7 +291,7 @@ func runDueSchedulesOnce(ctx context.Context, db *sql.DB) error {
 
 func executeScheduledRun(ctx context.Context, db *sql.DB, schedule automation.Schedule) error {
 	var runbookID, risk, definition string
-	if err := db.QueryRowContext(ctx, `SELECT r.id, rv.risk_level, rv.definition_json FROM runbooks r JOIN runbook_versions rv ON rv.id = r.current_version_id WHERE r.organisation_id = ? AND r.name = ? AND r.status = 'published'`, schedule.OrganisationID, schedule.RunbookName).Scan(&runbookID, &risk, &definition); err != nil {
+	if err := apiQueryRow(ctx, db, `SELECT r.id, rv.risk_level, rv.definition_json FROM runbooks r JOIN runbook_versions rv ON rv.id = r.current_version_id WHERE r.organisation_id = ? AND r.name = ? AND r.status = 'published'`, schedule.OrganisationID, schedule.RunbookName).Scan(&runbookID, &risk, &definition); err != nil {
 		return fmt.Errorf("runbook is not published")
 	}
 	if risk == string(runbooks.RiskHigh) || risk == string(runbooks.RiskCritical) {
@@ -330,11 +330,11 @@ func executeScheduledRun(ctx context.Context, db *sql.DB, schedule automation.Sc
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, delegated_by_user_id, execution_type, status, environment, risk_level, reason, command, command_preview, command_hash, timeout_seconds) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, execID, schedule.OrganisationID, automationActorID, "automation", schedule.CreatedByUserID, "runbook", "queued", env, risk, schedule.Reason, command, redact.Stdout(command), hashCmd(command), timeout); err != nil {
+	if _, err = apiExec(ctx, tx, `INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, delegated_by_user_id, execution_type, status, environment, risk_level, reason, command, command_preview, command_hash, timeout_seconds) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, execID, schedule.OrganisationID, automationActorID, "automation", schedule.CreatedByUserID, "runbook", "queued", env, risk, schedule.Reason, command, redact.Stdout(command), hashCmd(command), timeout); err != nil {
 		return err
 	}
 	for i, serverID := range targetIDs {
-		if _, err = tx.ExecContext(ctx, `INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot) VALUES (?,?,?,?,'pending',?)`, "ext_"+shortID(), schedule.OrganisationID, execID, serverID, jsonString(snapshots[i])); err != nil {
+		if _, err = apiExec(ctx, tx, `INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot) VALUES (?,?,?,?,'pending',?)`, "ext_"+shortID(), schedule.OrganisationID, execID, serverID, jsonString(snapshots[i])); err != nil {
 			return err
 		}
 	}
