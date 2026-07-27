@@ -87,7 +87,7 @@ func NewJetStreamConsumer(ctx context.Context, config Config) (*JetStreamConsume
 		nc.Close()
 		return nil, fmt.Errorf("inspect JetStream durable pull consumer: %w", err)
 	}
-	if info.Config.Durable != config.Durable || info.Config.DeliverSubject != "" || info.Config.AckPolicy != jetstream.AckExplicitPolicy || info.Config.MaxDeliver != config.MaxDeliver || info.Config.FilterSubject != config.Subject {
+	if info.Config.Durable != config.Durable || info.Config.DeliverSubject != "" || info.Config.AckPolicy != jetstream.AckExplicitPolicy || info.Config.AckWait != config.AckWait || info.Config.MaxDeliver != config.MaxDeliver || info.Config.MaxAckPending != 1 || info.Config.FilterSubject != config.Subject {
 		nc.Close()
 		return nil, errors.New("JetStream consumer configuration is not explicit-ack, bounded, or subject-scoped as required")
 	}
