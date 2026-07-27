@@ -41,6 +41,11 @@ type ManifestEntry struct {
 	SHA256      string `json:"sha256"`
 }
 
+type RestoreReport struct {
+	Restored int
+	Skipped  int
+}
+
 func (r MigrationReport) Manifest() Manifest {
 	entries := append([]ManifestEntry(nil), r.Entries...)
 	return Manifest{Version: 1, CreatedAt: time.Now().UTC().Format(time.RFC3339), Entries: entries}
@@ -74,6 +79,38 @@ func VerifyS3Manifest(destination *S3Store, manifest Manifest) error {
 		}
 	}
 	return nil
+}
+
+// RestoreS3Manifest downloads verified plaintext objects into encrypted local
+// storage. Existing local objects with the expected checksum are skipped.
+// Stable IDs are preserved, so database references remain valid during
+// rollback to the self-contained tier.
+func RestoreS3Manifest(source *S3Store, manifest Manifest, destination *LocalStore) (RestoreReport, error) {
+	if source == nil || destination == nil {
+		return RestoreReport{}, errors.New("S3 source and local destination are required")
+	}
+	if err := VerifyS3Manifest(source, manifest); err != nil {
+		return RestoreReport{}, err
+	}
+	var report RestoreReport
+	for _, entry := range manifest.Entries {
+		if data, meta, err := destination.Get(entry.ID); err == nil && meta.SHA256 == entry.SHA256 && meta.Size == entry.Size && len(data) == int(entry.Size) {
+			report.Skipped++
+			continue
+		}
+		data, meta, err := source.Get(entry.ID)
+		if err != nil {
+			return report, fmt.Errorf("read S3 artifact %q for restore: %w", entry.ID, err)
+		}
+		if meta.SHA256 != entry.SHA256 || meta.Size != entry.Size {
+			return report, fmt.Errorf("S3 artifact %q changed during restore", entry.ID)
+		}
+		if _, err := destination.Put(entry.ID, entry.ContentType, data); err != nil {
+			return report, fmt.Errorf("write local artifact %q: %w", entry.ID, err)
+		}
+		report.Restored++
+	}
+	return report, nil
 }
 
 func WriteManifest(path string, manifest Manifest) error {

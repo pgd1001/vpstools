@@ -178,6 +178,21 @@ func TestMigrateLocalToS3IsIdempotentAndRefusesConflicts(t *testing.T) {
 	if err != nil || len(readBack.Entries) != 1 || readBack.Entries[0].SHA256 == "" {
 		t.Fatalf("read manifest=%+v err=%v", readBack, err)
 	}
+	restored, err := NewLocalStore(filepath.Join(t.TempDir(), "restored"), base64.RawStdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoreReport, err := RestoreS3Manifest(remote, manifest, restored)
+	if err != nil || restoreReport.Restored != 1 || restoreReport.Skipped != 0 {
+		t.Fatalf("restore report=%+v err=%v", restoreReport, err)
+	}
+	if data, meta, err := restored.Get("one"); err != nil || string(data) != "local" || meta.SHA256 != manifest.Entries[0].SHA256 {
+		t.Fatalf("restored artifact data=%q meta=%+v err=%v", data, meta, err)
+	}
+	restoreReport, err = RestoreS3Manifest(remote, manifest, restored)
+	if err != nil || restoreReport.Restored != 0 || restoreReport.Skipped != 1 {
+		t.Fatalf("repeat restore report=%+v err=%v", restoreReport, err)
+	}
 }
 
 func mustReadBody(r *http.Request) []byte {
