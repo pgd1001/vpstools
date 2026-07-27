@@ -22,7 +22,6 @@ import (
 	"github.com/pgd1001/svrtools/packages/authz"
 	"github.com/pgd1001/svrtools/packages/config"
 	"github.com/pgd1001/svrtools/packages/redact"
-	_ "modernc.org/sqlite"
 )
 
 var version = "dev"
@@ -63,13 +62,11 @@ func main() {
 		logger.Error("an unsupported extended runtime backend was selected", "artifact_store", apiBackends.ArtifactStore, "job_dispatch", apiBackends.JobDispatch, "scheduler", apiBackends.Scheduler, "event_bus", apiBackends.EventBus)
 		os.Exit(1)
 	}
-	db, err := sql.Open("sqlite", apiBackends.DatabaseURL+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
+	db, err := openMetadataDatabase(ctx, apiBackends)
 	if err != nil {
 		logger.Error("database open failed", "error", err)
 		os.Exit(1)
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
 	defer db.Close()
 	apiDB = db
 	apiArtifacts, err = newArtifactStore(apiBackends)
