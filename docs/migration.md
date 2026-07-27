@@ -62,6 +62,21 @@ Set the S3 settings described in the deployment configuration, then run the help
 go run ./apps/api/cmd/artifact-migrate
 ```
 
+For a cutover record, write the verified object inventory and keep it with the
+backup evidence:
+
+```text
+go run ./apps/api/cmd/artifact-migrate -manifest ./backups/artifacts.json
+go run ./apps/api/cmd/artifact-migrate -verify-manifest ./backups/artifacts.json
+```
+
+The manifest records stable artifact IDs, plaintext sizes, and SHA-256
+checksums. Verification reads every listed object back from S3 and fails on a
+missing object or mismatch. It does not delete unlisted objects. The database
+backup, S3 lifecycle configuration, and the credentials or encryption keys
+remain separate recovery evidence and must be retained together for a real
+cutover.
+
 The helper decrypts each local `.bin` artifact through the local store, uploads the plaintext to S3 where the S3 store applies its configured encryption, and reads the object back. Objects with the same SHA-256 and size are skipped, so a rerun is safe. A different remote checksum stops the migration. Use `-force` only after investigating the conflict. The flag replaces the conflicting object and still requires successful read-back verification.
 
 The command reports copied objects, skipped objects, and source bytes scanned. It never removes local artifacts or remote objects that aren't present locally. Keep the local directory, its encryption key, and a verified backup until the extended deployment has passed recovery testing.

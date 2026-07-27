@@ -160,6 +160,22 @@ func TestMigrateLocalToS3IsIdempotentAndRefusesConflicts(t *testing.T) {
 	if report, err := MigrateLocalToS3(local, remote, MigrationOptions{Force: true}); err != nil || report.Copied != 1 {
 		t.Fatalf("forced migration report=%+v err=%v", report, err)
 	}
+	report, err = MigrateLocalToS3(local, remote, MigrationOptions{})
+	if err != nil || report.Skipped != 1 || len(report.Entries) != 1 {
+		t.Fatalf("manifest migration report=%+v err=%v", report, err)
+	}
+	manifest := report.Manifest()
+	if err := VerifyS3Manifest(remote, manifest); err != nil {
+		t.Fatalf("verify manifest: %v", err)
+	}
+	manifestPath := filepath.Join(t.TempDir(), "artifacts.json")
+	if err := WriteManifest(manifestPath, manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	readBack, err := ReadManifest(manifestPath)
+	if err != nil || len(readBack.Entries) != 1 || readBack.Entries[0].SHA256 == "" {
+		t.Fatalf("read manifest=%+v err=%v", readBack, err)
+	}
 }
 
 func mustReadBody(r *http.Request) []byte {

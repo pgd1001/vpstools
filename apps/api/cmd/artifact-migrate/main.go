@@ -12,6 +12,8 @@ import (
 func main() {
 	artifactsDir := flag.String("artifacts", "", "local artifact directory, defaults to ARTIFACTS_DIR")
 	force := flag.Bool("force", false, "replace S3 objects whose checksum differs from the local source")
+	manifestPath := flag.String("manifest", "", "write a verified destination manifest to this path")
+	verifyManifestPath := flag.String("verify-manifest", "", "verify an existing destination manifest instead of migrating")
 	flag.Parse()
 
 	cfg := config.Load()
@@ -26,9 +28,25 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+	if *verifyManifestPath != "" {
+		manifest, err := artifacts.ReadManifest(*verifyManifestPath)
+		if err != nil {
+			fatal(err)
+		}
+		if err := artifacts.VerifyS3Manifest(remote, manifest); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("artifact manifest verified: %s (%d objects)\n", *verifyManifestPath, len(manifest.Entries))
+		return
+	}
 	report, err := artifacts.MigrateLocalToS3(local, remote, artifacts.MigrationOptions{Force: *force})
 	if err != nil {
 		fatal(err)
+	}
+	if *manifestPath != "" {
+		if err := artifacts.WriteManifest(*manifestPath, report.Manifest()); err != nil {
+			fatal(err)
+		}
 	}
 	fmt.Printf("artifact migration complete: copied=%d skipped=%d bytes=%d\n", report.Copied, report.Skipped, report.ScannedBytes)
 }

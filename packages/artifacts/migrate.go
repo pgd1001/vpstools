@@ -1,10 +1,13 @@
 package artifacts
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // MigrationOptions controls a local-to-S3 artifact migration.
@@ -19,6 +22,102 @@ type MigrationReport struct {
 	ScannedBytes int64
 	Copied       int
 	Skipped      int
+	Entries      []ManifestEntry
+}
+
+// Manifest is a durable inventory of the objects expected in the destination
+// store. It is intentionally independent of database metadata so it can be
+// checked during an expand-and-contract migration and kept with backups.
+type Manifest struct {
+	Version   int             `json:"version"`
+	CreatedAt string          `json:"created_at"`
+	Entries   []ManifestEntry `json:"entries"`
+}
+
+type ManifestEntry struct {
+	ID          string `json:"id"`
+	ContentType string `json:"content_type,omitempty"`
+	Size        int64  `json:"size"`
+	SHA256      string `json:"sha256"`
+}
+
+func (r MigrationReport) Manifest() Manifest {
+	entries := append([]ManifestEntry(nil), r.Entries...)
+	return Manifest{Version: 1, CreatedAt: time.Now().UTC().Format(time.RFC3339), Entries: entries}
+}
+
+// VerifyS3Manifest reads every object listed in manifest and verifies its
+// stable ID, size, and plaintext checksum. It does not delete unlisted
+// objects, making it safe to run before a migration cutover.
+func VerifyS3Manifest(destination *S3Store, manifest Manifest) error {
+	if destination == nil {
+		return errors.New("S3 destination is required")
+	}
+	if manifest.Version != 1 {
+		return fmt.Errorf("unsupported artifact manifest version %d", manifest.Version)
+	}
+	seen := make(map[string]bool, len(manifest.Entries))
+	for _, entry := range manifest.Entries {
+		if seen[entry.ID] {
+			return fmt.Errorf("artifact manifest contains duplicate ID %q", entry.ID)
+		}
+		seen[entry.ID] = true
+		data, meta, err := destination.Get(entry.ID)
+		if err != nil {
+			return fmt.Errorf("verify S3 artifact %q: %w", entry.ID, err)
+		}
+		if meta.Size != entry.Size || meta.SHA256 != entry.SHA256 {
+			return fmt.Errorf("S3 manifest mismatch for %q: got size=%d sha256=%s, want size=%d sha256=%s", entry.ID, meta.Size, meta.SHA256, entry.Size, entry.SHA256)
+		}
+		if len(data) != int(entry.Size) {
+			return fmt.Errorf("S3 manifest byte count mismatch for %q", entry.ID)
+		}
+	}
+	return nil
+}
+
+func WriteManifest(path string, manifest Manifest) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("manifest path is required")
+	}
+	contents, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode artifact manifest: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".artifact-manifest-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(append(contents, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+func ReadManifest(path string) (Manifest, error) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return Manifest{}, err
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(contents, &manifest); err != nil {
+		return Manifest{}, fmt.Errorf("decode artifact manifest: %w", err)
+	}
+	return manifest, nil
 }
 
 // MigrateLocalToS3 copies decrypted local artifacts to S3, preserving their
@@ -55,6 +154,7 @@ func MigrateLocalToS3(source *LocalStore, destination *S3Store, options Migratio
 		if getErr == nil {
 			if remoteMeta.SHA256 == meta.SHA256 && len(remote) == len(data) {
 				report.Skipped++
+				report.Entries = append(report.Entries, ManifestEntry{ID: id, ContentType: meta.ContentType, Size: meta.Size, SHA256: meta.SHA256})
 				continue
 			}
 			if !options.Force {
@@ -75,6 +175,7 @@ func MigrateLocalToS3(source *LocalStore, destination *S3Store, options Migratio
 			return report, fmt.Errorf("verification checksum mismatch for artifact %q", id)
 		}
 		report.Copied++
+		report.Entries = append(report.Entries, ManifestEntry{ID: id, ContentType: meta.ContentType, Size: meta.Size, SHA256: meta.SHA256})
 	}
 	return report, nil
 }
