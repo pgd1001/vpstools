@@ -19,6 +19,8 @@ for archive in $archives; do
     for file in README.md deploy/README.md \
         scripts/install-systemd.sh scripts/production-acceptance.sh scripts/upgrade-systemd.sh scripts/rollback-systemd.sh \
         scripts/backup-systemd.sh scripts/backup-alert.sh scripts/check-backup-freshness.sh scripts/healthcheck.sh \
+        scripts/postgres-backup.sh scripts/postgres-restore.sh \
+        migrations/postgres/001_initial_schema.sql migrations/postgres/008_ai_analysis.sql \
         deploy/systemd/api.env.example deploy/systemd/runner.env.example deploy/systemd/backup.env.example \
         deploy/systemd/vps-tools-api.service deploy/systemd/vps-tools-runner.service \
         deploy/systemd/vps-tools-backup.service deploy/systemd/vps-tools-backup.timer \
