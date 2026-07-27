@@ -69,6 +69,8 @@ archives:
       - scripts/upgrade-systemd.sh
       - scripts/validate-release-layout.ps1
       - scripts/validate-release.ps1
+      - scripts/postgres-backup.sh
+      - scripts/postgres-restore.sh
       - migrations/postgres/*
 
 checksum:

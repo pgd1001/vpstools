@@ -9,6 +9,8 @@ systemd_dir="$root/deploy/systemd"
 compose_file="$root/deploy/docker-compose/docker-compose.yml"
 prometheus_file="$root/deploy/monitoring/prometheus.yml"
 alerts_file="$root/deploy/monitoring/vps-tools-alerts.yml"
+postgres_backup="$root/scripts/postgres-backup.sh"
+postgres_restore="$root/scripts/postgres-restore.sh"
 
 failures=0
 fail() {
@@ -30,6 +32,8 @@ for file in \
     "$systemd_dir/vps-tools-healthcheck.timer"; do
     require_file "$file"
 done
+require_file "$postgres_backup"
+require_file "$postgres_restore"
 
 check_contains() {
     file=$1
@@ -37,6 +41,9 @@ check_contains() {
     description=$3
     grep -Eq "$pattern" "$file" || fail "$description (${file#"$root/"})"
 }
+
+check_contains "$postgres_backup" '^pg_dump_bin=' 'PostgreSQL backup helper has no pg_dump configuration'
+check_contains "$postgres_restore" 'CONFIRM_RESTORE' 'PostgreSQL restore helper lacks explicit confirmation'
 
 # Every installed systemd helper referenced by ExecStart must exist in the
 # source scripts directory and be included by the installer.

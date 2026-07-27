@@ -43,6 +43,27 @@ rsync -a --delete /var/lib/vps-tools/backups/latest/ /srv/offhost/vps-tools/late
 
 Do not use the same disk, credentials, or failure domain for the off-host copy. Keep at least one immutable or write-protected historical backup. Document the measured RPO and RTO in the release evidence before broad production rollout.
 
+## PostgreSQL extended-tier backup
+
+For an extended deployment, use the packaged PostgreSQL helpers from a host
+with the PostgreSQL client tools installed:
+
+```sh
+DATABASE_URL='postgres://...' POSTGRES_BACKUP_DIR=/var/lib/vps-tools/backups/postgres \
+  ./scripts/postgres-backup.sh
+
+CONFIRM_RESTORE=YES DATABASE_URL='postgres://...' \
+  BACKUP_FILE=/var/lib/vps-tools/backups/postgres/svrtools-20260727T020000Z.dump \
+  ./scripts/postgres-restore.sh
+```
+
+The backup uses PostgreSQL's custom archive format, records a checksum, and
+requires `pg_restore --list` to succeed before publishing the file. Restore
+checks the checksum and archive listing, requires explicit confirmation, and
+verifies a live SQL connection after completion. Restore into a disposable
+database first. Keep the database credentials, S3 artefact manifest, S3
+encryption key, and PostgreSQL dump together as one recovery record.
+
 ## Incident recovery order
 
 1. Pause scheduled automation with `vps automation pause --reason "recovery"`.
