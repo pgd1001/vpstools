@@ -112,6 +112,8 @@ jobs:
           goreleaser release --clean --skip=publish
           sh ./scripts/validate-release-layout.sh dist
           sh ./scripts/validate-release.sh dist
+          sh ./scripts/validate-release-evidence.sh docs/release-evidence-template.md --template
+          sh ./scripts/validate-release-evidence-test.sh
 
       - name: Run packaged Linux self-contained smoke
         shell: bash

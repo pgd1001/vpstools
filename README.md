@@ -2,7 +2,7 @@
 
 VPS Tools is a controlled operations platform for infrastructure teams. Senior engineers define and publish runbooks. Junior engineers complete permitted tasks through guided forms, the CLI, or the TUI. Approvals, execution state, audit events, automation, and evidence stay connected to the same runbook version.
 
-It gives teams a practical operating model for routine infrastructure work. The default installation is a single self-contained service with SQLite, encrypted local artefacts, a database-backed queue, and an embedded scheduler. The configuration model reserves a migration path to PostgreSQL, S3-compatible storage, and NATS, but those external adapters are not enabled in this release.
+It gives teams a practical operating model for routine infrastructure work. The default installation is a single self-contained service with SQLite, encrypted local artefacts, a database-backed queue, and an embedded scheduler. S3-compatible artefact storage is also available as an explicit extension. PostgreSQL, JetStream, external scheduling, and NATS remain fail-closed until their runtime adapters and migration tests are shipped.
 
 ![VPS Tools CLI workflow preview](docs/assets/cli-workflow-preview.png)
 
@@ -77,7 +77,7 @@ EVENT_BUS=disabled
 
 SQLite runs in WAL mode with a single-writer-safe connection limit. Artefacts are encrypted locally, written atomically, and referenced by stable IDs. Use `make backup` to include database metadata, artefact files, and the manifest.
 
-The configuration shape below documents the planned extended tier. Incomplete external settings fail at startup rather than silently falling back, and complete external settings still fail closed until the corresponding runtime adapters and migration tests are shipped.
+The configuration shape below documents the extended-tier boundary. Incomplete S3 settings fail at startup rather than silently falling back. S3 artifact storage is selectable, while PostgreSQL, JetStream, external scheduling, and NATS remain fail-closed until their runtime adapters and migration tests are shipped.
 
 ```text
 DATABASE_DRIVER=postgres

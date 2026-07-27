@@ -186,6 +186,9 @@ Full details in `docs/runbooks/README.md`.
 | `DATABASE_URL` | SQLite path or external database URL | `./svrtools.db` |
 | `ARTIFACT_STORE` | Artefact backend | `local` |
 | `ARTIFACTS_DIR` / `VPS_ARTIFACTS_DIR` | Encrypted local artefact directory | `./data/artifacts` |
+| `S3_ENDPOINT` / `S3_BUCKET` | S3-compatible endpoint and bucket when `ARTIFACT_STORE=s3` | empty |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | S3 credentials, required together when the endpoint requires authentication | empty |
+| `S3_ENCRYPTION_KEY` | Optional base64-encoded 32-byte client-side encryption key | empty |
 | `JOB_DISPATCH` | Job queue backend | `database` |
 | `SCHEDULER` | Scheduler mode | `embedded` |
 | `EVENT_BUS` | Event bus mode | `disabled` |

@@ -132,6 +132,7 @@ spec:
 - `API_PORT` env var (defaults to `8080`)
 - `DATABASE_DRIVER` and `DATABASE_URL` select the metadata database. The default is SQLite at `./svrtools.db`.
 - `ARTIFACT_STORE` and `ARTIFACTS_DIR` select encrypted output storage. The default is local storage at `./data/artifacts`.
+- When `ARTIFACT_STORE=s3`, set `S3_ENDPOINT`, `S3_BUCKET`, and, when required by the service, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`. `S3_REGION`, `S3_PREFIX`, `S3_ENCRYPTION_KEY`, `S3_SERVER_SIDE_ENCRYPTION`, `S3_SSE_KMS_KEY_ID`, `S3_TIMEOUT`, `S3_MAX_RETRIES`, and `S3_RETRY_BACKOFF` are optional tuning and protection settings.
 - `JOB_DISPATCH`, `SCHEDULER`, and `EVENT_BUS` select queue, scheduler, and event settings. Defaults are `database`, `embedded`, and `disabled`.
 - `ARTIFACT_ENCRYPTION_KEY` can provide a base64-encoded 32-byte key. If omitted, the local store creates `ARTIFACTS_DIR/.key`.
 
@@ -144,13 +145,13 @@ spec:
 
 The self-contained tier is the supported default and requires no external services. It uses SQLite WAL mode, encrypted local artefacts, database polling, and the embedded scheduler.
 
-The configuration loader recognises PostgreSQL, S3-compatible storage, JetStream, external scheduling, and NATS event settings. It validates required connection variables and reports the selected tier at API startup. The current request handlers and artefact path implement the self-contained tier. The external values are configuration targets only in this release. Startup refuses them after validation, and external adapters, migration tooling, and horizontally scaled workers remain tracked limitations rather than silently falling back to local services.
+The configuration loader recognises PostgreSQL, S3-compatible storage, JetStream, external scheduling, and NATS event settings. It validates required connection variables and reports the selected tier at API startup. The current request handlers support the self-contained tier and can compose the S3 artefact store when its complete configuration is supplied. PostgreSQL metadata, JetStream dispatch, external scheduling, NATS events, migration tooling, and horizontally scaled workers remain tracked limitations. Unsupported selections fail at startup rather than silently falling back to local services.
 
 ### Automation and AI boundaries
 
 Schedules use a fixed interval and the same runbook policy checks as manual execution. Each queued scheduled execution records `user_automation` as its actor and includes a schedule reference in the audit metadata. High and critical risk schedules are rejected from unattended execution.
 
-The `packages/ai` package defines a provider interface and a redacting wrapper for prompts, evidence, and responses. It is a foundation for local and managed model adapters. There is not yet a user-facing AI endpoint or evidence retrieval service.
+The `packages/ai` package defines a provider interface, a redacting wrapper for prompts, evidence, and responses, and an OpenAI-compatible HTTP provider for managed gateways or local model servers. There is not yet a user-facing AI endpoint or evidence retrieval service, so configuring a provider does not change the default API workflow.
 
 ### MCP and agent integration
 

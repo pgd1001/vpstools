@@ -1,4 +1,4 @@
-.PHONY: dev-up dev-down build test vet lint generate clean backup backup-run backup-verify backup-restore runbook-validate release-check
+.PHONY: dev-up dev-down build test vet lint generate clean backup backup-run backup-verify backup-restore runbook-validate release-check release-evidence-test
 
 BACKUP ?= ./backups/latest
 DB_PATH ?= ./svrtools.db
@@ -7,9 +7,11 @@ ARTIFACTS_DIR ?= ./data/artifacts
 ifeq ($(OS),Windows_NT)
 RELEASE_VALIDATE = powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-release.ps1 -DistDir dist
 RELEASE_LAYOUT_VALIDATE = powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-release-layout.ps1 -DistDirectory dist
+RELEASE_EVIDENCE_VALIDATE = powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-release-evidence.ps1 -EvidenceFile docs/release-evidence-template.md -Template
 else
 RELEASE_VALIDATE = sh ./scripts/validate-release.sh dist
 RELEASE_LAYOUT_VALIDATE = sh ./scripts/validate-release-layout.sh dist
+RELEASE_EVIDENCE_VALIDATE = sh ./scripts/validate-release-evidence.sh docs/release-evidence-template.md --template
 endif
 
 dev-up:
@@ -62,8 +64,13 @@ release-check:
 	goreleaser release --snapshot --clean
 	$(RELEASE_LAYOUT_VALIDATE)
 	$(RELEASE_VALIDATE)
+	$(RELEASE_EVIDENCE_VALIDATE)
+	sh ./scripts/validate-release-evidence-test.sh
 
 clean:
 	rm -f svrtools.db vps.exe api.exe runner.exe
+
+release-evidence-test:
+	sh ./scripts/validate-release-evidence-test.sh
 
 .PHONY: cli api runner

@@ -44,7 +44,7 @@ This checklist defines the minimum bar for a supported self-contained production
 - [ ] Metrics, structured logs, health checks, and alerts cover API, runner, queue, scheduler, storage, and backups. The API exposes bounded queue, dead-letter, active-runner, enabled-schedule, artefact-aware readiness, and local artefact-filesystem capacity signals. The runner exposes loopback-only health and metrics endpoints, and the systemd health check verifies them. The systemd backup job writes freshness evidence, verifies the current manifest and backup contents, and has a scheduled freshness failure unit. External collection, alert routing, and incident testing still need to be configured and exercised for each deployment.
 - [ ] A clean-machine installation succeeds without Docker, PostgreSQL, S3, or NATS. CI now runs source-built Windows smoke, extracted Linux package smoke, and extracted Windows package smoke. A release candidate still needs the same check on the target host, including systemd installation and rollback.
 
-After a self-contained installation is configured on its target host, run `/usr/local/libexec/vps-tools/production-acceptance.sh` with `PRODUCTION_EVIDENCE_FILE` set. It records production mode, authenticated doctor status, API and runner readiness, metrics reachability, service state, and backup freshness without copying secrets or response bodies into the evidence file. It does not mark the restore, alert-routing, RPO/RTO, identity-provider, or rollback gates complete by itself.
+After a self-contained installation is configured on its target host, run `/usr/local/libexec/vps-tools/production-acceptance.sh` with `PRODUCTION_EVIDENCE_FILE` set. It records production mode, authenticated doctor status, API and runner readiness, metrics reachability, service state, and backup freshness without copying secrets or response bodies into the evidence file. It does not mark the restore, alert-routing, RPO/RTO, identity-provider, or rollback gates complete by itself. Copy the output path into the target-host acceptance row of the [release evidence template](release-evidence-template.md), then run `scripts/validate-release-evidence.sh <candidate-evidence.md>`.
 
 The CI snapshot release check treats `dist/checksums.txt` and at least one CycloneDX or SPDX SBOM as required evidence. The protected tag workflow runs the repository test gates, packaged smoke test, archive-layout validator, and release-evidence validator before publishing a draft, then validates the final published output again. CI pins GoReleaser `v2.17.0`, Syft `v1.44.0`, and govulncheck `v1.6.0` under Go `1.26.5` for repeatable release tooling. Run `make release-check` locally when GoReleaser, Syft, `jq`, and a checksum tool are available. On Windows, Make uses `scripts/validate-release.ps1` automatically.
 
@@ -65,11 +65,14 @@ Keep the following with every release candidate:
 Use the [release evidence template](release-evidence-template.md) so operational checks are recorded consistently.
 
 - CI run URL and test results
-- Version and build checksums
-- SBOM documents and the output of the release evidence validator
+- Exact release version, full commit SHA, and build checksums
+- SBOM documents and the output of the release artefact and evidence validators
+- Target-host acceptance output from the installed candidate
 - Clean-machine installation transcript
 - Authentication and authorisation test report
-- Backup and restore report with measured RPO and RTO
+- Backup and restore result with measured RPO and RTO
+- Rollback result, including the restored version and post-rollback check
+- Identity-provider verification result, including the provider and tested subject
 - Runner failure and lease-recovery test report
 - Representative approval, execution, failure, retry, and audit records
 - Security review findings and accepted residual risks
@@ -77,4 +80,4 @@ Use the [release evidence template](release-evidence-template.md) so operational
 
 ## Release decision
 
-The self-contained tier may be released for a controlled production pilot when every identity, recovery, execution-safety, and release-engineering gate is complete. A broader production release should wait until the user workflow and observability gates are also complete.
+The self-contained tier may be released for a controlled production pilot when every identity, recovery, execution-safety, and release-engineering gate is complete and the evidence template has been validated. A checked environment-only gate without candidate-specific evidence is invalid. A broader production release should wait until the user workflow and observability gates are also complete.

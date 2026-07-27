@@ -59,8 +59,8 @@ func main() {
 		logger.Error("database backend is configured but the current API handlers require the self-contained SQLite tier", "database_driver", apiBackends.DatabaseDriver)
 		os.Exit(1)
 	}
-	if apiBackends.ArtifactStore != "local" || apiBackends.JobDispatch != "database" || apiBackends.Scheduler != "embedded" || apiBackends.EventBus != "disabled" {
-		logger.Error("an extended backend was selected, but this binary currently supports the self-contained tier only", "artifact_store", apiBackends.ArtifactStore, "job_dispatch", apiBackends.JobDispatch, "scheduler", apiBackends.Scheduler, "event_bus", apiBackends.EventBus)
+	if apiBackends.JobDispatch != "database" || apiBackends.Scheduler != "embedded" || apiBackends.EventBus != "disabled" {
+		logger.Error("an unsupported extended runtime backend was selected", "artifact_store", apiBackends.ArtifactStore, "job_dispatch", apiBackends.JobDispatch, "scheduler", apiBackends.Scheduler, "event_bus", apiBackends.EventBus)
 		os.Exit(1)
 	}
 	db, err := sql.Open("sqlite", apiBackends.DatabaseURL+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
@@ -72,12 +72,11 @@ func main() {
 	db.SetMaxIdleConns(1)
 	defer db.Close()
 	apiDB = db
-	localArtifacts, err := artifacts.NewLocalStore(apiBackends.ArtifactsDir, apiBackends.ArtifactKey)
+	apiArtifacts, err = newArtifactStore(apiBackends)
 	if err != nil {
 		logger.Error("artifact store initialisation failed", "error", err)
 		os.Exit(1)
 	}
-	apiArtifacts = localArtifacts
 
 	if err := migrate(ctx, db); err != nil {
 		logger.Error("migration failed", "error", err)
@@ -102,7 +101,11 @@ func main() {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "database": "ok", "version": version, "deployment_tier": apiBackends.Tier(), "database_driver": apiBackends.DatabaseDriver, "artifact_store": apiBackends.ArtifactStore, "job_dispatch": apiBackends.JobDispatch})
 	})
-	mux.HandleFunc("/metrics", metricsHandlerWithDB(db, apiBackends.ArtifactsDir))
+	artifactMetricsDir := ""
+	if apiBackends.ArtifactStore == "local" {
+		artifactMetricsDir = apiBackends.ArtifactsDir
+	}
+	mux.HandleFunc("/metrics", metricsHandlerWithDB(db, artifactMetricsDir))
 	mux.HandleFunc("/api/v1/ready", func(w http.ResponseWriter, r *http.Request) {
 		metrics.readinessChecks.Add(1)
 		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
@@ -436,6 +439,17 @@ func main() {
 	shutdownCtx, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
 	srv.Shutdown(shutdownCtx)
+}
+
+func newArtifactStore(cfg config.BackendConfig) (artifacts.Store, error) {
+	switch cfg.ArtifactStore {
+	case "local":
+		return artifacts.NewLocalStore(cfg.ArtifactsDir, cfg.ArtifactKey)
+	case "s3":
+		return artifacts.NewS3Store(cfg.S3Config())
+	default:
+		return nil, fmt.Errorf("unsupported artifact store %q", cfg.ArtifactStore)
+	}
 }
 
 type contextKey string
@@ -2309,7 +2323,11 @@ func persistExecutionArtifacts(ctx context.Context, db auditExec, orgID, executi
 		if err != nil {
 			return "", err
 		}
-		if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO artifact_records (id, organisation_id, owner_type, owner_id, content_type, byte_size, sha256, backend) VALUES (?,?,?,?,?,?,?,'local')`, id, orgID, "execution_target_"+kind, targetID, meta.ContentType, meta.Size, meta.SHA256); err != nil {
+		backend := apiBackends.ArtifactStore
+		if backend == "" {
+			backend = "local"
+		}
+		if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO artifact_records (id, organisation_id, owner_type, owner_id, content_type, byte_size, sha256, backend) VALUES (?,?,?,?,?,?,?,?)`, id, orgID, "execution_target_"+kind, targetID, meta.ContentType, meta.Size, meta.SHA256, backend); err != nil {
 			return "", err
 		}
 		return id, nil

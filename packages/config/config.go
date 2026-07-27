@@ -5,20 +5,37 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
+
+	"github.com/pgd1001/svrtools/packages/artifacts"
 )
 
 // BackendConfig describes the deployment tier selected by environment variables.
 // The default tier intentionally needs no external services.
 type BackendConfig struct {
-	DatabaseDriver        string
-	DatabaseURL           string
-	ArtifactStore         string
-	ArtifactsDir          string
-	JobDispatch           string
-	Scheduler             string
-	EventBus              string
-	ArtifactKey           string
-	ApprovalExpirySeconds int
+	DatabaseDriver         string
+	DatabaseURL            string
+	ArtifactStore          string
+	ArtifactsDir           string
+	JobDispatch            string
+	Scheduler              string
+	EventBus               string
+	ArtifactKey            string
+	S3Endpoint             string
+	S3Bucket               string
+	S3Region               string
+	S3Prefix               string
+	S3AccessKeyID          string
+	S3SecretAccessKey      string
+	S3SessionToken         string
+	S3EncryptionKey        string
+	S3ServerSideEncryption string
+	S3SSEKMSKeyID          string
+	S3Timeout              time.Duration
+	S3MaxRetries           int
+	S3RetryBackoff         time.Duration
+	ApprovalExpirySeconds  int
 }
 
 func Load() BackendConfig {
@@ -33,15 +50,28 @@ func Load() BackendConfig {
 		}
 	}
 	return BackendConfig{
-		DatabaseDriver:        envOrDefault("DATABASE_DRIVER", "sqlite"),
-		DatabaseURL:           databaseURL,
-		ArtifactStore:         envOrDefault("ARTIFACT_STORE", "local"),
-		ArtifactsDir:          filepath.Clean(artifactsDir),
-		JobDispatch:           envOrDefault("JOB_DISPATCH", "database"),
-		Scheduler:             envOrDefault("SCHEDULER", "embedded"),
-		EventBus:              envOrDefault("EVENT_BUS", "disabled"),
-		ArtifactKey:           os.Getenv("ARTIFACT_ENCRYPTION_KEY"),
-		ApprovalExpirySeconds: approvalExpiry,
+		DatabaseDriver:         envOrDefault("DATABASE_DRIVER", "sqlite"),
+		DatabaseURL:            databaseURL,
+		ArtifactStore:          envOrDefault("ARTIFACT_STORE", "local"),
+		ArtifactsDir:           filepath.Clean(artifactsDir),
+		JobDispatch:            envOrDefault("JOB_DISPATCH", "database"),
+		Scheduler:              envOrDefault("SCHEDULER", "embedded"),
+		EventBus:               envOrDefault("EVENT_BUS", "disabled"),
+		ArtifactKey:            os.Getenv("ARTIFACT_ENCRYPTION_KEY"),
+		S3Endpoint:             os.Getenv("S3_ENDPOINT"),
+		S3Bucket:               os.Getenv("S3_BUCKET"),
+		S3Region:               os.Getenv("S3_REGION"),
+		S3Prefix:               os.Getenv("S3_PREFIX"),
+		S3AccessKeyID:          os.Getenv("S3_ACCESS_KEY_ID"),
+		S3SecretAccessKey:      os.Getenv("S3_SECRET_ACCESS_KEY"),
+		S3SessionToken:         os.Getenv("S3_SESSION_TOKEN"),
+		S3EncryptionKey:        os.Getenv("S3_ENCRYPTION_KEY"),
+		S3ServerSideEncryption: os.Getenv("S3_SERVER_SIDE_ENCRYPTION"),
+		S3SSEKMSKeyID:          os.Getenv("S3_SSE_KMS_KEY_ID"),
+		S3Timeout:              durationEnv("S3_TIMEOUT"),
+		S3MaxRetries:           intEnv("S3_MAX_RETRIES"),
+		S3RetryBackoff:         durationEnv("S3_RETRY_BACKOFF"),
+		ApprovalExpirySeconds:  approvalExpiry,
 	}
 }
 
@@ -64,8 +94,10 @@ func (c BackendConfig) Validate() error {
 	if c.DatabaseDriver == "postgres" && os.Getenv("DATABASE_URL") == "" {
 		return fmt.Errorf("DATABASE_URL is required when DATABASE_DRIVER=postgres")
 	}
-	if c.ArtifactStore == "s3" && os.Getenv("S3_ENDPOINT") == "" {
-		return fmt.Errorf("S3_ENDPOINT is required when ARTIFACT_STORE=s3")
+	if c.ArtifactStore == "s3" {
+		if _, err := artifacts.NewS3Store(c.S3Config()); err != nil {
+			return fmt.Errorf("invalid S3 configuration: %w", err)
+		}
 	}
 	if c.JobDispatch == "jetstream" && os.Getenv("NATS_URL") == "" {
 		return fmt.Errorf("NATS_URL is required when JOB_DISPATCH=jetstream")
@@ -82,6 +114,16 @@ func (c BackendConfig) Validate() error {
 	return nil
 }
 
+func (c BackendConfig) S3Config() artifacts.S3Config {
+	return artifacts.S3Config{
+		Endpoint: c.S3Endpoint, Bucket: c.S3Bucket, Region: c.S3Region, Prefix: c.S3Prefix,
+		AccessKeyID: c.S3AccessKeyID, SecretAccessKey: c.S3SecretAccessKey, SessionToken: c.S3SessionToken,
+		EncryptionKey: c.S3EncryptionKey, ServerSideEncryption: c.S3ServerSideEncryption,
+		SSEKMSKeyID: c.S3SSEKMSKeyID, Timeout: c.S3Timeout, MaxRetries: c.S3MaxRetries,
+		RetryBackoff: c.S3RetryBackoff,
+	}
+}
+
 func (c BackendConfig) Tier() string {
 	if c.DatabaseDriver == "sqlite" && c.ArtifactStore == "local" && c.JobDispatch == "database" && c.Scheduler == "embedded" && c.EventBus == "disabled" {
 		return "self-contained"
@@ -94,4 +136,28 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func durationEnv(key string) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return 0
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return -1
+	}
+	return parsed
+}
+
+func intEnv(key string) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return 0
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return -1
+	}
+	return parsed
 }

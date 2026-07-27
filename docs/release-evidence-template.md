@@ -4,11 +4,36 @@ Copy this file into the release evidence directory and complete it for every can
 
 ## Candidate
 
-- Version:
-- Git commit:
+- Version, exact release tag:
+- Git commit, full SHA:
 - Build date:
 - Operator:
 - Environment:
+- CI run URL:
+- Checksums file, path or URL:
+- SBOM document(s), path or URL:
+
+The validator requires every field above to contain a candidate-specific value.
+Do not use `TBD`, `N/A`, or `not run` for a supported release.
+
+## Environment-only gates
+
+These checks cannot be marked complete from repository CI. A checked status must
+include a link or path to the captured evidence in the same row.
+
+| Gate | Status | Evidence |
+|---|---|---|
+| Target-host acceptance output | [ ] | |
+| Clean-machine installation | [ ] | |
+| Backup and restore result | [ ] | |
+| Measured RPO and RTO | [ ] | |
+| Rollback result | [ ] | |
+| Identity-provider verification | [ ] | |
+
+Record the detailed result fields below as well. The checked rows are a quick
+review aid, not a substitute for the result and evidence path.
+
+- Target-host acceptance output:
 
 ## Automated checks
 
@@ -23,6 +48,7 @@ Copy this file into the release evidence directory and complete it for every can
 
 ## Backup and restore
 
+- Backup and restore result:
 - Backup timestamp:
 - Backup manifest verified:
 - Replicated backup location:
@@ -49,7 +75,9 @@ Copy this file into the release evidence directory and complete it for every can
 
 ## Release decision
 
-- Accepted residual risks:
+- Rollback result:
+- Identity-provider verification result:
+- Accepted residual risks, or `None`:
 - Rollback version:
 - Approver:
 - Decision, pilot / release / hold:

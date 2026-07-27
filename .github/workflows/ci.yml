@@ -88,6 +88,9 @@ jobs:
       - name: Run Windows self-contained smoke and restore test
         shell: pwsh
         run: ./scripts/self-contained-smoke.ps1
+      - name: Test PowerShell release evidence validator
+        shell: pwsh
+        run: ./scripts/validate-release-evidence-test.ps1
 
   packaged-windows:
     runs-on: windows-latest
@@ -208,6 +211,8 @@ jobs:
         run: sh ./scripts/validate-release-layout.sh dist
       - name: Verify release evidence
         run: sh ./scripts/validate-release.sh dist
+      - name: Validate release evidence template and fail-closed checks
+        run: sh ./scripts/validate-release-evidence.sh docs/release-evidence-template.md --template && sh ./scripts/validate-release-evidence-test.sh
       - name: Run packaged Linux self-contained smoke
         run: |
           archive=$(find dist -maxdepth 1 -type f -name '*linux_amd64.tar.gz' | head -n 1)
