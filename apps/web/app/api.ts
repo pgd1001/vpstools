@@ -31,12 +31,13 @@ export type AuditEvent = {
 export type Execution = {
   id: string; status: string; command_preview: string;
   target_count: number; succeeded_count: number; failed_count: number;
-  requested_at: string; finished_at: string;
+  requested_at: string; finished_at: string; actor_user_id?: string;
 };
 
 export type ExecutionDetail = Execution & { reason?: string; targets: { id:string; server_id:string; server_name:string; status:string; stdout:string; stderr:string; exit_code:number; started_at:string; finished_at:string }[]; events?: {id:string;target_id:string;from_status:string;to_status:string;event_type:string;metadata:string;occurred_at:string}[] };
 export type RunbookRunResponse = { status:string; approval_required?:boolean; target_count?:number; execution_id?:string; approval_id?:string; message?:string };
 export type Schedule = { id:string; name:string; runbook_name:string; target:string; reason:string; params:string; interval_seconds:number; next_run_at:string; enabled:boolean; last_run_at:string; last_error:string };
+export type AutomationStatus = { paused:boolean; paused_at?:string; paused_by?:string; reason?:string };
 
 let user = '';
 
@@ -100,6 +101,7 @@ export const api = {
   updateRunner: (id:string, body:unknown) => mutate('PATCH', `/api/v1/runners/${encodeURIComponent(id)}`, body),
   revokeRunner: (id:string) => mutate('DELETE', `/api/v1/runners/${encodeURIComponent(id)}`),
   registrationToken: () => post<{token:string;expires_at:string}>('/api/v1/runners/registration-token'),
+  rotateRunner: (id:string) => post<{registration_token:string;expires_in:string;runner_id:string}>(`/api/v1/runners/${encodeURIComponent(id)}/rotate-token`),
   runbooks: (search?: string) => get<{runbooks:Runbook[]}>(`/api/v1/runbooks${search ? `?search=${encodeURIComponent(search)}` : ''}`),
   getRunbook: (name:string) => get<{runbook:Runbook}>(`/api/v1/runbooks/${encodeURIComponent(name)}`),
   createRunbook: (body:unknown) => post('/api/v1/runbooks', body),
@@ -113,12 +115,15 @@ export const api = {
   createExecution: (body:unknown) => post('/api/v1/executions', body),
   getExecution: (id:string) => get<{execution:ExecutionDetail}>(`/api/v1/executions/${encodeURIComponent(id)}`),
   schedules: () => get<{schedules:Schedule[]}>('/api/v1/schedules'),
+  automationStatus: () => get<AutomationStatus>('/api/v1/automation/status'),
+  pauseAutomation: (reason:string) => post<AutomationStatus>('/api/v1/automation/pause', { reason }),
+  resumeAutomation: () => post<AutomationStatus>('/api/v1/automation/resume'),
   createSchedule: (body:unknown) => post('/api/v1/schedules', body),
   disableSchedule: (id:string) => mutate('DELETE', `/api/v1/schedules/${encodeURIComponent(id)}`),
   cancelExecution: (id:string) => post(`/api/v1/executions/${encodeURIComponent(id)}/cancel`),
-  audit: (actor?:string) => get<{events:AuditEvent[]}>(`/api/v1/audit?limit=50${actor?`&actor=${actor}`:''}`),
-  approve: (id:string, note?:string) => post(`/api/v1/approvals/${id}/approve`, note ? {note} : undefined),
-  deny: (id:string, note?:string) => post(`/api/v1/approvals/${id}/deny`, note ? {note} : undefined),
+  audit: (actor?:string) => get<{events:AuditEvent[]}>(`/api/v1/audit?limit=50${actor?`&actor=${encodeURIComponent(actor)}`:''}`),
+  approve: (id:string, note?:string) => post(`/api/v1/approvals/${encodeURIComponent(id)}/approve`, note ? {note} : undefined),
+  deny: (id:string, note?:string) => post(`/api/v1/approvals/${encodeURIComponent(id)}/deny`, note ? {note} : undefined),
   setUser: (u:string) => { user = u; if (typeof window !== 'undefined') localStorage.setItem('vps_user', u); },
   getUser: () => getUser(),
 };

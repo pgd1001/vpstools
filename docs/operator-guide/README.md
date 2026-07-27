@@ -8,7 +8,7 @@ The [Product Improvement Plan](../PRODUCT_IMPROVEMENT_PLAN.md) records the plann
 
 ## Prerequisites
 
-- Go 1.24+ (to build from source)
+- Go version from `go.mod` (to build from source)
 - Docker (optional, for SSH test target)
 - Linux, macOS, or Windows
 
@@ -177,7 +177,9 @@ Full details in `docs/runbooks/README.md`.
 | Variable | Purpose | Default |
 |---|---|---|
 | `VPS_USER` | CLI user identity, required outside development mode | empty |
+| `VPS_API_TOKEN` | Expiring bearer token for CLI, SDK, and automation access | empty |
 | `VPS_API_URL` | API address | `http://localhost:8080` |
+| `VPS_ENV` | Runtime environment, use `production` to enable fail-closed auth checks | empty |
 | `API_PORT` | API listen port | `8080` |
 | `DB_PATH` | SQLite database path | `svrtools.db` |
 | `DATABASE_DRIVER` | Metadata database driver | `sqlite` |
@@ -187,6 +189,7 @@ Full details in `docs/runbooks/README.md`.
 | `JOB_DISPATCH` | Job queue backend | `database` |
 | `SCHEDULER` | Scheduler mode | `embedded` |
 | `EVENT_BUS` | Event bus mode | `disabled` |
+| `APPROVAL_EXPIRY_SECONDS` | Installation-wide approval review window | `3600` |
 | `SIMULATE` | Runner simulate mode | omit for real SSH |
 
 For a larger deployment, see the [developer deployment notes](../developer-guide/README.md#deployment-backends). The self-contained runtime is the supported default.

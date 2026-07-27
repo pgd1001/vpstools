@@ -1,6 +1,6 @@
 # AI tools and agent operations
 
-VPS Tools can be operated by an AI assistant through the bundled Model Context Protocol (MCP) server. The server gives an assistant structured access to inventory, runbooks, approvals, executions, schedules, and audit history. It does not give an assistant an unrestricted shell.
+VPS Tools can be operated by an AI assistant through the bundled Model Context Protocol (MCP) server. The server gives an assistant structured access to inventory, runbooks, approvals, executions, schedules, automation pause state, and audit history. It does not give an assistant an unrestricted shell.
 
 ## How the integration works
 
@@ -43,6 +43,7 @@ Configure the connection for the AI client that will launch the server. A typica
       "env": {
         "VPS_API_URL": "http://127.0.0.1:8080",
         "VPS_USER": "engineer@example.com",
+        "VPS_API_TOKEN": "",
         "VPS_MCP_ALLOW_WRITES": "false"
       }
     }
@@ -52,7 +53,7 @@ Configure the connection for the AI client that will launch the server. A typica
 
 Use an absolute path in the client configuration. On Windows, forward slashes avoid escaping problems in JSON. The API must already be running.
 
-For a shared or OIDC-protected API, configure the authentication variables described in [the MCP README](../mcp/README.md). Never place a production secret in a checked-in client configuration.
+For production CLI, SDK, or MCP access, use an expiring `VPS_API_TOKEN` rather than `VPS_USER`. For a shared or OIDC-protected API, configure the authentication variables described in [the MCP README](../mcp/README.md). Never place a production secret in a checked-in client configuration.
 
 ## Available tool groups
 
@@ -65,12 +66,15 @@ For a shared or OIDC-protected API, configure the authentication variables descr
 | Approvals | Review, approve, or deny requests when writes are enabled |
 | Audit | Search the append-only audit trail |
 | Schedules | Review, create, and disable recurring work |
+| Automation control | Inspect or pause/resume new scheduled work during an incident |
 
 The exact tool names are prefixed with `vps_`, for example `vps_list_servers`, `vps_preflight_runbook`, and `vps_search_audit`.
 
 ## Safe operating mode
 
 Start with read-only access. With `VPS_MCP_ALLOW_WRITES=false`, the server exposes inspection and planning tools without permitting changes. This is the right setting for discovery, reporting, incident triage, and assistant evaluation.
+
+The self-contained smoke test can run a live MCP check against the temporary API by setting `VPS_MCP_SMOKE_LIVE=true`. It passes the same API token environment to the stdio child process and verifies health, identity, and automation state through MCP.
 
 Write operations require both conditions below:
 

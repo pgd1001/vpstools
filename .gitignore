@@ -2,6 +2,7 @@ bin/
 *.db
 *.db-shm
 *.db-wal
+data/
 *.exe
 .env
 *.env.local

@@ -12,6 +12,15 @@ $env:VPS_USER = "user_junior"
 
 The flag takes precedence over the environment and config file. Most list and detail commands support `--output json`, which is the preferred format for scripts.
 
+For production access, use a short-lived bearer token:
+
+```powershell
+$env:VPS_API_TOKEN = "replace-with-a-short-lived-token"
+.\bin\vps.exe whoami
+```
+
+Privileged operators can create one with `vps auth create-token --name operator-cli`. The token is displayed once.
+
 ## Identity
 
 ```text
@@ -37,24 +46,38 @@ Use `server:<id|name>` in later commands when you want to make the target type e
 vps runner list [--output table|json]
 vps runner register <name> [--version v] [--hostname host] [--platform linux|darwin|windows]
   [--ip-address address] [--type customer_managed] [--output table|json]
-vps runner registration-token [--output table|json]
+vps runner registration-token [--runner-id rnr_...] [--output table|json]
 ```
 
 Registration tokens are credentials. Keep them out of shell history, chat transcripts, and CI logs.
+When a runner ID is supplied, the token is bound to that runner. Issuing a replacement revokes the previous active token. Tokens expire after one hour.
+
+## Automation emergency control
+
+```text
+vps automation status [--output table|json]
+vps automation list [--output table|json]
+vps automation create --name NAME --runbook RUNBOOK --target TARGET --reason REASON [--params name=value] [--interval 3600]
+vps automation pause [--reason "incident response"] [--output table|json]
+vps automation resume [--output table|json]
+vps automation disable <schedule-id> --confirm [--output table|json]
+```
+
+Pausing is organisation-wide and stops new scheduled runs. It does not cancel executions that are already queued. The pause and resume actions require a senior engineer or above and are recorded in the audit trail.
 
 ## Direct execution
 
 Direct execution is intended for senior or administrator workflows. Junior engineers should use published runbooks.
 
 ```text
-vps exec <target> -- <command> [--reason "why"] [--wait] [--timeout 300]
+vps exec <target> [--reason "why"] [--idempotency-key change-123] [--wait] [--timeout 300] -- <command>
 vps exec <target> -- <command> --dry-run
 vps exec status <execution-id> [--output table|json]
 vps exec list [--status queued] [--limit 20] [--mine] [--delegated] [--output table|json]
 vps exec cancel <execution-id> [--output table|json]
 ```
 
-The `--` separator is required when the command contains flags that Cobra could interpret as VPS Tools flags. `--dry-run` only previews the CLI request. It does not call the API preflight endpoint.
+The `--` separator is required when the command contains flags that Cobra could interpret as VPS Tools flags. `--dry-run` only previews the CLI request. It does not call the API preflight endpoint. Use a stable `--idempotency-key` when a script may retry after a network timeout.
 
 ## Runbooks
 
@@ -66,7 +89,7 @@ vps runbook create <name> [--file definition.yml] [--title title]
   [--environment development|staging|production] [--output table|json]
 vps runbook publish <runbook>
 vps runbook run <runbook> --target <target> [--reason text]
-  [--params 'key=value,key=value'] [--wait] [--timeout 300] [--output table|json]
+  [--params 'key=value,key=value'] [--idempotency-key change-123] [--wait] [--timeout 300] [--output table|json]
 ```
 
 Use `--params` only for declared parameters. The API validates the final values again.
@@ -78,6 +101,7 @@ vps approvals list [--status pending|approved|denied] [--output table|json]
 vps approvals approve <approval-id> [--note "reviewed"] [--output table|json]
 vps approvals deny <approval-id> --note "reason" [--output table|json]
 vps audit search [--actor actor-id] [--limit 20]
+vps audit verify
 ```
 
 Always inspect the approval brief before approving. A denial note is mandatory.

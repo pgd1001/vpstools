@@ -1,0 +1,10 @@
+[Unit]
+Description=Check VPS Tools backup freshness periodically
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+Unit=vps-tools-backup-freshness.service
+
+[Install]
+WantedBy=timers.target

@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +24,8 @@ import (
 	"github.com/pgd1001/svrtools/packages/redact"
 	_ "modernc.org/sqlite"
 )
+
+var version = "dev"
 
 type tag struct {
 	Key   string `json:"key"`
@@ -37,8 +44,13 @@ func main() {
 	defer cancel()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	rateLimiter := newAPIRateLimiter()
 
 	apiBackends = config.Load()
+	if err := validateAuthConfig(); err != nil {
+		logger.Error("authentication configuration invalid", "error", err)
+		os.Exit(1)
+	}
 	if err := apiBackends.Validate(); err != nil {
 		logger.Error("backend configuration invalid", "error", err)
 		os.Exit(1)
@@ -82,10 +94,47 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]string{"status": "ok", "version": "0.4.0", "deployment_tier": apiBackends.Tier(), "database_driver": apiBackends.DatabaseDriver, "artifact_store": apiBackends.ArtifactStore, "job_dispatch": apiBackends.JobDispatch})
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+		if err := db.PingContext(ctx); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "degraded", "database": "unavailable"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "database": "ok", "version": version, "deployment_tier": apiBackends.Tier(), "database_driver": apiBackends.DatabaseDriver, "artifact_store": apiBackends.ArtifactStore, "job_dispatch": apiBackends.JobDispatch})
+	})
+	mux.HandleFunc("/metrics", metricsHandlerWithDB(db, apiBackends.ArtifactsDir))
+	mux.HandleFunc("/api/v1/ready", func(w http.ResponseWriter, r *http.Request) {
+		metrics.readinessChecks.Add(1)
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+		if err := db.PingContext(ctx); err != nil {
+			metrics.readinessFailed.Add(1)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "database": "unavailable"})
+			return
+		}
+		if apiArtifacts == nil || apiArtifacts.Check() != nil {
+			metrics.readinessFailed.Add(1)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "database": "ok", "artifacts": "unavailable"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready", "database": "ok", "artifacts": "ok"})
 	})
 
 	mux.HandleFunc("/api/v1/whoami", withAuth(db, handleWhoAmI))
+	mux.HandleFunc("/api/v1/auth/tokens", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		handleCreateAPIToken(w, r)
+	}))
+	mux.HandleFunc("/api/v1/auth/tokens/", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		handleRevokeAPIToken(w, r, strings.TrimPrefix(r.URL.Path, "/api/v1/auth/tokens/"))
+	}))
 
 	mux.HandleFunc("/api/v1/servers", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -162,7 +211,16 @@ func main() {
 		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
 	}))
 	mux.HandleFunc("/api/v1/runners/", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
-		id := strings.TrimPrefix(r.URL.Path, "/api/v1/runners/")
+		path := strings.TrimPrefix(r.URL.Path, "/api/v1/runners/")
+		if hasSuffix(path, "/rotate-token") {
+			if r.Method != http.MethodPost {
+				writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+				return
+			}
+			handleRotateRunnerToken(w, r, strings.TrimSuffix(path, "/rotate-token"))
+			return
+		}
+		id := path
 		if id == "" || strings.Contains(id, "/") {
 			writeJSON(w, 400, map[string]string{"error": "invalid runner id"})
 			return
@@ -223,9 +281,18 @@ func main() {
 		handleSubmitResult(r.Context(), db, w, r)
 	})
 
+	mux.HandleFunc("/api/v1/jobs/renew", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		handleRenewLease(r.Context(), db, w, r)
+	})
+
 	mux.HandleFunc("/api/v1/audit", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
 		handleSearchAudit(w, r)
 	}))
+	mux.HandleFunc("/api/v1/audit/verify", withAuth(db, handleVerifyAudit))
 
 	mux.HandleFunc("/api/v1/runbooks", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -323,6 +390,27 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		}
 	}))
+	mux.HandleFunc("/api/v1/automation/status", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		handleAutomationStatus(w, r)
+	}))
+	mux.HandleFunc("/api/v1/automation/pause", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		handlePauseAutomation(w, r)
+	}))
+	mux.HandleFunc("/api/v1/automation/resume", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		handleResumeAutomation(w, r)
+	}))
 	mux.HandleFunc("/api/v1/schedules/", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
 		scheduleID := strings.TrimPrefix(r.URL.Path, "/api/v1/schedules/")
 		if scheduleID == "" || r.Method != http.MethodDelete {
@@ -333,7 +421,7 @@ func main() {
 	}))
 
 	addr := ":" + envOrDefault("API_PORT", "8080")
-	srv := &http.Server{Addr: addr, Handler: corsMiddleware(mux), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 1 << 20}
+	srv := &http.Server{Addr: addr, Handler: requestMiddleware(logger, rateLimiter, corsMiddleware(mux)), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 1 << 20}
 
 	go func() {
 		logger.Info("API listening", "addr", addr)
@@ -354,9 +442,87 @@ type contextKey string
 
 const dbKey contextKey = "db"
 
+type responseRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *responseRecorder) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+		w.ResponseWriter.WriteHeader(status)
+	}
+}
+
+func (w *responseRecorder) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func requestMiddleware(logger *slog.Logger, limiter *boundedRateLimiter, next http.Handler) http.Handler {
+	authLimiter := newBoundedRateLimiter(apiRateLimitMaxEntries, apiAuthLimit, apiRateLimitWindow)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := r.Header.Get("X-Request-ID")
+		if !validRequestID(requestID) {
+			requestID = newUUID()
+		}
+		w.Header().Set("X-Request-ID", requestID)
+
+		if class, limited := rateLimitClass(r); limited {
+			limit := limiter
+			if class == "auth" {
+				limit = authLimiter
+			}
+			if !limit.allow(class + ":" + rateLimitClient(r)) {
+				metrics.rateLimited.Add(1)
+				w.Header().Set("Retry-After", strconv.Itoa(int(apiRateLimitWindow/time.Second)))
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded", "request_id": requestID})
+				return
+			}
+		}
+
+		started := time.Now()
+		rw := &responseRecorder{ResponseWriter: w}
+		next.ServeHTTP(rw, r)
+		if rw.status == 0 {
+			rw.status = http.StatusOK
+		}
+		logger.Info("request", "request_id", requestID, "method", r.Method, "path", r.URL.Path, "status", rw.status, "duration_ms", time.Since(started).Milliseconds())
+		metrics.observe(rw.status, time.Since(started))
+	})
+}
+
+func validRequestID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if r < 0x21 || r > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 func withAuth(db *sql.DB, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if os.Getenv("VPS_WEB_SHARED_SECRET") != "" && r.Header.Get("X-VPS-Internal-Secret") == os.Getenv("VPS_WEB_SHARED_SECRET") {
+		if bearer := bearerToken(r); bearer != "" {
+			actor, err := resolveAPITokenActor(r.Context(), db, bearer)
+			if err != nil {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired API token"})
+				return
+			}
+			ctx := authz.WithActor(r.Context(), actor)
+			ctx = context.WithValue(ctx, dbKey, db)
+			r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+			next(w, r.WithContext(ctx))
+			return
+		}
+		sharedSecret := os.Getenv("VPS_WEB_SHARED_SECRET")
+		providedSecret := r.Header.Get("X-VPS-Internal-Secret")
+		if sharedSecret != "" && secureStringEqual(providedSecret, sharedSecret) {
 			actor, err := resolveExternalActor(r.Context(), db, r.Header.Get("X-VPS-OIDC-Subject"), r.Header.Get("X-VPS-OIDC-Email"))
 			if err != nil {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "OIDC identity is not provisioned"})
@@ -368,8 +534,12 @@ func withAuth(db *sql.DB, next http.HandlerFunc) http.HandlerFunc {
 			next(w, r.WithContext(ctx))
 			return
 		}
+		if !devAuthEnabled() || productionModeEnabled() {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+			return
+		}
 		userID := r.Header.Get("X-VPS-User")
-		if userID == "" && os.Getenv("VPS_DEV_AUTH") == "true" {
+		if userID == "" {
 			userID = "user_senior"
 		}
 		if userID == "" {
@@ -388,6 +558,68 @@ func withAuth(db *sql.DB, next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func devAuthEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("VPS_DEV_AUTH")), "true")
+}
+
+func productionModeEnabled() bool {
+	for _, key := range []string{"VPS_ENV", "APP_ENV", "ENVIRONMENT"} {
+		value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+		if value == "production" || value == "prod" {
+			return true
+		}
+	}
+	return false
+}
+
+func secureStringEqual(got, want string) bool {
+	if got == "" || want == "" || len(got) != len(want) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+func bearerToken(r *http.Request) string {
+	value := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(value) < len("Bearer ") || !strings.EqualFold(value[:len("Bearer ")], "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(value[len("Bearer "):])
+}
+
+func resolveAPITokenActor(ctx context.Context, db *sql.DB, token string) (*authz.Actor, error) {
+	if token == "" {
+		return nil, fmt.Errorf("API token is empty")
+	}
+	var actor authz.Actor
+	err := db.QueryRowContext(ctx, `
+		SELECT u.id, u.email, u.display_name, t.organisation_id, m.role
+		FROM api_tokens t
+		JOIN users u ON u.id = t.user_id AND u.status = 'active'
+		JOIN memberships m ON m.user_id = t.user_id AND m.organisation_id = t.organisation_id AND m.status = 'active'
+		WHERE t.token_hash = ? AND t.revoked_at IS NULL AND t.expires_at > datetime('now')`, hashToken(token)).Scan(
+		&actor.UserID, &actor.Email, &actor.DisplayName, &actor.OrganisationID, &actor.Role)
+	if err != nil {
+		return nil, fmt.Errorf("API token is invalid or expired")
+	}
+	_, _ = db.ExecContext(ctx, "UPDATE api_tokens SET last_used_at = datetime('now') WHERE token_hash = ? AND revoked_at IS NULL", hashToken(token))
+	return &actor, nil
+}
+
+func validateAuthConfig() error {
+	if !productionModeEnabled() {
+		return nil
+	}
+	if devAuthEnabled() {
+		return fmt.Errorf("VPS_DEV_AUTH must be disabled in production")
+	}
+	secret := os.Getenv("VPS_WEB_SHARED_SECRET")
+	if len(secret) < 32 {
+		return fmt.Errorf("VPS_WEB_SHARED_SECRET must be at least 32 characters in production")
+	}
+	return nil
+}
+
 func dbFrom(r *http.Request) *sql.DB {
 	return r.Context().Value(dbKey).(*sql.DB)
 }
@@ -400,23 +632,45 @@ func dbFromRequest(r *http.Request) *sql.DB {
 }
 
 func authenticateRunnerRegistration(db *sql.DB, r *http.Request) (string, error) {
+	orgID, _, err := authenticateRunnerCredential(db, r)
+	return orgID, err
+}
+
+func authenticateRunnerCredential(db *sql.DB, r *http.Request) (string, string, error) {
 	token := runnerToken(r)
-	if token == "" && os.Getenv("VPS_DEV_AUTH") == "true" {
-		return "org_demo", nil
+	if token == "" && devAuthEnabled() && !productionModeEnabled() {
+		return "org_demo", "", nil
 	}
 	if token == "" {
-		return "", fmt.Errorf("runner registration credential required")
+		return "", "", fmt.Errorf("runner registration credential required")
 	}
-	var orgID string
-	err := db.QueryRowContext(r.Context(), `SELECT organisation_id FROM runner_credentials WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > datetime('now')`, hashToken(token)).Scan(&orgID)
+	var orgID, runnerID string
+	err := db.QueryRowContext(r.Context(), `SELECT organisation_id, COALESCE(runner_id,'') FROM runner_credentials WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > datetime('now')`, hashToken(token)).Scan(&orgID, &runnerID)
 	if err != nil {
-		return "", fmt.Errorf("invalid or expired runner registration credential")
+		return "", "", fmt.Errorf("invalid or expired runner registration credential")
 	}
-	return orgID, nil
+	if runnerID != "" {
+		var status string
+		if err := db.QueryRowContext(r.Context(), "SELECT status FROM runners WHERE id = ? AND organisation_id = ?", runnerID, orgID).Scan(&status); err != nil || status == "revoked" {
+			return "", "", fmt.Errorf("runner credential is no longer valid")
+		}
+	}
+	return orgID, runnerID, nil
 }
 
 func authenticateRunner(db *sql.DB, r *http.Request) (string, error) {
-	return authenticateRunnerRegistration(db, r)
+	return authenticateRunnerForID(db, r, r.URL.Query().Get("runner_id"))
+}
+
+func authenticateRunnerForID(db *sql.DB, r *http.Request, requestedRunnerID string) (string, error) {
+	orgID, credentialRunnerID, err := authenticateRunnerCredential(db, r)
+	if err != nil {
+		return "", err
+	}
+	if credentialRunnerID != "" && requestedRunnerID != "" && credentialRunnerID != requestedRunnerID {
+		return "", fmt.Errorf("runner credential is bound to a different runner")
+	}
+	return orgID, nil
 }
 
 func runnerToken(r *http.Request) string {
@@ -439,6 +693,112 @@ func handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		"organisation":    orgName,
 		"role":            actor.Role,
 	})
+}
+
+type createAPITokenRequest struct {
+	UserID    string `json:"user_id"`
+	Name      string `json:"name"`
+	ExpiresIn int    `json:"expires_in"`
+}
+
+func handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
+	actor, err := authz.RequireActor(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+	if !actor.IsPrivileged() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "API token management requires a privileged role"})
+		return
+	}
+	var req createAPITokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if strings.TrimSpace(req.UserID) == "" {
+		req.UserID = actor.UserID
+	}
+	if req.Name == "" {
+		req.Name = "cli-token"
+	}
+	if len(req.Name) > 100 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name must be 100 characters or fewer"})
+		return
+	}
+	if req.ExpiresIn == 0 {
+		req.ExpiresIn = 30 * 24 * 60 * 60
+	}
+	if req.ExpiresIn < 60 || req.ExpiresIn > 90*24*60*60 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expires_in must be between 60 seconds and 90 days"})
+		return
+	}
+
+	var provisionedUser string
+	err = dbFrom(r).QueryRowContext(r.Context(), `
+		SELECT u.id FROM users u
+		JOIN memberships m ON m.user_id = u.id AND m.organisation_id = ? AND m.status = 'active'
+		WHERE u.id = ? AND u.status = 'active'`, actor.OrganisationID, req.UserID).Scan(&provisionedUser)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user is not an active member of your organisation"})
+		return
+	}
+
+	token := newToken()
+	if token == "" {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate API token"})
+		return
+	}
+	expiresAt := time.Now().UTC().Add(time.Duration(req.ExpiresIn) * time.Second).Format("2006-01-02 15:04:05")
+	tokenID := "pat_" + shortID()
+	tokenPrefix := token
+	if len(tokenPrefix) > 8 {
+		tokenPrefix = tokenPrefix[:8]
+	}
+	_, err = dbFrom(r).ExecContext(r.Context(), `
+		INSERT INTO api_tokens (id, organisation_id, user_id, name, token_prefix, token_hash, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, tokenID, actor.OrganisationID, provisionedUser, req.Name, tokenPrefix, hashToken(token), expiresAt)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create API token"})
+		return
+	}
+	writeAuditEvent(r.Context(), dbFrom(r), actor.OrganisationID, actor.UserID, "auth.token.created", "api_token", tokenID, "success", map[string]any{
+		"user_id": provisionedUser, "name": req.Name, "token_prefix": tokenPrefix, "expires_at": expiresAt,
+	})
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"token_id": tokenID, "token": token, "user_id": provisionedUser,
+		"organisation_id": actor.OrganisationID, "expires_at": expiresAt,
+	})
+}
+
+func handleRevokeAPIToken(w http.ResponseWriter, r *http.Request, tokenID string) {
+	actor, err := authz.RequireActor(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+	if !actor.IsPrivileged() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "API token management requires a privileged role"})
+		return
+	}
+	if tokenID == "" || strings.Contains(tokenID, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid token id"})
+		return
+	}
+	result, err := dbFrom(r).ExecContext(r.Context(), `
+		UPDATE api_tokens SET revoked_at = datetime('now')
+		WHERE id = ? AND organisation_id = ? AND revoked_at IS NULL`, tokenID, actor.OrganisationID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to revoke API token"})
+		return
+	}
+	changed, _ := result.RowsAffected()
+	if changed == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "active API token not found"})
+		return
+	}
+	writeAuditEvent(r.Context(), dbFrom(r), actor.OrganisationID, actor.UserID, "auth.token.revoked", "api_token", tokenID, "success", nil)
+	writeJSON(w, http.StatusOK, map[string]string{"token_id": tokenID, "status": "revoked"})
 }
 
 func handleListServers(w http.ResponseWriter, r *http.Request) {
@@ -882,12 +1242,16 @@ func handleRevokeRunner(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, 404, map[string]string{"error": "runner not found"})
 		return
 	}
+	if _, err := dbFrom(r).ExecContext(r.Context(), "UPDATE runner_credentials SET revoked_at = datetime('now') WHERE runner_id = ? AND revoked_at IS NULL", id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "runner revoked but credential revocation failed"})
+		return
+	}
 	writeAuditEvent(r.Context(), dbFrom(r), actor.OrganisationID, actor.UserID, "runner.revoked", "runner", id, "success", nil)
 	writeJSON(w, 200, map[string]string{"status": "revoked"})
 }
 
 func handleRegisterRunner(w http.ResponseWriter, r *http.Request) {
-	orgID, err := authenticateRunnerRegistration(dbFromRequest(r), r)
+	orgID, credentialRunnerID, err := authenticateRunnerCredential(dbFromRequest(r), r)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
@@ -916,15 +1280,30 @@ func handleRegisterRunner(w http.ResponseWriter, r *http.Request) {
 	runnerID := "rnr_" + shortID()
 
 	db := dbFromRequest(r)
-	_, err = db.ExecContext(r.Context(),
-		`INSERT INTO runners (id, organisation_id, name, runner_type, status, version, hostname, platform, ip_address, registered_at)
-		VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))`,
-		runnerID, orgID, req.Name, req.RunnerType, "active",
-		sqlNullString(req.Version), sqlNullString(req.Hostname), sqlNullString(req.Platform),
-		sqlNullString(req.IPAddress))
-	if err != nil {
-		writeJSON(w, 500, map[string]string{"error": "failed to register runner: " + err.Error()})
-		return
+	if credentialRunnerID != "" {
+		result, updateErr := db.ExecContext(r.Context(),
+			`UPDATE runners SET status='active', version=?, hostname=?, platform=?, ip_address=?, registered_at=COALESCE(registered_at,datetime('now')), last_seen_at=datetime('now'), updated_at=datetime('now') WHERE id=? AND organisation_id=? AND status != 'revoked'`,
+			sqlNullString(req.Version), sqlNullString(req.Hostname), sqlNullString(req.Platform), sqlNullString(req.IPAddress), credentialRunnerID, orgID)
+		if updateErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to register runner"})
+			return
+		}
+		if n, _ := result.RowsAffected(); n == 0 {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "runner is not available for registration"})
+			return
+		}
+		runnerID = credentialRunnerID
+	} else {
+		_, err = db.ExecContext(r.Context(),
+			`INSERT INTO runners (id, organisation_id, name, runner_type, status, version, hostname, platform, ip_address, registered_at)
+			VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))`,
+			runnerID, orgID, req.Name, req.RunnerType, "active",
+			sqlNullString(req.Version), sqlNullString(req.Hostname), sqlNullString(req.Platform),
+			sqlNullString(req.IPAddress))
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": "failed to register runner: " + err.Error()})
+			return
+		}
 	}
 
 	db.ExecContext(r.Context(),
@@ -951,6 +1330,10 @@ func handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 		return
 	}
+	if _, err := authenticateRunnerForID(dbFromRequest(r), r, req.RunnerID); err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
 
 	result, err := dbFromRequest(r).ExecContext(r.Context(),
 		"UPDATE runners SET status = 'active', last_seen_at = datetime('now'), hostname = COALESCE(NULLIF(?,''), hostname), platform = COALESCE(NULLIF(?,''), platform), version = COALESCE(NULLIF(?,''), version) WHERE id = ? AND organisation_id = ?",
@@ -968,10 +1351,22 @@ func handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 func handleCreateRegistrationToken(w http.ResponseWriter, r *http.Request) {
 	actor, _ := authz.RequireActor(r.Context())
-	token := newToken()
-	_, err := dbFrom(r).ExecContext(r.Context(), "INSERT INTO runner_credentials (id, organisation_id, token_hash, expires_at) VALUES (?,?,?,datetime('now','+1 hour'))", "rct_"+shortID(), actor.OrganisationID, hashToken(token))
+	if !actor.CanManageRunners() {
+		writeDenial(w, r, actor, "runner.credential.rotated", "runner", "", authz.Deny("runner_management_required", "Creating runner credentials requires a privileged role."))
+		return
+	}
+	var req struct {
+		RunnerID string `json:"runner_id"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+	}
+	token, err := createRunnerCredential(r.Context(), dbFrom(r), actor.OrganisationID, actor.UserID, req.RunnerID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create registration token"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, 201, map[string]string{
@@ -980,15 +1375,62 @@ func handleCreateRegistrationToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func createRunnerCredential(ctx context.Context, db *sql.DB, orgID, actorID, runnerID string) (string, error) {
+	if runnerID != "" {
+		var status string
+		if err := db.QueryRowContext(ctx, "SELECT status FROM runners WHERE id = ? AND organisation_id = ?", runnerID, orgID).Scan(&status); err != nil {
+			return "", fmt.Errorf("runner not found")
+		}
+		if status == "revoked" {
+			return "", fmt.Errorf("runner is revoked")
+		}
+		if _, err := db.ExecContext(ctx, "UPDATE runner_credentials SET revoked_at = datetime('now') WHERE runner_id = ? AND revoked_at IS NULL", runnerID); err != nil {
+			return "", fmt.Errorf("failed to revoke previous runner credentials")
+		}
+	}
+	token := newToken()
+	if token == "" {
+		return "", fmt.Errorf("failed to generate registration token")
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO runner_credentials (id, organisation_id, runner_id, token_hash, expires_at) VALUES (?,?,?,?,datetime('now','+1 hour'))", "rct_"+shortID(), orgID, sqlNullString(runnerID), hashToken(token)); err != nil {
+		return "", fmt.Errorf("failed to create registration token")
+	}
+	writeAuditEvent(ctx, db, orgID, actorID, "runner.credential.rotated", "runner", runnerID, "success", map[string]any{"expires_in": 3600})
+	return token, nil
+}
+
+func handleRotateRunnerToken(w http.ResponseWriter, r *http.Request, runnerID string) {
+	actor, _ := authz.RequireActor(r.Context())
+	if !actor.CanManageRunners() {
+		writeDenial(w, r, actor, "runner.credential.rotated", "runner", runnerID, authz.Deny("runner_management_required", "Rotating runner credentials requires a privileged role."))
+		return
+	}
+	if runnerID == "" || strings.Contains(runnerID, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid runner id"})
+		return
+	}
+	token, err := createRunnerCredential(r.Context(), dbFrom(r), actor.OrganisationID, actor.UserID, runnerID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"registration_token": token, "expires_in": "3600", "runner_id": runnerID})
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cache-Control", "no-store")
 		origin := r.Header.Get("Origin")
 		if origin != "" && origin == envOrDefault("VPS_WEB_ORIGIN", "http://localhost:3000") {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-VPS-User, X-VPS-Runner-Token")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-VPS-User, X-VPS-Runner-Token, X-VPS-Internal-Secret, X-VPS-OIDC-Subject, X-VPS-OIDC-Email")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -1010,7 +1452,10 @@ func handleListExecutions(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT e.id, e.actor_user_id, e.actor_role_at_time, e.execution_type, e.status,
 		e.risk_level, e.environment, e.reason, e.command_preview, e.command_hash,
 		e.timeout_seconds, e.requested_at, e.started_at, e.finished_at,
-		COALESCE(e.delegated_by_user_id,''), COALESCE(e.approval_id,'')
+		COALESCE(e.delegated_by_user_id,''), COALESCE(e.approval_id,''),
+		(SELECT COUNT(*) FROM execution_targets et WHERE et.execution_id = e.id),
+		(SELECT COUNT(*) FROM execution_targets et WHERE et.execution_id = e.id AND et.status = 'succeeded'),
+		(SELECT COUNT(*) FROM execution_targets et WHERE et.execution_id = e.id AND et.status = 'failed')
 		FROM executions e WHERE e.organisation_id = ?`
 	args := []any{actor.OrganisationID}
 	if status != "" {
@@ -1062,10 +1507,7 @@ func handleListExecutions(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&e.ID, &e.ActorUserID, &e.ActorRole, &e.ExecutionType, &e.Status,
 			&e.RiskLevel, &e.Environment, &e.Reason, &e.CommandPreview, &e.CommandHash,
 			&e.TimeoutSeconds, &e.RequestedAt, &e.StartedAt, &e.FinishedAt,
-			&e.DelegatedBy, &e.ApprovalID)
-		dbFrom(r).QueryRowContext(r.Context(),
-			"SELECT COUNT(*), SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END), SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) FROM execution_targets WHERE execution_id = ?",
-			e.ID).Scan(&e.TargetCount, &e.SucceededCount, &e.FailedCount)
+			&e.DelegatedBy, &e.ApprovalID, &e.TargetCount, &e.SucceededCount, &e.FailedCount)
 		results = append(results, e)
 	}
 	writeJSON(w, 200, map[string]any{"executions": results})
@@ -1188,6 +1630,20 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "target and command are required"})
 		return
 	}
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if idempotencyKey != "" && !validIdempotencyKey(idempotencyKey) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Idempotency-Key must contain only letters, numbers, '.', '_' or '-' and be at most 128 characters"})
+		return
+	}
+	payloadHash := hashPayload(req)
+	if idempotencyKey != "" {
+		if replayed, err := replayIdempotentExecution(r.Context(), db, actor.OrganisationID, actor.UserID, idempotencyKey, payloadHash, w); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to inspect idempotency key"})
+			return
+		} else if replayed {
+			return
+		}
+	}
 
 	targetIDs := resolveTargets(r.Context(), db, actor.OrganisationID, req.Target)
 	if len(targetIDs) == 0 {
@@ -1251,22 +1707,70 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record execution audit event"})
 		return
 	}
-	if err = tx.Commit(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit execution"})
-		return
-	}
-
-	writeJSON(w, 201, map[string]any{
+	responseBody := jsonString(map[string]any{
 		"execution_id": execID,
 		"status":       "queued",
 		"risk_level":   string(risk),
 		"target_count": len(targetIDs),
 	})
+	if idempotencyKey != "" {
+		if _, err = tx.ExecContext(r.Context(),
+			`INSERT INTO execution_idempotency (organisation_id, user_id, idempotency_key, payload_hash, execution_id, response_body) VALUES (?,?,?,?,?,?)`,
+			actor.OrganisationID, actor.UserID, idempotencyKey, payloadHash, execID, responseBody); err != nil {
+			_ = tx.Rollback()
+			if replayed, replayErr := replayIdempotentExecution(r.Context(), db, actor.OrganisationID, actor.UserID, idempotencyKey, payloadHash, w); replayErr == nil && replayed {
+				return
+			}
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "idempotency key is already in use"})
+			return
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit execution"})
+		return
+	}
+
+	writeRawJSON(w, http.StatusCreated, responseBody)
+}
+
+func replayIdempotentExecution(ctx context.Context, db *sql.DB, orgID, userID, key, payloadHash string, w http.ResponseWriter) (bool, error) {
+	var storedHash, responseBody string
+	err := db.QueryRowContext(ctx,
+		`SELECT payload_hash, response_body FROM execution_idempotency WHERE organisation_id = ? AND user_id = ? AND idempotency_key = ?`,
+		orgID, userID, key).Scan(&storedHash, &responseBody)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if storedHash != payloadHash {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "idempotency key was already used with a different request payload"})
+		return true, nil
+	}
+	w.Header().Set("Idempotency-Replayed", "true")
+	writeRawJSON(w, http.StatusCreated, responseBody)
+	return true, nil
 }
 
 func handleCancelExecution(w http.ResponseWriter, r *http.Request, execID string) {
 	actor, _ := authz.RequireActor(r.Context())
 	db := dbFrom(r)
+	var requesterID string
+	if err := db.QueryRowContext(r.Context(),
+		"SELECT actor_user_id FROM executions WHERE id = ? AND organisation_id = ? AND status IN ('created','queued')",
+		execID, actor.OrganisationID).Scan(&requesterID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "execution not cancellable"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to inspect execution"})
+		return
+	}
+	if actor.UserID != requesterID && !canManageExecution(actor.Role) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the requester or a senior operator can cancel this execution"})
+		return
+	}
 	result, err := db.ExecContext(r.Context(),
 		"UPDATE executions SET status = 'cancelled', finished_at = datetime('now') WHERE id = ? AND organisation_id = ? AND status IN ('created','queued')",
 		execID, actor.OrganisationID)
@@ -1282,6 +1786,15 @@ func handleCancelExecution(w http.ResponseWriter, r *http.Request, execID string
 	db.ExecContext(r.Context(), "UPDATE execution_targets SET status = 'cancelled' WHERE execution_id = ?", execID)
 	writeAuditEvent(r.Context(), db, actor.OrganisationID, actor.UserID, "execution.cancelled", "execution", execID, "cancelled", nil)
 	writeJSON(w, 200, map[string]string{"status": "cancelled"})
+}
+
+func canManageExecution(role string) bool {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "owner", "admin", "senior_engineer":
+		return true
+	default:
+		return false
+	}
 }
 
 func handleSearchAudit(w http.ResponseWriter, r *http.Request) {
@@ -1326,6 +1839,20 @@ func handleSearchAudit(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, 200, map[string]any{"events": events})
+}
+
+func handleVerifyAudit(w http.ResponseWriter, r *http.Request) {
+	actor, _ := authz.RequireActor(r.Context())
+	if !actor.IsSenior() && strings.ToLower(actor.Role) != "auditor" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "audit verification requires an auditor or senior operator"})
+		return
+	}
+	checked, err := verifyAuditHashChain(r.Context(), dbFrom(r), actor.OrganisationID)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"valid": false, "checked_events": checked, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "checked_events": checked})
 }
 
 func writeDenial(w http.ResponseWriter, r *http.Request, actor *authz.Actor, action, targetType, targetID string, dec authz.Decision) {
@@ -1469,9 +1996,13 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		return
 	}
 	defer tx.Rollback()
-	var targetID, execID, command, host, sshUser string
+	if err := reconcileExpiredLeases(ctx, tx, runnerOrg); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to reconcile expired jobs"})
+		return
+	}
+	var targetID, execID, command, host, sshUser, sourceStatus string
 	var sshPort, timeout int
-	err = tx.QueryRowContext(ctx, `SELECT et.id, e.id, COALESCE(NULLIF(e.command,''), e.command_preview), COALESCE(s.hostname, s.public_ip, ''), s.ssh_port, COALESCE(s.ssh_username,''), e.timeout_seconds
+	err = tx.QueryRowContext(ctx, `SELECT et.id, e.id, et.status, COALESCE(NULLIF(e.command,''), e.command_preview), COALESCE(s.hostname, s.public_ip, ''), s.ssh_port, COALESCE(s.ssh_username,''), e.timeout_seconds
 		FROM execution_targets et JOIN executions e ON e.id = et.execution_id JOIN servers s ON s.id = et.server_id
 		WHERE e.status IN ('queued','running') AND e.organisation_id = ?
 		AND ((et.status = 'pending' AND (et.next_attempt_at IS NULL OR et.next_attempt_at <= datetime('now')))
@@ -1480,7 +2011,7 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		AND EXISTS (SELECT 1 FROM runners rn JOIN runner_scopes rs ON rs.runner_id = rn.id
 			WHERE rn.id = ? AND rn.organisation_id = ? AND rn.status = 'active'
 			AND (rs.scope_type = 'all' OR (rs.scope_type = 'server' AND rs.scope_value = et.server_id)))
-		ORDER BY e.requested_at ASC LIMIT 1`, runnerOrg, runnerID, runnerOrg).Scan(&targetID, &execID, &command, &host, &sshPort, &sshUser, &timeout)
+		ORDER BY e.requested_at ASC LIMIT 1`, runnerOrg, runnerID, runnerOrg).Scan(&targetID, &execID, &sourceStatus, &command, &host, &sshPort, &sshUser, &timeout)
 	if err != nil {
 		if err := tx.Commit(); err != nil {
 			_ = err
@@ -1497,7 +2028,7 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to bind job to runner"})
 		return
 	}
-	if err = recordExecutionEvent(ctx, tx, runnerOrg, execID, targetID, "queued", "running", "execution.started", map[string]any{"runner_id": runnerID, "lease_id": leaseID}); err != nil {
+	if err = recordExecutionEvent(ctx, tx, runnerOrg, execID, targetID, sourceStatus, "running", "execution.started", map[string]any{"runner_id": runnerID, "lease_id": leaseID}); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record execution timeline"})
 		return
 	}
@@ -1540,9 +2071,66 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 		return
 	}
+	if _, err := authenticateRunnerForID(db, r, req.RunnerID); err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
 	req.Stdout = redact.Stdout(req.Stdout)
 	req.Stderr = redact.Stdout(req.Stderr)
-	stdoutArtifactID, stderrArtifactID, err := persistExecutionArtifacts(ctx, db, orgID, req.ExecutionID, req.TargetID, req.Stdout, req.Stderr)
+	status := "succeeded"
+	if req.ExitCode != 0 || req.Error != "" {
+		status = "failed"
+	}
+	payloadBytes, _ := json.Marshal(struct {
+		ExecutionID string `json:"execution_id"`
+		TargetID    string `json:"target_id"`
+		RunnerID    string `json:"runner_id"`
+		LeaseID     string `json:"lease_id"`
+		ExitCode    int    `json:"exit_code"`
+		Stdout      string `json:"stdout"`
+		Stderr      string `json:"stderr"`
+		Error       string `json:"error"`
+		DurationMs  int64  `json:"duration_ms"`
+	}{req.ExecutionID, req.TargetID, req.RunnerID, req.LeaseID, req.ExitCode, req.Stdout, req.Stderr, req.Error, req.DurationMs})
+	hash := fmt.Sprintf("%x", sha256.Sum256(payloadBytes))
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start result transaction"})
+		return
+	}
+	defer tx.Rollback()
+	var receiptHash, receiptBody string
+	var receiptCode int
+	if err := tx.QueryRowContext(ctx, `SELECT payload_hash, response_code, response_body
+		FROM execution_result_receipts WHERE target_id = ? AND lease_id = ?`, req.TargetID, req.LeaseID).
+		Scan(&receiptHash, &receiptCode, &receiptBody); err == nil {
+		if receiptHash != hash {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "result payload conflicts with existing receipt"})
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to replay result receipt"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(receiptCode)
+		_, _ = w.Write([]byte(receiptBody))
+		return
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to inspect result receipt"})
+		return
+	}
+
+	var attempt, maxAttempts int
+	var currentStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT status, attempt, max_attempts FROM execution_targets
+		WHERE id = ? AND execution_id = ? AND runner_id = ? AND lease_id = ? AND status = 'running'`,
+		req.TargetID, req.ExecutionID, req.RunnerID, req.LeaseID).Scan(&currentStatus, &attempt, &maxAttempts); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "target is not assigned to this runner"})
+		return
+	}
+	stdoutArtifactID, stderrArtifactID, err := persistExecutionArtifacts(ctx, tx, orgID, req.ExecutionID, req.TargetID, req.Stdout, req.Stderr)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist execution output"})
 		return
@@ -1554,24 +2142,62 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 	if stderrArtifactID != "" {
 		storedStderr = ""
 	}
-
-	status := "succeeded"
-	if req.ExitCode != 0 || req.Error != "" {
-		status = "failed"
+	if status == "failed" && attempt >= maxAttempts {
+		status = "dead_letter"
 	}
 
-	targetResult, err := db.ExecContext(ctx, "UPDATE execution_targets SET status = ?, exit_code = ?, error_summary = ?, stdout = ?, stderr = ?, stdout_artifact_id = ?, stderr_artifact_id = ?, stdout_bytes = ?, stderr_bytes = ?, lease_expires_at = NULL, finished_at = datetime('now') WHERE id = ? AND execution_id = ? AND runner_id = ? AND lease_id = ? AND status = 'running' AND EXISTS (SELECT 1 FROM executions e WHERE e.id = execution_targets.execution_id AND e.organisation_id = ?) AND EXISTS (SELECT 1 FROM runners rn WHERE rn.id = execution_targets.runner_id AND rn.organisation_id = ?)",
+	targetResult, err := tx.ExecContext(ctx, "UPDATE execution_targets SET status = ?, exit_code = ?, error_summary = ?, stdout = ?, stderr = ?, stdout_artifact_id = ?, stderr_artifact_id = ?, stdout_bytes = ?, stderr_bytes = ?, lease_expires_at = NULL, finished_at = datetime('now') WHERE id = ? AND execution_id = ? AND runner_id = ? AND lease_id = ? AND status = 'running' AND EXISTS (SELECT 1 FROM executions e WHERE e.id = execution_targets.execution_id AND e.organisation_id = ?) AND EXISTS (SELECT 1 FROM runners rn WHERE rn.id = execution_targets.runner_id AND rn.organisation_id = ?)",
 		status, req.ExitCode, sqlNullString(req.Error), storedStdout, storedStderr, sqlNullString(stdoutArtifactID), sqlNullString(stderrArtifactID), len(req.Stdout), len(req.Stderr), req.TargetID, req.ExecutionID, req.RunnerID, req.LeaseID, orgID, orgID)
 	if err != nil || func() bool { n, _ := targetResult.RowsAffected(); return n == 0 }() {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "target is not assigned to this runner"})
 		return
 	}
+	if status == "dead_letter" {
+		if _, err := tx.ExecContext(ctx, "UPDATE execution_targets SET error_summary = COALESCE(NULLIF(error_summary,''), 'maximum attempts exhausted') WHERE id = ?", req.TargetID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to mark dead-letter job"})
+			return
+		}
+	}
+	if status == "failed" && attempt < maxAttempts {
+		backoff := retryBackoffSeconds(attempt)
+		if _, err := tx.ExecContext(ctx, `UPDATE execution_targets
+			SET status = 'pending', runner_id = NULL, lease_id = NULL,
+			    lease_expires_at = NULL, finished_at = NULL,
+			    next_attempt_at = datetime('now', ? || ' seconds')
+			WHERE id = ? AND status = 'failed'`, fmt.Sprintf("+%d", backoff), req.TargetID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to schedule retry"})
+			return
+		}
+		if err := recordExecutionEvent(ctx, tx, orgID, req.ExecutionID, req.TargetID, "failed", "pending", "execution.target.retry_scheduled", map[string]any{
+			"retry_at_seconds": backoff, "attempt": attempt, "max_attempts": maxAttempts,
+		}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record retry timeline"})
+			return
+		}
+		if err := writeAuditEventTx(ctx, tx, orgID, "", "execution.retry_scheduled", "execution", req.ExecutionID, "pending", map[string]any{
+			"target_id": req.TargetID, "attempt": attempt, "max_attempts": maxAttempts,
+		}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record retry audit"})
+			return
+		}
+		responseBody := `{"status":"retry_scheduled"}`
+		if err := insertResultReceipt(ctx, tx, orgID, req, hash, responseBody); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record result receipt"})
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit result"})
+			return
+		}
+		writeJSON(w, 200, map[string]string{"status": "retry_scheduled"})
+		return
+	}
 	var remaining, failed int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM execution_targets WHERE execution_id = ? AND status IN ('pending','running')", req.ExecutionID).Scan(&remaining); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM execution_targets WHERE execution_id = ? AND status IN ('pending','running')", req.ExecutionID).Scan(&remaining); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to inspect execution state"})
 		return
 	}
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM execution_targets WHERE execution_id = ? AND status = 'failed'", req.ExecutionID).Scan(&failed); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM execution_targets WHERE execution_id = ? AND status IN ('failed','dead_letter')", req.ExecutionID).Scan(&failed); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to inspect execution result"})
 		return
 	}
@@ -1580,34 +2206,96 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 		if failed > 0 {
 			finalStatus = "failed"
 		}
-		if _, err := db.ExecContext(ctx, "UPDATE executions SET status = ?, finished_at = datetime('now'), error_summary = ? WHERE id = ? AND organisation_id = ? AND status = 'running'", finalStatus, sqlNullString(req.Error), req.ExecutionID, orgID); err != nil {
+		if _, err := tx.ExecContext(ctx, "UPDATE executions SET status = ?, finished_at = datetime('now'), error_summary = ? WHERE id = ? AND organisation_id = ? AND status = 'running'", finalStatus, sqlNullString(req.Error), req.ExecutionID, orgID); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to finalize execution"})
 			return
 		}
 		status = finalStatus
 	}
-	if err := recordExecutionEvent(ctx, db, orgID, req.ExecutionID, req.TargetID, "running", status, "execution.target.completed", map[string]any{"exit_code": req.ExitCode, "duration_ms": req.DurationMs}); err != nil {
-		slog.Error("execution timeline write error", "error", err)
+	if err := recordExecutionEvent(ctx, tx, orgID, req.ExecutionID, req.TargetID, currentStatus, status, "execution.target.completed", map[string]any{"exit_code": req.ExitCode, "duration_ms": req.DurationMs}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record execution timeline"})
+		return
 	}
 	if remaining == 0 {
-		if err := recordExecutionEvent(ctx, db, orgID, req.ExecutionID, "", "running", status, "execution.completed", map[string]any{"failed_targets": failed}); err != nil {
-			slog.Error("execution timeline write error", "error", err)
+		if err := recordExecutionEvent(ctx, tx, orgID, req.ExecutionID, "", "running", status, "execution.completed", map[string]any{"failed_targets": failed}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record execution timeline"})
+			return
 		}
 	}
 	action := "execution.target.completed"
 	if remaining == 0 {
 		action = "execution.completed"
 	}
-	writeAuditEvent(ctx, db, orgID, "", action, "execution", req.ExecutionID, status, map[string]any{
+	if err := writeAuditEventTx(ctx, tx, orgID, "", action, "execution", req.ExecutionID, status, map[string]any{
 		"exit_code": req.ExitCode, "duration_ms": req.DurationMs,
-	})
+	}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record execution audit"})
+		return
+	}
+	responseBody := `{"status":"ok"}`
+	if err := insertResultReceipt(ctx, tx, orgID, req, hash, responseBody); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record result receipt"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit result"})
+		return
+	}
 
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
+func handleRenewLease(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var req struct {
+		ExecutionID string `json:"execution_id"`
+		TargetID    string `json:"target_id"`
+		RunnerID    string `json:"runner_id"`
+		LeaseID     string `json:"lease_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ExecutionID == "" || req.TargetID == "" || req.RunnerID == "" || req.LeaseID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid lease renewal body"})
+		return
+	}
+	if _, err := authenticateRunnerForID(db, r, req.RunnerID); err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+	result, err := db.ExecContext(ctx, `UPDATE execution_targets
+		SET lease_expires_at = datetime('now','+5 minutes')
+		WHERE id = ? AND execution_id = ? AND runner_id = ? AND lease_id = ? AND status = 'running'`,
+		req.TargetID, req.ExecutionID, req.RunnerID, req.LeaseID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to renew lease"})
+		return
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "lease is no longer active"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "renewed"})
+}
+
+func insertResultReceipt(ctx context.Context, tx *sql.Tx, orgID string, req struct {
+	ExecutionID string `json:"execution_id"`
+	TargetID    string `json:"target_id"`
+	RunnerID    string `json:"runner_id"`
+	LeaseID     string `json:"lease_id"`
+	ExitCode    int    `json:"exit_code"`
+	Stdout      string `json:"stdout"`
+	Stderr      string `json:"stderr"`
+	Error       string `json:"error"`
+	DurationMs  int64  `json:"duration_ms"`
+}, payloadHash, responseBody string) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO execution_result_receipts
+		(organisation_id, execution_id, target_id, lease_id, runner_id, payload_hash, response_code, response_body)
+		VALUES (?, ?, ?, ?, ?, ?, 200, ?)`, orgID, req.ExecutionID, req.TargetID, req.LeaseID, req.RunnerID, payloadHash, responseBody)
+	return err
+}
+
 const artifactInlineLimit = 64 * 1024
 
-func persistExecutionArtifacts(ctx context.Context, db *sql.DB, orgID, executionID, targetID, stdout, stderr string) (string, string, error) {
+func persistExecutionArtifacts(ctx context.Context, db auditExec, orgID, executionID, targetID, stdout, stderr string) (string, string, error) {
 	if apiArtifacts == nil {
 		return "", "", nil
 	}

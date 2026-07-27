@@ -16,6 +16,10 @@ This is the documentation hub for VPS Tools, a controlled operations platform fo
 | Connect AI agents and MCP clients | [AI tools and agents](ai-tools.md) |
 | Operate and secure the deployment | [Security and operations](security-and-operations.md) |
 | Diagnose problems | [Troubleshooting](troubleshooting.md) |
+| Prepare a production release | [Production release checklist](production-release.md) |
+| Back up and recover a self-contained instance | [Backup and recovery runbook](backup-recovery.md) |
+| Record release-candidate evidence | [Release evidence template](release-evidence-template.md) |
+| Deploy on one Linux host | [Systemd deployment](../deploy/README.md) |
 | Build or extend the application | [Developer guide](developer-guide/README.md) |
 | Understand current gaps | [Known limitations](KNOWN_LIMITATIONS.md) |
 

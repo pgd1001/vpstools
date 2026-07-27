@@ -9,9 +9,11 @@ For a self-contained installation:
 - Run the API and runner as a dedicated service account.
 - Keep `svrtools.db`, the artefact directory, and encryption key outside the source checkout.
 - Set restrictive permissions on the database, artefacts, logs, and backup directory.
-- Use a stable `VPS_ARTIFACT_ENCRYPTION_KEY` and store it outside the repository.
+- Use a stable `ARTIFACT_ENCRYPTION_KEY` and store it outside the repository.
 - Bind the API to localhost when only local clients need access. Put it behind TLS when accessed over a network.
 - Enable OIDC for shared environments. Development header identity is not an authentication system.
+- Set `VPS_ENV=production` in the API environment. Startup then rejects development identity and runner bypasses.
+- Keep the web console and API on the configured origin. The web proxy rejects state-changing browser requests without a matching `Origin` header.
 - Schedule and test backups of both SQLite metadata and artefacts.
 
 For an extended installation, add PostgreSQL, S3-compatible storage, and JetStream only when the workload or availability requirements justify them. Validate each external backend at startup and fail clearly if it is incomplete.
@@ -40,15 +42,26 @@ Local artefacts use atomic writes, content hashes, restricted permissions, reten
 The local backup command packages SQLite metadata, encrypted artefacts, and a manifest. A backup is useful only if it can be restored, so test the complete process regularly.
 
 ```powershell
-.\bin\vps.exe backup create --output .\backups\nightly
-.\bin\vps.exe backup verify --input .\backups\nightly
+go run ./apps/api/cmd/backup -output .\backups\nightly
+go run ./apps/api/cmd/backup -mode verify -input .\backups\nightly
 ```
 
-Keep backup retention separate from artefact retention. Protect the encryption key independently from the backup files. A database backup without referenced artefacts is incomplete, and artefacts without their metadata are difficult to interpret.
+The current backup command creates a SQLite snapshot, copies encrypted local artefacts, and writes a checksum manifest. Verify and restore the backup with the companion modes before treating it as recoverable:
+
+```powershell
+go run ./apps/api/cmd/backup -mode verify -input .\backups\nightly
+go run ./apps/api/cmd/backup -mode restore -input .\backups\nightly -db .\restore\svrtools.db -artifacts .\restore\artifacts
+```
+
+The systemd deployment can replicate backups to a separately mounted destination under `/var/lib/vps-tools`. Signed manifests, object-store replication, and an off-host recovery drill remain release extensions that must be completed before broad production rollout.
+
+Keep backup retention separate from artefact retention. Protect the encryption key independently from the backup files. A database backup without referenced artefacts is incomplete, and artefacts without their metadata are difficult to interpret. The systemd backup job writes an atomic status record after verification, and monitoring should run `scripts/check-backup-freshness.sh` against it.
+
+Approval requests expire after one hour by default. Set `APPROVAL_EXPIRY_SECONDS` between 60 seconds and 30 days when an installation needs a different review window. The value is validated at startup and is recorded in the approval's expiry timestamp.
 
 ## Queue and runner reliability
 
-The database queue uses leases, retries, idempotency keys, and dead-letter states. If a runner stops while holding a lease, reconciliation should make the work claimable after the lease expires.
+The database queue uses leases, retries, and dead-letter states. Reconciliation makes work claimable after a lease expires. Result receipts and request idempotency are implemented and tested. A runner failure after remote execution can still repeat an arbitrary remote side effect unless the command is idempotent or a durable runner outbox is used.
 
 When diagnosing a stuck execution, record:
 
@@ -64,6 +77,8 @@ JetStream is at-least-once delivery. Consumers must use durable pull consumers, 
 ## Audit and incident response
 
 Search the audit trail before changing a failed system. Record who requested the work, who approved it, which runbook version ran, which target was used, what the runner reported, and what artefacts were created.
+
+Include `vps audit verify` or `GET /api/v1/audit/verify` in evidence collection after a suspected incident. Preserve the result and checked event count with the release or incident record.
 
 For a suspected unsafe execution:
 

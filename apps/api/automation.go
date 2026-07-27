@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -17,6 +18,83 @@ import (
 )
 
 const automationActorID = "user_automation"
+
+type automationControl struct {
+	Paused   bool   `json:"paused"`
+	PausedAt string `json:"paused_at,omitempty"`
+	PausedBy string `json:"paused_by,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+func readAutomationControl(ctx context.Context, db *sql.DB, organisationID string) (automationControl, error) {
+	var control automationControl
+	var paused int
+	err := db.QueryRowContext(ctx, `SELECT paused, COALESCE(paused_at,''), COALESCE(paused_by_user_id,''), COALESCE(reason,'') FROM automation_controls WHERE organisation_id = ?`, organisationID).Scan(&paused, &control.PausedAt, &control.PausedBy, &control.Reason)
+	if err == sql.ErrNoRows {
+		return control, nil
+	}
+	if err != nil {
+		return control, err
+	}
+	control.Paused = paused == 1
+	return control, nil
+}
+
+func automationPaused(ctx context.Context, db *sql.DB, organisationID string) (bool, error) {
+	control, err := readAutomationControl(ctx, db, organisationID)
+	return control.Paused, err
+}
+
+func handleAutomationStatus(w http.ResponseWriter, r *http.Request) {
+	actor, _ := authz.RequireActor(r.Context())
+	control, err := readAutomationControl(r.Context(), dbFrom(r), actor.OrganisationID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read automation status"})
+		return
+	}
+	writeJSON(w, http.StatusOK, control)
+}
+
+func handlePauseAutomation(w http.ResponseWriter, r *http.Request) {
+	actor, _ := authz.RequireActor(r.Context())
+	if !actor.IsSenior() {
+		writeDenial(w, r, actor, "automation.paused", "organisation", actor.OrganisationID, authz.Deny("automation_requires_senior", "Pausing automation requires senior engineer or above."))
+		return
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+	}
+	db := dbFrom(r)
+	_, err := db.ExecContext(r.Context(), `INSERT INTO automation_controls (organisation_id, paused, paused_at, paused_by_user_id, reason, updated_at) VALUES (?,1,datetime('now'),?,?,datetime('now')) ON CONFLICT(organisation_id) DO UPDATE SET paused=1, paused_at=datetime('now'), paused_by_user_id=excluded.paused_by_user_id, reason=excluded.reason, updated_at=datetime('now')`, actor.OrganisationID, actor.UserID, strings.TrimSpace(req.Reason))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to pause automation"})
+		return
+	}
+	writeAuditEvent(r.Context(), db, actor.OrganisationID, actor.UserID, "automation.paused", "organisation", actor.OrganisationID, "success", map[string]any{"reason": strings.TrimSpace(req.Reason)})
+	writeJSON(w, http.StatusOK, map[string]any{"paused": true, "reason": strings.TrimSpace(req.Reason)})
+}
+
+func handleResumeAutomation(w http.ResponseWriter, r *http.Request) {
+	actor, _ := authz.RequireActor(r.Context())
+	if !actor.IsSenior() {
+		writeDenial(w, r, actor, "automation.resumed", "organisation", actor.OrganisationID, authz.Deny("automation_requires_senior", "Resuming automation requires senior engineer or above."))
+		return
+	}
+	db := dbFrom(r)
+	_, err := db.ExecContext(r.Context(), `INSERT INTO automation_controls (organisation_id, paused, reason, updated_at) VALUES (?,0,'',datetime('now')) ON CONFLICT(organisation_id) DO UPDATE SET paused=0, reason='', updated_at=datetime('now')`, actor.OrganisationID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to resume automation"})
+		return
+	}
+	writeAuditEvent(r.Context(), db, actor.OrganisationID, actor.UserID, "automation.resumed", "organisation", actor.OrganisationID, "success", nil)
+	writeJSON(w, http.StatusOK, map[string]any{"paused": false})
+}
 
 func handleListSchedules(w http.ResponseWriter, r *http.Request) {
 	actor, _ := authz.RequireActor(r.Context())
@@ -130,6 +208,33 @@ func runEmbeddedScheduler(ctx context.Context, db *sql.DB, logger *slog.Logger) 
 }
 
 func runDueSchedulesOnce(ctx context.Context, db *sql.DB) error {
+	orgRows, err := db.QueryContext(ctx, `SELECT DISTINCT organisation_id FROM automation_schedules WHERE enabled = 1 AND next_run_at <= datetime('now')`)
+	if err != nil {
+		return err
+	}
+	organisationIDs := []string{}
+	for orgRows.Next() {
+		var organisationID string
+		if err := orgRows.Scan(&organisationID); err != nil {
+			_ = orgRows.Close()
+			return err
+		}
+		organisationIDs = append(organisationIDs, organisationID)
+	}
+	if err := orgRows.Close(); err != nil {
+		return err
+	}
+	pausedOrgs := map[string]bool{}
+	for _, organisationID := range organisationIDs {
+		paused, err := automationPaused(ctx, db, organisationID)
+		if err != nil {
+			return err
+		}
+		pausedOrgs[organisationID] = paused
+	}
+	if len(pausedOrgs) == 0 {
+		return nil
+	}
 	rows, err := db.QueryContext(ctx, `SELECT id, organisation_id, created_by_user_id, name, runbook_name, target, reason, params, interval_seconds, next_run_at FROM automation_schedules WHERE enabled = 1 AND next_run_at <= datetime('now') ORDER BY next_run_at LIMIT 20`)
 	if err != nil {
 		return err
@@ -155,6 +260,16 @@ func runDueSchedulesOnce(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	for _, schedule := range due {
+		if pausedOrgs[schedule.OrganisationID] {
+			continue
+		}
+		paused, err := automationPaused(ctx, db, schedule.OrganisationID)
+		if err != nil {
+			return err
+		}
+		if paused {
+			continue
+		}
 		next := schedule.NextAfter(time.Now().UTC())
 		claimed, err := db.ExecContext(ctx, `UPDATE automation_schedules SET next_run_at = ?, last_run_at = datetime('now'), last_error = NULL, updated_at = datetime('now') WHERE id = ? AND enabled = 1 AND next_run_at <= datetime('now')`, formatScheduleTime(next), schedule.ID)
 		if err != nil {

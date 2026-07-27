@@ -28,3 +28,23 @@ func TestExtendedConfigurationRequiresConnectionSettings(t *testing.T) {
 		t.Fatal("expected postgres configuration error")
 	}
 }
+
+func TestApprovalExpiryCanBeConfiguredWithinSafeBounds(t *testing.T) {
+	t.Setenv("APPROVAL_EXPIRY_SECONDS", "7200")
+	c := Load()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.ApprovalExpirySeconds != 7200 {
+		t.Fatalf("approval expiry = %d, want 7200", c.ApprovalExpirySeconds)
+	}
+
+	t.Setenv("APPROVAL_EXPIRY_SECONDS", "30")
+	if err := Load().Validate(); err == nil {
+		t.Fatal("expected short approval expiry to be rejected")
+	}
+	t.Setenv("APPROVAL_EXPIRY_SECONDS", "not-a-number")
+	if err := Load().Validate(); err == nil {
+		t.Fatal("expected non-numeric approval expiry to be rejected")
+	}
+}

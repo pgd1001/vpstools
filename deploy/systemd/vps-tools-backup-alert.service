@@ -1,0 +1,15 @@
+[Unit]
+Description=Record and notify a failed VPS Tools backup
+
+[Service]
+Type=oneshot
+User=vps-tools
+Group=vps-tools
+EnvironmentFile=-/etc/vps-tools/backup.env
+ExecStart=/usr/local/libexec/vps-tools/backup-alert.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

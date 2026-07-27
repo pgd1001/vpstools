@@ -1,0 +1,28 @@
+[Unit]
+Description=VPS Tools Runner
+After=network-online.target vps-tools-api.service
+Wants=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=vps-tools
+Group=vps-tools
+WorkingDirectory=/var/lib/vps-tools
+EnvironmentFile=-/etc/vps-tools/runner.env
+ExecStart=/opt/vps-tools/current/runner
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vps-tools
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

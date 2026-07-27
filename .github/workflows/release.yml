@@ -1,0 +1,194 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+    inputs:
+      release_tag:
+        description: 'Existing vMAJOR.MINOR.PATCH tag to publish'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish release candidate
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+
+      - name: Require a version tag
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            effective_tag="$DISPATCH_TAG"
+          else
+            effective_tag="$GITHUB_REF_NAME"
+          fi
+          case "$effective_tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "Release publishing must run from a vMAJOR.MINOR.PATCH tag" >&2; exit 1 ;;
+          esac
+          checked_out_tag=$(git describe --exact-match --tags HEAD 2>/dev/null || true)
+          [ "$checked_out_tag" = "$effective_tag" ] || {
+            echo "checked out commit is not the requested release tag: $effective_tag" >&2
+            exit 1
+          }
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.3'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+
+      - name: Run release test gates
+        run: |
+          go test ./... -race -count=1
+          go vet ./...
+          GOTOOLCHAIN=go1.26.3 go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+          go test ./runbooks -count=1
+
+      - name: Check MCP package
+        working-directory: mcp
+        run: |
+          npm ci
+          npm run check
+          npm run smoke
+
+      - name: Build web console
+        working-directory: apps/web
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          npm audit --omit=optional
+          npm run lint --if-present
+          npm run typecheck --if-present
+          npm run build
+          npx playwright install --with-deps chromium
+          npm run start > "$RUNNER_TEMP/vps-tools-web.log" 2>&1 &
+          web_pid=$!
+          trap 'kill "$web_pid" || true' EXIT
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:3000 >/dev/null && break
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:3000 >/dev/null || { cat "$RUNNER_TEMP/vps-tools-web.log"; exit 1; }
+          WEB_BASE_URL=http://127.0.0.1:3000 npm run smoke
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          install-only: true
+
+      - uses: anchore/sbom-action/download-syft@v0.24.0
+        with:
+          syft-version: v1.44.0
+
+      - name: Build release candidate and verify evidence before publishing
+        run: |
+          # Build the actual tag so the validated filenames and version metadata
+          # match the later publication attempt. Publication is skipped here.
+          goreleaser release --clean --skip=publish
+          sh ./scripts/validate-release-layout.sh dist
+          sh ./scripts/validate-release.sh dist
+
+      - name: Run packaged Linux self-contained smoke
+        shell: bash
+        run: |
+          archive=$(find dist -maxdepth 1 -type f -name '*Linux_x86_64.tar.gz' | head -n 1)
+          test -n "$archive"
+          package_dir="$RUNNER_TEMP/vps-tools-package"
+          rm -rf "$package_dir"
+          mkdir -p "$package_dir"
+          tar -xzf "$archive" -C "$package_dir"
+          sh -n "$package_dir"/scripts/*.sh
+          API_BINARY="$package_dir/api" \
+          RUNNER_BINARY="$package_dir/runner" \
+          BACKUP_BINARY="$package_dir/backup" \
+          CLI_BINARY="$package_dir/vps" \
+          sh ./scripts/self-contained-smoke.sh
+
+          # Keep a byte-level identity record for every generated top-level file.
+          # This includes archives, checksums, and SBOMs, not only the archives
+          # exercised by the smoke test.
+          validated_manifest="$RUNNER_TEMP/validated-release-manifest.txt"
+          (
+            cd dist
+            find . -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum
+          ) > "$validated_manifest"
+          test -s "$validated_manifest"
+
+      - name: Publish draft release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # GoReleaser OSS has no publish-only continuation for a prepared
+          # release. It therefore rebuilds here. Keep the release as a draft,
+          # compare the complete output with the validated build, and fail
+          # before attestation if the rebuild is not byte-for-byte identical.
+          goreleaser release --clean
+
+          published_manifest="$RUNNER_TEMP/published-release-manifest.txt"
+          (
+            cd dist
+            find . -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum
+          ) > "$published_manifest"
+          if ! cmp -s "$RUNNER_TEMP/validated-release-manifest.txt" "$published_manifest"; then
+            echo "published GoReleaser output differs from the validated release candidate" >&2
+            diff -u "$RUNNER_TEMP/validated-release-manifest.txt" "$published_manifest" >&2 || true
+            exit 1
+          fi
+
+      - name: Verify published release output
+        run: |
+          sh ./scripts/validate-release-layout.sh dist
+          sh ./scripts/validate-release.sh dist
+          archive=$(find dist -maxdepth 1 -type f -name '*Linux_x86_64.tar.gz' | head -n 1)
+          test -n "$archive"
+          package_dir="$RUNNER_TEMP/vps-tools-published-package"
+          rm -rf "$package_dir"
+          mkdir -p "$package_dir"
+          tar -xzf "$archive" -C "$package_dir"
+          sh -n "$package_dir"/scripts/*.sh
+          API_BINARY="$package_dir/api" \
+          RUNNER_BINARY="$package_dir/runner" \
+          BACKUP_BINARY="$package_dir/backup" \
+          CLI_BINARY="$package_dir/vps" \
+          sh ./scripts/self-contained-smoke.sh
+
+      - name: Attest release checksums
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/checksums.txt
+
+      - name: Verify release checksum attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify dist/checksums.txt --repo "$GITHUB_REPOSITORY"
+
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --draft=false

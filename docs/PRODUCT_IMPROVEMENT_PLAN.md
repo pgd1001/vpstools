@@ -60,8 +60,37 @@ The first implementation slice is complete and verified. These items are now imp
 - Interval-based schedules are available through the API and embedded scheduler in the self-contained tier. Scheduled executions use an explicit automation identity, target snapshots, audit events, and the normal runbook policy checks.
 - High and critical risk runbooks are blocked from unattended scheduling until an approval workflow is connected.
 - A vendor-neutral AI provider interface now carries redacted prompts, evidence, responses, and usage metadata.
-- A local stdio MCP server exposes 17 read and controlled-write VPS Tools operations. Writes are disabled by default, require an explicit confirmation field, and never expose arbitrary shell execution.
+- A local stdio MCP server exposes 22 read and controlled-write VPS Tools operations, including audit-chain verification, execution cancellation, and organisation-wide automation pause and resume. Writes are disabled by default, require an explicit confirmation field, and never expose arbitrary shell execution.
+- Expiring API bearer tokens are now supported for CLI, SDK, and automation clients. Tokens are hashed at rest, scoped to an active organisation membership, revocable, and shown only once.
+- Self-contained backups now include checksums and support verification and restore modes. The web build is now explicitly covered by CI, alongside MCP checks and release snapshot validation.
+- Runner registration credentials are short-lived, runner-bound, revocable, and rotatable through the API, CLI, SDK, and web console.
+- Automation can be paused organisation-wide through the API, CLI, SDK, web console, TUI-facing SDK, and MCP. The scheduler rechecks the pause state before claiming work.
+- Approval briefs now expose declared rollback and verification or evidence plans. The web console, TUI, API, SDK, and MCP can inspect approval details.
+- Backup manifests include key-recovery guidance, and the systemd backup job can copy and verify backups to a separate protected destination.
+- Production operations now include expiring hashed API bearer tokens, bounded mutation rate limits, request IDs, readiness checks, and a systemd installer with atomic upgrade and rollback scripts.
+- Queue leases now reconcile expired work, retry failed targets with bounded backoff, and move exhausted targets to an audited dead-letter state. The API also exposes bounded Prometheus-compatible request, readiness, and rate-limit counters.
+- Result submissions now use durable SQLite and PostgreSQL receipt records keyed by target and lease. Identical replays return the stored response, conflicting payloads are rejected, and runners retry transient submission failures with a bounded budget.
+- Raw execution submissions now accept a persisted, actor-scoped `Idempotency-Key`; identical retries replay the original response and conflicting payloads are rejected.
+- The CLI exposes the same protection through `vps exec --idempotency-key`, so automation scripts can safely retry a timed-out submission.
+- Published runbook submissions, including those that create approvals, now use the same persisted idempotency protection through the API, SDK, and CLI.
+- Audit events now include a per-organisation SHA-256 hash chain, startup backfill for older local records, and an auditor or senior verification endpoint.
+- Approval expiry is now configurable per installation through `APPROVAL_EXPIRY_SECONDS`, with safe bounds and a one-hour default.
+- The TUI execution detail now supports confirmed cancellation for created and queued work, matching the CLI, web, SDK, and MCP behaviour.
+- The TUI schedule workflow now supports guided creation, confirmed disabling of enabled schedules, refreshed state, and operator help text.
+- CLI automation now supports listing, creating, and disabling interval schedules as well as pausing, resuming, and inspecting the organisation control.
 - Full Go tests, `go vet`, and the web production build pass.
+- CI now builds and runs the Linux self-contained smoke path, including bearer authentication, live automation control, schedule create/list/disable, simulated execution, live MCP access, backup replication, restore, and restored audit-chain verification.
+- Approval decisions now enforce denial notes and expiry at the API boundary, and approved executions preserve the requester’s actual organisation role.
+- The SQLite execution list no longer re-enters a single connection while iterating rows, preventing a self-contained deployment deadlock.
+- Runner registration now rejects non-success API responses and exits non-zero so systemd can restart a failed runner.
+- Release archives include all four service binaries, installer scripts, and systemd assets for Windows, Linux, and macOS. CI validates the archive layout before release evidence validation.
+- Release validation now checks every packaged service, timer, environment template, and operational script. CI pins the release tool versions, validates packaged scripts, runs the full release test gates on protected tags, and checks the final release output after publication as a draft.
+- Self-contained smoke tests start the restored API and query recovered identity, execution, and audit records.
+- Development web authentication now works through the server-side proxy, with host-matched origin checks for local state-changing requests. The production proxy continues to require OIDC sessions and configured origins.
+- The API metrics endpoint now exposes bounded queue, dead-letter, active-runner, and enabled-schedule gauges with matching Prometheus alerts.
+- Systemd backup freshness now runs on a timer, verifies the current manifest checksum and backup contents, checks replicated backups when configured, and raises the existing backup alert on failure.
+- The web console now has a Playwright smoke harness covering production and development-auth builds, navigation, runbook search, guided preflight, approval denial with a decision note, requester cancellation of queued execution, and identity switching. CI installs Chromium and runs both modes, while the web dependency tree is pinned and passes `npm audit` with zero reported vulnerabilities.
+- SDK and web resource actions now escape path identifiers and query filters consistently with the MCP and other API clients. This covers servers, runners, executions, runbooks, approvals, schedules, audit filters, and execution filters, with SDK contract coverage for encoded approval paths and filters.
 
 The remaining items in this document are still planned unless explicitly marked here or in a future release note. The schedule and AI changes are foundations, not complete end-user features.
 
@@ -179,8 +208,8 @@ Failure states should include `Failed`, `Partially succeeded`, `Cancelled`, `Exp
 
 **Work items**
 
-- Add approval detail views in the TUI and web console.
-- Require confirmation before approval or denial.
+- Add approval detail views in the TUI and web console. **Implemented.**
+- Require confirmation before approval or denial. **Implemented for approve and deny actions.**
 - Capture a reason for denial or requested changes.
 - Support request changes and escalation.
 - Add configurable approval expiry.
@@ -228,7 +257,7 @@ Failure states should include `Failed`, `Partially succeeded`, `Cancelled`, `Exp
 - Network requests are handled synchronously and can make the interface appear frozen.
 - Several API errors are ignored.
 - Loading, empty, retry, and last-refreshed states are inconsistent.
-- Runbook selection does not yet open a useful parameter or detail workflow.
+- Runbook selection now opens a guided target, reason, parameter, preflight, and submit workflow. A full task inbox and richer runbook detail view are still planned.
 - Approval actions need confirmation and decision notes.
 - Execution output needs paging, redaction, truncation, and target-level status.
 - Small terminal dimensions need safer layout handling.
@@ -296,7 +325,7 @@ Failure states should include `Failed`, `Partially succeeded`, `Cancelled`, `Exp
 - Add notification and escalation rules.
 - Add deduplication and idempotency controls.
 - Enforce target and concurrency limits.
-- Add a global automation pause or kill switch.
+- Add a global automation pause or kill switch. **Organisation-wide pause and resume implemented.**
 
 **Acceptance criteria**
 
@@ -406,16 +435,16 @@ The following core actions should be available with equivalent behaviour in ever
 
 | Capability | CLI | TUI | Web console | API/SDK |
 |---|---:|---:|---:|---:|
-| Browse available tasks | Yes | Yes | Yes | Yes |
+| Browse available runbooks | Yes | Yes | Yes | Yes |
 | Validate parameters | Yes | Yes | Yes | Yes |
 | Run preflight checks | Yes | Yes | Yes | Yes |
 | Submit for approval | Yes | Yes | Yes | Yes |
 | Review approval brief | Yes | Yes | Yes | Yes |
 | Approve or deny with reason | Yes | Yes | Yes | Yes |
-| Monitor live execution | Yes | Yes | Yes | Yes |
-| Retry failed targets | Yes | Yes | Yes | Yes |
-| View evidence and audit history | Yes | Yes | Yes | Yes |
-| Run AI-assisted diagnosis | Yes | Yes | Yes | Yes |
+| Monitor execution state | Partial | Partial | Partial | Yes |
+| Retry failed targets as an operator action | No | No | No | No |
+| View evidence and audit history | Partial | Partial | Yes | Yes |
+| Run AI-assisted diagnosis | No | No | No | Foundation only |
 
 Any exception should be documented and treated as a temporary limitation.
 

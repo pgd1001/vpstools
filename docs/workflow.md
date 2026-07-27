@@ -54,11 +54,13 @@ Unknown parameters, missing required values, invalid numeric values, and values 
 
 ## Approvals
 
-High-risk production work normally creates an approval request. An approver should inspect the complete brief, including runbook version, target snapshot, environment, parameters, risk, reason, and expiry. Denials require a note. Approval actions are audited and must follow the organisation's separation-of-duties policy.
+High-risk production work normally creates an approval request. An approver should inspect the complete brief, including runbook version, target snapshot, environment, parameters, risk, reason, expiry, rollback plan, and verification or evidence plan when the runbook declares them. Denials require a note. Approval actions are audited and must follow the organisation's separation-of-duties policy.
+
+In the TUI, select a permitted runbook and press `x` to open the guided task form. Use `Tab` to move between target, reason, and parameter fields. Press `p` for read-only preflight, then `Enter` to submit. The web console exposes the same task inputs and preflight action.
 
 ## Execution and evidence
 
-An execution has one overall state and one state per target. The runner uses a lease so work can be reclaimed after an interrupted runner. Output is redacted at the API boundary and large output is stored as encrypted artefacts. Use the execution detail endpoint or CLI status command to see the timeline and target results.
+An execution has one overall state and one state per target. The runner uses a lease so work can be reclaimed after an interrupted runner. A failed attempt is requeued while its target has attempts remaining. The first retry waits one second, then the delay doubles up to one minute. An expired lease or failed attempt at the attempt limit moves the target to `dead_letter` and the execution to `failed`. Output is redacted at the API boundary and large output is stored as encrypted artefacts. Use the execution detail endpoint or CLI status command to see the timeline and target results.
 
 ## Safe operator response
 

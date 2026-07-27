@@ -34,11 +34,13 @@ type Metadata struct {
 }
 
 type Spec struct {
-	Parameters []Parameter  `yaml:"parameters" json:"parameters"`
-	Targets    TargetRules  `yaml:"targets" json:"targets"`
-	Approval   ApprovalRule `yaml:"approval" json:"approval"`
-	Execution  Execution    `yaml:"execution" json:"execution"`
-	Output     Output       `yaml:"output" json:"output"`
+	Parameters   []Parameter  `yaml:"parameters" json:"parameters"`
+	Targets      TargetRules  `yaml:"targets" json:"targets"`
+	Approval     ApprovalRule `yaml:"approval" json:"approval"`
+	Execution    Execution    `yaml:"execution" json:"execution"`
+	Output       Output       `yaml:"output" json:"output"`
+	Rollback     any          `yaml:"rollback,omitempty" json:"rollback,omitempty"`
+	Verification any          `yaml:"verification,omitempty" json:"verification,omitempty"`
 }
 
 type Parameter struct {
@@ -223,6 +225,33 @@ func (rb *Runbook) ValidateParams(params map[string]string) (map[string]string, 
 		}
 	}
 	return resolved, nil
+}
+
+// ParseParameterValues parses the compact CLI form used by runbook commands.
+// Empty values are retained so ValidateParams can apply the parameter's own
+// required/type rules. Malformed and duplicate entries are rejected instead
+// of being silently ignored.
+func ParseParameterValues(value string) (map[string]string, error) {
+	params := make(map[string]string)
+	if strings.TrimSpace(value) == "" {
+		return params, nil
+	}
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("parameter list contains an empty entry")
+		}
+		keyValue := strings.SplitN(part, "=", 2)
+		if len(keyValue) != 2 || strings.TrimSpace(keyValue[0]) == "" {
+			return nil, fmt.Errorf("invalid parameter %q, expected name=value", part)
+		}
+		name := strings.TrimSpace(keyValue[0])
+		if _, exists := params[name]; exists {
+			return nil, fmt.Errorf("parameter %q is provided more than once", name)
+		}
+		params[name] = strings.TrimSpace(keyValue[1])
+	}
+	return params, nil
 }
 
 // RenderCommand validates parameters and quotes each substitution for the

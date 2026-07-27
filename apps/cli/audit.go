@@ -38,8 +38,26 @@ var auditSearchCmd = &cobra.Command{
 	},
 }
 
+var auditVerifyCmd = &cobra.Command{
+	Use:   "verify",
+	Short: "Verify the organisation audit hash chain",
+	Run: func(cmd *cobra.Command, args []string) {
+		resp, err := apiClient.VerifyAudit()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if !resp.Valid {
+			fmt.Fprintf(os.Stderr, "audit chain invalid after %d events: %s\n", resp.CheckedEvents, resp.Error)
+			os.Exit(1)
+		}
+		fmt.Printf("Audit chain valid (%d events)\n", resp.CheckedEvents)
+	},
+}
+
 func init() {
 	auditSearchCmd.Flags().String("actor", "", "Filter by actor")
 	auditSearchCmd.Flags().String("limit", "20", "Max results")
 	auditCmd.AddCommand(auditSearchCmd)
+	auditCmd.AddCommand(auditVerifyCmd)
 }

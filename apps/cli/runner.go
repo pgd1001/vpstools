@@ -86,8 +86,9 @@ var runnerTokenCmd = &cobra.Command{
 	Short: "Create a runner registration token",
 	Run: func(cmd *cobra.Command, args []string) {
 		output, _ := cmd.Flags().GetString("output")
+		runnerID, _ := cmd.Flags().GetString("runner-id")
 
-		resp, err := apiClient.CreateRegistrationToken()
+		resp, err := apiClient.CreateRegistrationTokenForRunner(runnerID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -113,6 +114,7 @@ func init() {
 	runnerRegisterCmd.Flags().String("output", "table", "Output format (table, json)")
 
 	runnerTokenCmd.Flags().String("output", "table", "Output format (table, json)")
+	runnerTokenCmd.Flags().String("runner-id", "", "Rotate the credential for an existing runner")
 
 	runnerCmd.AddCommand(runnerListCmd)
 	runnerCmd.AddCommand(runnerRegisterCmd)

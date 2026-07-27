@@ -1,6 +1,6 @@
 # VPS Tools — One-Command Dev Server Launcher
 # Usage: .\scripts\dev.ps1
-# Requires: Go 1.24+, PowerShell 5.1+
+# Requires: the Go version specified in go.mod, PowerShell 5.1+
 
 param(
     [switch]$SkipBuild,

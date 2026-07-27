@@ -1,0 +1,7 @@
+[Unit]
+Description=VPS Tools service health check
+After=vps-tools-api.service vps-tools-runner.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/vps-tools/healthcheck.sh

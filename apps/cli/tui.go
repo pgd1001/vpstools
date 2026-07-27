@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -9,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/pgd1001/svrtools/packages/runbooks"
 	"github.com/pgd1001/svrtools/packages/sdk-go/client"
 )
 
@@ -35,6 +38,10 @@ const (
 	screenAudit
 	screenHelp
 	screenExecutionDetail
+	screenRunbookRun
+	screenScheduleCreate
+	screenApprovalDetail
+	screenApprovalDeny
 )
 
 type tuiModel struct {
@@ -70,8 +77,22 @@ type tuiModel struct {
 	auditEvents []client.AuditEvent
 
 	// Execution detail
-	selectedExec *client.GetExecutionResponse
-	confirm      string
+	selectedExec      *client.GetExecutionResponse
+	selectedApproval  *client.ApprovalDetail
+	selectedRunbook   *client.RunbookItem
+	runbookTarget     textinput.Model
+	runbookReason     textinput.Model
+	runbookParams     textinput.Model
+	approvalNote      textinput.Model
+	scheduleName      textinput.Model
+	scheduleRunbook   textinput.Model
+	scheduleTarget    textinput.Model
+	scheduleReason    textinput.Model
+	scheduleParams    textinput.Model
+	scheduleInterval  textinput.Model
+	scheduleNextRun   textinput.Model
+	pendingApprovalID string
+	confirm           string
 
 	quitting bool
 }
@@ -132,6 +153,39 @@ func newTUIModel(c *client.Client) tuiModel {
 	ai := textinput.New()
 	ai.Placeholder = "search audits..."
 	ai.Width = 40
+	targetInput := textinput.New()
+	targetInput.Placeholder = "server:demo or tag:role=web"
+	targetInput.Width = 52
+	reasonInput := textinput.New()
+	reasonInput.Placeholder = "Why is this task needed?"
+	reasonInput.Width = 52
+	paramsInput := textinput.New()
+	paramsInput.Placeholder = "name=value,name2=value2"
+	paramsInput.Width = 52
+	noteInput := textinput.New()
+	noteInput.Placeholder = "Why is this approval being denied?"
+	noteInput.Width = 52
+	scheduleName := textinput.New()
+	scheduleName.Placeholder = "nightly-health-check"
+	scheduleName.Width = 52
+	scheduleRunbook := textinput.New()
+	scheduleRunbook.Placeholder = "Published runbook name"
+	scheduleRunbook.Width = 52
+	scheduleTarget := textinput.New()
+	scheduleTarget.Placeholder = "server:demo or tag:role=web"
+	scheduleTarget.Width = 52
+	scheduleReason := textinput.New()
+	scheduleReason.Placeholder = "Why should this run automatically?"
+	scheduleReason.Width = 52
+	scheduleParams := textinput.New()
+	scheduleParams.Placeholder = "name=value,name2=value2"
+	scheduleParams.Width = 52
+	scheduleInterval := textinput.New()
+	scheduleInterval.Placeholder = "3600"
+	scheduleInterval.Width = 20
+	scheduleNextRun := textinput.New()
+	scheduleNextRun.Placeholder = "Optional RFC3339 timestamp"
+	scheduleNextRun.Width = 35
 
 	rbItems := []list.Item{}
 	rbList := list.New(rbItems, list.NewDefaultDelegate(), 0, 0)
@@ -141,14 +195,25 @@ func newTUIModel(c *client.Client) tuiModel {
 	rbList.SetShowHelp(false)
 
 	return tuiModel{
-		screen:        screenHome,
-		client:        c,
-		serverTable:   st,
-		execTable:     et,
-		approvalTable: apt,
-		scheduleTable: sct,
-		auditInput:    ai,
-		runbookList:   rbList,
+		screen:           screenHome,
+		client:           c,
+		serverTable:      st,
+		execTable:        et,
+		approvalTable:    apt,
+		scheduleTable:    sct,
+		auditInput:       ai,
+		runbookList:      rbList,
+		runbookTarget:    targetInput,
+		runbookReason:    reasonInput,
+		runbookParams:    paramsInput,
+		approvalNote:     noteInput,
+		scheduleName:     scheduleName,
+		scheduleRunbook:  scheduleRunbook,
+		scheduleTarget:   scheduleTarget,
+		scheduleReason:   scheduleReason,
+		scheduleParams:   scheduleParams,
+		scheduleInterval: scheduleInterval,
+		scheduleNextRun:  scheduleNextRun,
 	}
 }
 
@@ -178,6 +243,209 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.screen == screenRunbookRun {
+			switch msg.String() {
+			case "ctrl+c", "q", "esc":
+				m.screen = screenRunbooks
+				m.selectedRunbook = nil
+				m.runbookTarget.Blur()
+				m.runbookReason.Blur()
+				m.runbookParams.Blur()
+				return m, nil
+			case "tab", "shift+tab":
+				m.focusRunbookInput(msg.String() == "tab")
+				return m, nil
+			case "p":
+				params, err := runbooks.ParseParameterValues(m.runbookParams.Value())
+				if err != nil {
+					m.err = "preflight failed: " + err.Error()
+					return m, nil
+				}
+				response, err := m.client.PreflightRunbook(m.selectedRunbook.Name, strings.TrimSpace(m.runbookTarget.Value()), strings.TrimSpace(m.runbookReason.Value()), params)
+				if err != nil {
+					m.err = "preflight failed: " + err.Error()
+					return m, nil
+				}
+				m.err = ""
+				if response["approval_required"] == true {
+					m.msg = "Preflight passed. Approval is required before execution."
+				} else {
+					m.msg = "Preflight passed. Press Enter to submit the task."
+				}
+				return m, nil
+			case "enter":
+				if strings.TrimSpace(m.runbookTarget.Value()) == "" {
+					m.err = "target is required"
+					return m, nil
+				}
+				params, err := runbooks.ParseParameterValues(m.runbookParams.Value())
+				if err != nil {
+					m.err = "task not submitted: " + err.Error()
+					return m, nil
+				}
+				response, err := m.client.RunRunbook(m.selectedRunbook.Name, strings.TrimSpace(m.runbookTarget.Value()), strings.TrimSpace(m.runbookReason.Value()), params)
+				if err != nil {
+					m.err = "task submission failed: " + err.Error()
+					return m, nil
+				}
+				m.err = ""
+				if response["status"] == "awaiting_approval" {
+					m.msg = "Task submitted. Approval is required before execution."
+				} else if executionID, ok := response["execution_id"].(string); ok && executionID != "" {
+					m.msg = "Task queued. Execution ID: " + executionID
+				} else {
+					m.msg = "Task submitted."
+				}
+				m.screen = screenRunbooks
+				m.selectedRunbook = nil
+				m.runbookTarget.Blur()
+				m.runbookReason.Blur()
+				m.runbookParams.Blur()
+				return m, nil
+			}
+			var cmd tea.Cmd
+			switch {
+			case m.runbookTarget.Focused():
+				m.runbookTarget, cmd = m.runbookTarget.Update(msg)
+			case m.runbookReason.Focused():
+				m.runbookReason, cmd = m.runbookReason.Update(msg)
+			default:
+				m.runbookParams, cmd = m.runbookParams.Update(msg)
+			}
+			return m, cmd
+		}
+		if m.screen == screenScheduleCreate {
+			switch msg.String() {
+			case "ctrl+c", "q", "esc":
+				m.screen = screenSchedules
+				m.blurScheduleInputs()
+				return m, nil
+			case "tab", "shift+tab":
+				m.focusScheduleInput(msg.String() == "tab")
+				return m, nil
+			case "enter":
+				name := strings.TrimSpace(m.scheduleName.Value())
+				runbook := strings.TrimSpace(m.scheduleRunbook.Value())
+				target := strings.TrimSpace(m.scheduleTarget.Value())
+				reason := strings.TrimSpace(m.scheduleReason.Value())
+				if name == "" || runbook == "" || target == "" || reason == "" {
+					m.err = "name, runbook, target, and reason are required"
+					return m, nil
+				}
+				interval, err := strconv.Atoi(strings.TrimSpace(m.scheduleInterval.Value()))
+				if err != nil || interval < 60 {
+					m.err = "interval must be at least 60 seconds"
+					return m, nil
+				}
+				params, err := runbooks.ParseParameterValues(m.scheduleParams.Value())
+				if err != nil {
+					m.err = "schedule not created: " + err.Error()
+					return m, nil
+				}
+				_, err = m.client.CreateSchedule(client.CreateScheduleRequest{
+					Name: name, RunbookName: runbook, Target: target, Reason: reason,
+					Params: params, IntervalSeconds: interval, NextRunAt: strings.TrimSpace(m.scheduleNextRun.Value()),
+				})
+				if err != nil {
+					m.err = "schedule creation failed: " + err.Error()
+					return m, nil
+				}
+				m.err = ""
+				m.msg = "Created schedule " + name
+				m.blurScheduleInputs()
+				m.screen = screenSchedules
+				if schedules, refreshErr := m.client.ListSchedules(); refreshErr == nil && schedules != nil {
+					m.schedules = schedules.Schedules
+					m.scheduleTable.SetRows(scheduleRows(schedules.Schedules))
+				}
+				return m, nil
+			}
+			var cmd tea.Cmd
+			switch {
+			case m.scheduleName.Focused():
+				m.scheduleName, cmd = m.scheduleName.Update(msg)
+			case m.scheduleRunbook.Focused():
+				m.scheduleRunbook, cmd = m.scheduleRunbook.Update(msg)
+			case m.scheduleTarget.Focused():
+				m.scheduleTarget, cmd = m.scheduleTarget.Update(msg)
+			case m.scheduleReason.Focused():
+				m.scheduleReason, cmd = m.scheduleReason.Update(msg)
+			case m.scheduleParams.Focused():
+				m.scheduleParams, cmd = m.scheduleParams.Update(msg)
+			case m.scheduleInterval.Focused():
+				m.scheduleInterval, cmd = m.scheduleInterval.Update(msg)
+			default:
+				m.scheduleNextRun, cmd = m.scheduleNextRun.Update(msg)
+			}
+			return m, cmd
+		}
+		if m.screen == screenExecutionDetail {
+			switch msg.String() {
+			case "q", "esc":
+				m.screen = screenExecutions
+				m.selectedExec = nil
+				m.confirm = ""
+				return m, nil
+			case "c":
+				if m.selectedExec == nil || (m.selectedExec.Execution.Status != "created" && m.selectedExec.Execution.Status != "queued") {
+					m.err = "only created or queued executions can be cancelled"
+					return m, nil
+				}
+				executionID := m.selectedExec.Execution.ID
+				if m.confirm != executionID+":cancel" {
+					m.confirm = executionID + ":cancel"
+					m.msg = "Press c again to cancel " + executionID
+					return m, nil
+				}
+				m.confirm = ""
+				if _, err := m.client.CancelExecution(executionID); err != nil {
+					m.err = "cancel failed: " + err.Error()
+					return m, nil
+				}
+				if refreshed, err := m.client.GetExecution(executionID); err == nil && refreshed != nil {
+					m.selectedExec = refreshed
+				}
+				if refreshed, err := m.client.ListExecutions("", "50"); err == nil && refreshed != nil {
+					m.executions = refreshed.Executions
+					m.execTable.SetRows(execRows(refreshed.Executions))
+				}
+				m.err = ""
+				m.msg = "Execution cancelled: " + executionID
+				return m, nil
+			}
+		}
+		if m.screen == screenApprovalDeny {
+			switch msg.String() {
+			case "ctrl+c", "q", "esc":
+				m.screen = screenApprovals
+				m.approvalNote.Blur()
+				m.pendingApprovalID = ""
+				return m, nil
+			case "enter":
+				note := strings.TrimSpace(m.approvalNote.Value())
+				if note == "" {
+					m.err = "a denial note is required"
+					return m, nil
+				}
+				if _, err := m.client.DenyApproval(m.pendingApprovalID, note); err != nil {
+					m.err = "deny failed: " + err.Error()
+					return m, nil
+				}
+				m.msg = "Denied " + m.pendingApprovalID
+				m.err = ""
+				m.approvalNote.Blur()
+				m.pendingApprovalID = ""
+				m.screen = screenApprovals
+				if a, err := m.client.ListApprovals(""); err == nil && a != nil {
+					m.approvals = a.Approvals
+					m.approvalTable.SetRows(approvalRows(a.Approvals))
+				}
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.approvalNote, cmd = m.approvalNote.Update(msg)
+			return m, cmd
+		}
 		if m.screen == screenAudit {
 			switch msg.String() {
 			case "ctrl+c", "q":
@@ -381,9 +649,48 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
+			if m.screen == screenApprovals {
+				cursor := m.approvalTable.Cursor()
+				if cursor >= 0 && cursor < len(m.approvals) {
+					approval, err := m.client.GetApproval(m.approvals[cursor].ID)
+					if err != nil {
+						m.err = "approval detail failed: " + err.Error()
+					} else {
+						m.selectedApproval = approval
+						m.screen = screenApprovalDetail
+					}
+				}
+				return m, nil
+			}
 			if m.screen == screenExecutionDetail {
 				m.screen = screenExecutions
 				m.selectedExec = nil
+			}
+			if m.screen == screenApprovalDetail {
+				m.screen = screenApprovals
+				m.selectedApproval = nil
+			}
+			return m, nil
+		case "x":
+			if m.screen == screenRunbooks {
+				idx := m.runbookList.Index()
+				if idx >= 0 && idx < len(m.runbooks) {
+					rb := m.runbooks[idx]
+					if !rb.Permitted {
+						m.err = "you are not permitted to run this runbook"
+						return m, nil
+					}
+					m.selectedRunbook = &rb
+					m.runbookTarget.SetValue("server:srv_demo")
+					m.runbookReason.SetValue("")
+					m.runbookParams.SetValue("")
+					m.runbookReason.Blur()
+					m.runbookParams.Blur()
+					m.runbookTarget.Focus()
+					m.screen = screenRunbookRun
+					m.err = ""
+					m.msg = "Press p for preflight, then Enter to submit."
+				}
 			}
 			return m, nil
 		case "a":
@@ -423,19 +730,54 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 					m.confirm = ""
-					_, err := m.client.DenyApproval(approvalID)
-					if err != nil {
-						m.err = "deny failed: " + err.Error()
+					m.pendingApprovalID = approvalID
+					m.approvalNote.SetValue("")
+					m.approvalNote.Focus()
+					m.screen = screenApprovalDeny
+					m.err = ""
+					m.msg = "Enter a reason for denying " + approvalID
+				}
+			} else if m.screen == screenSchedules {
+				cursor := m.scheduleTable.Cursor()
+				if cursor >= 0 && cursor < len(m.schedules) {
+					schedule := m.schedules[cursor]
+					if !schedule.Enabled {
+						m.msg = "Schedule is already disabled"
+						return m, nil
+					}
+					if m.confirm != schedule.ID+":disable" {
+						m.confirm = schedule.ID + ":disable"
+						m.msg = "Press d again to disable " + schedule.Name
+						return m, nil
+					}
+					m.confirm = ""
+					if _, err := m.client.DisableSchedule(schedule.ID); err != nil {
+						m.err = "disable schedule failed: " + err.Error()
 					} else {
-						m.msg = "Denied " + approvalID
-						// refresh approvals
-						a, _ := m.client.ListApprovals("")
-						if a != nil {
-							m.approvals = a.Approvals
-							m.approvalTable.SetRows(approvalRows(a.Approvals))
+						m.msg = "Disabled " + schedule.Name
+						if schedules, err := m.client.ListSchedules(); err == nil && schedules != nil {
+							m.schedules = schedules.Schedules
+							m.scheduleTable.SetRows(scheduleRows(schedules.Schedules))
 						}
 					}
 				}
+			}
+			return m, nil
+		case "n":
+			if m.screen == screenSchedules {
+				m.scheduleName.SetValue("")
+				m.scheduleRunbook.SetValue("")
+				m.scheduleTarget.SetValue("server:srv_demo")
+				m.scheduleReason.SetValue("")
+				m.scheduleParams.SetValue("")
+				m.scheduleInterval.SetValue("3600")
+				m.scheduleNextRun.SetValue("")
+				m.blurScheduleInputs()
+				m.scheduleName.Focus()
+				m.screen = screenScheduleCreate
+				m.err = ""
+				m.msg = "Create a schedule for a published runbook."
+				return m, tea.Batch(textinput.Blink)
 			}
 			return m, nil
 		}
@@ -464,8 +806,77 @@ func (m tuiModel) View() string {
 		return m.helpView()
 	case screenExecutionDetail:
 		return m.executionDetailView()
+	case screenRunbookRun:
+		return m.runbookRunView()
+	case screenScheduleCreate:
+		return m.scheduleCreateView()
+	case screenApprovalDetail:
+		return m.approvalDetailView()
+	case screenApprovalDeny:
+		return m.approvalDenyView()
 	}
 	return ""
+}
+
+func (m *tuiModel) focusRunbookInput(forward bool) {
+	inputs := []*textinput.Model{&m.runbookTarget, &m.runbookReason, &m.runbookParams}
+	current := 0
+	for i, input := range inputs {
+		if input.Focused() {
+			current = i
+			input.Blur()
+			break
+		}
+	}
+	if forward {
+		current = (current + 1) % len(inputs)
+	} else {
+		current = (current + len(inputs) - 1) % len(inputs)
+	}
+	inputs[current].Focus()
+}
+
+func (m *tuiModel) focusScheduleInput(forward bool) {
+	inputs := []*textinput.Model{&m.scheduleName, &m.scheduleRunbook, &m.scheduleTarget, &m.scheduleReason, &m.scheduleParams, &m.scheduleInterval, &m.scheduleNextRun}
+	current := 0
+	for i, input := range inputs {
+		if input.Focused() {
+			current = i
+			input.Blur()
+			break
+		}
+	}
+	if forward {
+		current = (current + 1) % len(inputs)
+	} else {
+		current = (current + len(inputs) - 1) % len(inputs)
+	}
+	inputs[current].Focus()
+}
+
+func (m *tuiModel) blurScheduleInputs() {
+	for _, input := range []*textinput.Model{&m.scheduleName, &m.scheduleRunbook, &m.scheduleTarget, &m.scheduleReason, &m.scheduleParams, &m.scheduleInterval, &m.scheduleNextRun} {
+		input.Blur()
+	}
+}
+
+func (m tuiModel) runbookRunView() string {
+	if m.selectedRunbook == nil {
+		return tuiAppStyle.Render(titleStyle.Render("Run task") + "\n" + errorStyle.Render("No runbook selected.") + "\n" + helpStyle.Render("[esc] back"))
+	}
+	s := titleStyle.Render("Run task: "+m.selectedRunbook.Name) + "\n\n"
+	s += fmt.Sprintf("  Risk: %s\n  %s\n\n", m.selectedRunbook.Risk, m.selectedRunbook.Description)
+	s += "  Target\n  " + m.runbookTarget.View() + "\n\n"
+	s += "  Reason\n  " + m.runbookReason.View() + "\n\n"
+	s += "  Parameters, name=value pairs\n  " + m.runbookParams.View() + "\n\n"
+	if m.err != "" {
+		s += errorStyle.Render(m.err) + "\n"
+	}
+	if m.msg != "" {
+		s += selectedStyle.Render(m.msg) + "\n"
+	}
+	s += "\n" + helpStyle.Render("[tab] next field  [p] preflight  [enter] submit  [esc] back")
+	return tuiAppStyle.Render(s)
 }
 
 func (m tuiModel) homeView() string {
@@ -574,7 +985,11 @@ func (m tuiModel) executionDetailView() string {
 			}
 		}
 	}
-	s += "\n" + helpStyle.Render("[q] back  [enter] close")
+	help := "[q] back  [enter] close"
+	if e.Status == "created" || e.Status == "queued" {
+		help += "  [c] cancel"
+	}
+	s += "\n" + helpStyle.Render(help)
 	return tuiAppStyle.Render(s)
 }
 
@@ -595,14 +1010,60 @@ func (m tuiModel) approvalsView() string {
 	return tuiAppStyle.Render(s)
 }
 
+func (m tuiModel) approvalDetailView() string {
+	if m.selectedApproval == nil {
+		return tuiAppStyle.Render(titleStyle.Render("Approval detail") + "\n" + errorStyle.Render("No approval selected.") + "\n" + helpStyle.Render("[enter] back"))
+	}
+	a := m.selectedApproval
+	s := titleStyle.Render("Approval: "+a.ID) + "\n\n"
+	s += fmt.Sprintf("  Requester: %s\n  Action: %s\n  Status: %s\n  Risk: %s\n  Target: %s:%s\n  Created: %s\n  Expires: %s\n  Reason: %s\n", a.RequesterName, a.ActionType, a.Status, a.RiskLevel, a.TargetType, a.TargetID, a.CreatedAt, a.ExpiresAt, a.Reason)
+	s += "\n  Target snapshot:\n" + a.TargetSnapshot + "\n"
+	if len(a.RequestPayload) > 0 {
+		if payload, err := json.MarshalIndent(a.RequestPayload, "  ", "  "); err == nil {
+			s += "\n  Proposed action, parameters, and evidence plan:\n  " + strings.ReplaceAll(string(payload), "\n", "\n  ") + "\n"
+		}
+	}
+	if a.DecisionNote != "" {
+		s += "\n  Decision note: " + a.DecisionNote + "\n"
+	}
+	s += "\n" + helpStyle.Render("[enter] back  [q] home")
+	return tuiAppStyle.Render(s)
+}
+
+func (m tuiModel) approvalDenyView() string {
+	s := titleStyle.Render("Deny approval") + "\n\n"
+	s += fmt.Sprintf("  Approval: %s\n\n  Reason\n  %s\n", m.pendingApprovalID, m.approvalNote.View())
+	if m.err != "" {
+		s += "\n" + errorStyle.Render(m.err) + "\n"
+	}
+	s += "\n" + helpStyle.Render("[enter] deny  [esc] back")
+	return tuiAppStyle.Render(s)
+}
+
 func (m tuiModel) schedulesView() string {
 	s := titleStyle.Render("Schedules") + "\n"
 	if len(m.schedules) == 0 {
-		s += dimStyle.Render("No schedules found. Create one in the web console or API.") + "\n"
+		s += dimStyle.Render("No schedules found. Press n to create one.") + "\n"
 	} else {
 		s += m.scheduleTable.View() + "\n"
 	}
-	s += helpStyle.Render("[q] back  [r] refresh")
+	s += helpStyle.Render("[q] back  [r] refresh  [n] new schedule  [d] disable selected schedule")
+	return tuiAppStyle.Render(s)
+}
+
+func (m tuiModel) scheduleCreateView() string {
+	s := titleStyle.Render("Create schedule") + "\n\n"
+	s += "  Name\n  " + m.scheduleName.View() + "\n\n"
+	s += "  Published runbook\n  " + m.scheduleRunbook.View() + "\n\n"
+	s += "  Target\n  " + m.scheduleTarget.View() + "\n\n"
+	s += "  Reason\n  " + m.scheduleReason.View() + "\n\n"
+	s += "  Parameters, name=value pairs\n  " + m.scheduleParams.View() + "\n\n"
+	s += "  Interval, seconds\n  " + m.scheduleInterval.View() + "\n\n"
+	s += "  First run, optional RFC3339\n  " + m.scheduleNextRun.View() + "\n"
+	if m.err != "" {
+		s += "\n" + errorStyle.Render(m.err) + "\n"
+	}
+	s += "\n" + helpStyle.Render("[tab] next field  [enter] create  [esc] back")
 	return tuiAppStyle.Render(s)
 }
 
@@ -632,8 +1093,9 @@ func (m tuiModel) helpView() string {
 	s += "  enter      Select / Confirm\n"
 	s += "  /          Filter list (runbook search)\n\n"
 	s += "Actions:\n"
-	s += "  Executions:  enter = view detail (with stdout/stderr)\n"
-	s += "  Approvals:   a = approve selected, d = deny selected\n\n"
+	s += "  Executions:  enter = view detail, c = cancel queued work\n"
+	s += "  Approvals:   a = approve selected, d = deny selected with a reason\n\n"
+	s += "  Schedules:   d = disable selected schedule\n\n"
 	s += "CLI equivalents:\n"
 	s += "  vps server list\n"
 	s += "  vps runbook list | vps run\n"

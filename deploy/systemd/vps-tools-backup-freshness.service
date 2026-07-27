@@ -1,0 +1,17 @@
+[Unit]
+Description=Check VPS Tools backup freshness
+After=vps-tools-backup.service
+OnFailure=vps-tools-backup-alert.service
+
+[Service]
+Type=oneshot
+User=vps-tools
+Group=vps-tools
+WorkingDirectory=/var/lib/vps-tools
+EnvironmentFile=-/etc/vps-tools/backup.env
+ExecStart=/usr/local/libexec/vps-tools/check-backup-freshness.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+UMask=0077

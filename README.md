@@ -30,6 +30,7 @@ The result is a shared workflow for the CLI, TUI, web console, API, SDK, and AI 
 - CLI, Bubble Tea TUI, and web console access to the core workflow
 - A vendor-neutral AI provider boundary with evidence and redaction contracts
 - An MCP server and agent skill for safe AI-assisted operation
+- Expiring API bearer tokens for CLI, SDK, and automation clients
 
 ## Quick start
 
@@ -164,6 +165,8 @@ The repository also contains a Remotion project for the CLI motion samples. See 
 - [AI tools and MCP](docs/ai-tools.md)
 - [Security and operations](docs/security-and-operations.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Production release checklist](docs/production-release.md)
+- [Single-host systemd deployment](deploy/README.md)
 - [Self-contained to extended migration](docs/migration.md)
 - [Product improvement plan](docs/PRODUCT_IMPROVEMENT_PLAN.md)
 - [Operator guide](docs/operator-guide/README.md)

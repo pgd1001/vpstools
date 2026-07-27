@@ -2,7 +2,7 @@
 
 ## What you need
 
-For the default tier, install Go 1.24 or newer and use a local machine or single server. Docker, PostgreSQL, S3, and NATS are not required. Docker remains useful for an SSH test target or later infrastructure experiments.
+For the default tier, install the Go version specified in `go.mod` and use a local machine or single server. Docker, PostgreSQL, S3, and NATS are not required. Docker remains useful for an SSH test target or later infrastructure experiments.
 
 ## Build the binaries
 
@@ -61,7 +61,7 @@ $env:VPS_USER = "user_senior"
 .\bin\vps.exe whoami
 ```
 
-The development API accepts the `X-VPS-User` header. Do not expose this development identity mechanism to an untrusted network. Use the documented OIDC setup for production web access.
+The development API accepts the `X-VPS-User` header. Do not expose this development identity mechanism to an untrusted network. Use the documented OIDC setup for production web access and create an expiring API token for CLI, SDK, and automation access.
 
 ## Start a runner
 

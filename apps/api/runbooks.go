@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/pgd1001/svrtools/packages/authz"
 	"github.com/pgd1001/svrtools/packages/redact"
@@ -371,6 +373,29 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 		DryRun bool              `json:"dry_run"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if idempotencyKey != "" && !validIdempotencyKey(idempotencyKey) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Idempotency-Key must contain only letters, numbers, '.', '_' or '-' and be at most 128 characters"})
+		return
+	}
+	if req.DryRun && idempotencyKey != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Idempotency-Key is only supported for submitted runbook executions"})
+		return
+	}
+	payloadHash := hashPayload(struct {
+		Runbook string            `json:"runbook"`
+		Target  string            `json:"target"`
+		Reason  string            `json:"reason"`
+		Params  map[string]string `json:"params"`
+	}{name, req.Target, req.Reason, req.Params})
+	if idempotencyKey != "" {
+		if replayed, err := replayRunbookIdempotency(r.Context(), db, actor.OrganisationID, actor.UserID, idempotencyKey, payloadHash, w); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to inspect idempotency key"})
+			return
+		} else if replayed {
+			return
+		}
+	}
 
 	var rbID, rvID, command, definitionJSON string
 	var risk, allowedRoles string
@@ -467,6 +492,8 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 			"target_snapshot": targetSnapshot,
 			"environment":     env,
 			"target_count":    len(targetIDs),
+			"rollback":        rbDef.Spec.Rollback,
+			"verification":    rbDef.Spec.Verification,
 			"timeout": func() int {
 				if rbDef.Spec.Execution.TimeoutSeconds > 0 {
 					return rbDef.Spec.Execution.TimeoutSeconds
@@ -480,10 +507,11 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 			return
 		}
 		defer tx.Rollback()
+		expiresAt := time.Now().UTC().Add(time.Duration(approvalExpirySeconds()) * time.Second).Format("2006-01-02 15:04:05")
 		if _, txErr = tx.ExecContext(r.Context(),
 			`INSERT INTO approval_requests (id, organisation_id, requester_user_id, action_type, status, risk_level, reason, target_type, target_id, target_snapshot, request_payload, expires_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now','+1 hour'))`,
-			approvalID, actor.OrganisationID, actor.UserID, "runbook", "pending", risk, req.Reason, "server", req.Target, jsonString(targetSnapshot), execPayload); txErr != nil {
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			approvalID, actor.OrganisationID, actor.UserID, "runbook", "pending", risk, req.Reason, "server", req.Target, jsonString(targetSnapshot), execPayload, expiresAt); txErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create approval request"})
 			return
 		}
@@ -491,15 +519,27 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record approval audit event"})
 			return
 		}
+		responseBody := jsonString(map[string]string{
+			"status": "awaiting_approval", "approval_id": approvalID,
+			"message": "This runbook requires approval. Use 'vps approvals approve " + approvalID + "' to proceed.",
+		})
+		if idempotencyKey != "" {
+			if _, txErr = tx.ExecContext(r.Context(),
+				`INSERT INTO runbook_idempotency (organisation_id, user_id, idempotency_key, payload_hash, resource_type, resource_id, response_status, response_body) VALUES (?,?,?,?,?,?,?,?)`,
+				actor.OrganisationID, actor.UserID, idempotencyKey, payloadHash, "approval", approvalID, http.StatusAccepted, responseBody); txErr != nil {
+				_ = tx.Rollback()
+				if replayed, replayErr := replayRunbookIdempotency(r.Context(), db, actor.OrganisationID, actor.UserID, idempotencyKey, payloadHash, w); replayErr == nil && replayed {
+					return
+				}
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "idempotency key is already in use"})
+				return
+			}
+		}
 		if txErr = tx.Commit(); txErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit approval request"})
 			return
 		}
-		writeJSON(w, 202, map[string]string{
-			"status":      "awaiting_approval",
-			"approval_id": approvalID,
-			"message":     "This runbook requires approval. Use 'vps approvals approve " + approvalID + "' to proceed.",
-		})
+		writeRawJSON(w, http.StatusAccepted, responseBody)
 		return
 	}
 
@@ -548,15 +588,56 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to record execution audit event"})
 		return
 	}
-	if err = tx.Commit(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit execution"})
-		return
-	}
-	writeJSON(w, 201, map[string]any{
+	responseBody := jsonString(map[string]any{
 		"execution_id": execID,
 		"status":       "queued",
 		"target_count": len(targetIDs),
 	})
+	if idempotencyKey != "" {
+		if _, err = tx.ExecContext(r.Context(),
+			`INSERT INTO runbook_idempotency (organisation_id, user_id, idempotency_key, payload_hash, resource_type, resource_id, response_status, response_body) VALUES (?,?,?,?,?,?,?,?)`,
+			actor.OrganisationID, actor.UserID, idempotencyKey, payloadHash, "execution", execID, http.StatusCreated, responseBody); err != nil {
+			_ = tx.Rollback()
+			if replayed, replayErr := replayRunbookIdempotency(r.Context(), db, actor.OrganisationID, actor.UserID, idempotencyKey, payloadHash, w); replayErr == nil && replayed {
+				return
+			}
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "idempotency key is already in use"})
+			return
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit execution"})
+		return
+	}
+	writeRawJSON(w, http.StatusCreated, responseBody)
+}
+
+func replayRunbookIdempotency(ctx context.Context, db *sql.DB, orgID, userID, key, payloadHash string, w http.ResponseWriter) (bool, error) {
+	var storedHash, responseBody string
+	var responseStatus int
+	err := db.QueryRowContext(ctx,
+		`SELECT payload_hash, response_status, response_body FROM runbook_idempotency WHERE organisation_id = ? AND user_id = ? AND idempotency_key = ?`,
+		orgID, userID, key).Scan(&storedHash, &responseStatus, &responseBody)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if storedHash != payloadHash {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "idempotency key was already used with a different request payload"})
+		return true, nil
+	}
+	w.Header().Set("Idempotency-Replayed", "true")
+	writeRawJSON(w, responseStatus, responseBody)
+	return true, nil
+}
+
+func approvalExpirySeconds() int {
+	if apiBackends.ApprovalExpirySeconds > 0 {
+		return apiBackends.ApprovalExpirySeconds
+	}
+	return 3600
 }
 
 func handleListApprovals(w http.ResponseWriter, r *http.Request) {
@@ -660,10 +741,13 @@ func handleApprove(w http.ResponseWriter, r *http.Request, approvalID string) {
 	db := dbFrom(r)
 
 	var payload string
-	var requesterID, riskLevel, reason, expiresAt string
+	var requesterID, requesterRole, riskLevel, reason, expiresAt string
 	err := db.QueryRowContext(r.Context(),
-		"SELECT requester_user_id, risk_level, reason, request_payload, expires_at FROM approval_requests WHERE id = ? AND organisation_id = ?",
-		approvalID, actor.OrganisationID).Scan(&requesterID, &riskLevel, &reason, &payload, &expiresAt)
+		`SELECT a.requester_user_id, m.role, a.risk_level, a.reason, a.request_payload, a.expires_at
+		 FROM approval_requests a
+		 JOIN memberships m ON m.user_id = a.requester_user_id AND m.organisation_id = a.organisation_id AND m.status = 'active'
+		 WHERE a.id = ? AND a.organisation_id = ?`,
+		approvalID, actor.OrganisationID).Scan(&requesterID, &requesterRole, &riskLevel, &reason, &payload, &expiresAt)
 	if err != nil {
 		writeJSON(w, 404, map[string]string{"error": "approval not found"})
 		return
@@ -698,7 +782,7 @@ func handleApprove(w http.ResponseWriter, r *http.Request, approvalID string) {
 		return
 	}
 
-	execID, execErr := createExecutionFromApprovalTx(r.Context(), tx, actor.OrganisationID, requesterID, actor.UserID, riskLevel, reason, payload, approvalID)
+	execID, execErr := createExecutionFromApprovalTx(r.Context(), tx, actor.OrganisationID, requesterID, requesterRole, actor.UserID, riskLevel, reason, payload, approvalID)
 	if execErr != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create execution from approval"})
 		return
@@ -719,7 +803,7 @@ func handleApprove(w http.ResponseWriter, r *http.Request, approvalID string) {
 	writeJSON(w, 200, resp)
 }
 
-func createExecutionFromApprovalTx(ctx context.Context, tx *sql.Tx, orgID, requesterID, approverID, risk, reason, payload, approvalID string) (string, error) {
+func createExecutionFromApprovalTx(ctx context.Context, tx *sql.Tx, orgID, requesterID, requesterRole, approverID, risk, reason, payload, approvalID string) (string, error) {
 	var intent struct {
 		Command        string           `json:"command"`
 		RunbookID      string           `json:"runbook_id"`
@@ -746,7 +830,7 @@ func createExecutionFromApprovalTx(ctx context.Context, tx *sql.Tx, orgID, reque
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, delegated_by_user_id, approval_id, execution_type, status, environment, risk_level, reason, command, command_preview, command_hash, timeout_seconds)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		execID, orgID, requesterID, "junior_engineer", approverID, approvalID, "runbook", "queued", env, risk, reason, intent.Command, redact.Stdout(intent.Command), hashCmd(intent.Command), intent.Timeout); err != nil {
+		execID, orgID, requesterID, requesterRole, approverID, approvalID, "runbook", "queued", env, risk, reason, intent.Command, redact.Stdout(intent.Command), hashCmd(intent.Command), intent.Timeout); err != nil {
 		return "", err
 	}
 
@@ -787,8 +871,26 @@ func handleDeny(w http.ResponseWriter, r *http.Request, approvalID string) {
 	if json.NewDecoder(r.Body).Decode(&req) == nil {
 		note = req.Note
 	}
+	if strings.TrimSpace(note) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a denial note is required"})
+		return
+	}
 
 	db := dbFrom(r)
+	var expiresAt string
+	if err := db.QueryRowContext(r.Context(), "SELECT expires_at FROM approval_requests WHERE id = ? AND organisation_id = ? AND status = 'pending'", approvalID, actor.OrganisationID).Scan(&expiresAt); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "approval not found or already decided"})
+		return
+	}
+	if expiresAt == "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "approval has expired"})
+		return
+	}
+	var expired int
+	if err := db.QueryRowContext(r.Context(), "SELECT CASE WHEN expires_at <= datetime('now') THEN 1 ELSE 0 END FROM approval_requests WHERE id = ? AND organisation_id = ?", approvalID, actor.OrganisationID).Scan(&expired); err == nil && expired == 1 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "approval has expired"})
+		return
+	}
 	result, err := db.ExecContext(r.Context(),
 		"UPDATE approval_requests SET status = 'denied', approver_user_id = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ? AND organisation_id = ? AND status = 'pending'",
 		actor.UserID, sqlNullString(note), approvalID, actor.OrganisationID)

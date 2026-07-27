@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pgd1001/svrtools/packages/runbooks"
 	"github.com/pgd1001/svrtools/packages/sdk-go/client"
 	"github.com/spf13/cobra"
 )
@@ -152,6 +153,7 @@ var runbookRunCmd = &cobra.Command{
 		target, _ := cmd.Flags().GetString("target")
 		reason, _ := cmd.Flags().GetString("reason")
 		paramsFlag, _ := cmd.Flags().GetString("params")
+		idempotencyKey, _ := cmd.Flags().GetString("idempotency-key")
 		output, _ := cmd.Flags().GetString("output")
 		wait, _ := cmd.Flags().GetBool("wait")
 		timeout, _ := cmd.Flags().GetInt("timeout")
@@ -161,17 +163,22 @@ var runbookRunCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		params := map[string]string{}
-		if paramsFlag != "" {
-			for _, p := range strings.Split(paramsFlag, ",") {
-				kv := strings.SplitN(p, "=", 2)
-				if len(kv) == 2 {
-					params[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
-				}
-			}
+		params, err := runbooks.ParseParameterValues(paramsFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
 		}
 
-		resp, err := apiClient.RunRunbook(args[0], target, reason, params)
+		preflight, err := prepareRunbookPreflight(args[0], params)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "preflight failed: %v\n", err)
+			os.Exit(1)
+		}
+		if output != "json" {
+			printRunbookPreflight(preflight, target, reason)
+		}
+
+		resp, err := apiClient.RunRunbookWithIdempotencyKey(args[0], target, reason, params, idempotencyKey)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -256,6 +263,59 @@ var runbookRunCmd = &cobra.Command{
 	},
 }
 
+type runbookPreflight struct {
+	detail         client.RunbookDetail
+	parameterNames []string
+	approvalHint   string
+}
+
+func prepareRunbookPreflight(name string, params map[string]string) (*runbookPreflight, error) {
+	detail, err := apiClient.GetRunbook(name)
+	if err != nil {
+		return nil, err
+	}
+	if detail == nil {
+		return nil, fmt.Errorf("runbook details were empty")
+	}
+	var definition runbooks.Runbook
+	if err := json.Unmarshal([]byte(detail.Runbook.Definition), &definition); err != nil {
+		return nil, fmt.Errorf("stored definition is invalid: %w", err)
+	}
+	if _, err := definition.ValidateParams(params); err != nil {
+		return nil, err
+	}
+	if _, err := definition.RenderCommand(params); err != nil {
+		return nil, err
+	}
+	parameterNames := make([]string, 0, len(definition.Spec.Parameters))
+	for _, parameter := range definition.Spec.Parameters {
+		parameterNames = append(parameterNames, parameter.Name)
+	}
+	approvalHint := "may be required after target environment and role checks"
+	if definition.Spec.Approval.Required {
+		approvalHint = "required by the runbook policy"
+	}
+	return &runbookPreflight{detail: detail.Runbook, parameterNames: parameterNames, approvalHint: approvalHint}, nil
+}
+
+func printRunbookPreflight(preflight *runbookPreflight, target, reason string) {
+	fmt.Println("Preflight passed")
+	fmt.Printf("  Runbook:   %s v%d [%s, risk %s]\n", preflight.detail.Name, preflight.detail.Version, preflight.detail.Status, preflight.detail.Risk)
+	fmt.Printf("  Target:    %s\n", target)
+	if reason == "" {
+		fmt.Println("  Reason:    not supplied")
+	} else {
+		fmt.Printf("  Reason:    %s\n", reason)
+	}
+	if len(preflight.parameterNames) == 0 {
+		fmt.Println("  Parameters: none")
+	} else {
+		fmt.Printf("  Parameters: %s validated (values are not echoed)\n", strings.Join(preflight.parameterNames, ", "))
+	}
+	fmt.Printf("  Approval:  %s\n", preflight.approvalHint)
+	fmt.Println("  Submitting execution request...")
+}
+
 func init() {
 	runbookListCmd.Flags().String("output", "table", "Output format (table, json)")
 
@@ -274,6 +334,7 @@ func init() {
 	runbookRunCmd.Flags().String("target", "", "Target server (server:id or server:name)")
 	runbookRunCmd.Flags().String("reason", "", "Reason for execution")
 	runbookRunCmd.Flags().String("params", "", "Parameters as key=value,key=value")
+	runbookRunCmd.Flags().String("idempotency-key", "", "Stable retry key for safely resubmitting the same runbook request")
 	runbookRunCmd.Flags().String("output", "table", "Output format (table, json)")
 	runbookRunCmd.Flags().Bool("wait", false, "Wait for execution to complete")
 	runbookRunCmd.Flags().Int("timeout", 300, "Timeout in seconds (with --wait)")

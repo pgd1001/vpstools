@@ -39,5 +39,6 @@ The command is safe to rerun. It updates an existing email or membership rather 
 - Rotate `SESSION_SECRET` and `VPS_WEB_SHARED_SECRET` through the deployment secret manager.
 - Use different random values for `SESSION_SECRET` and `VPS_WEB_SHARED_SECRET`. Never commit either value to `.env.example` or source control.
 - Set `VPS_DEV_AUTH=false` or leave it unset.
+- Set `VPS_ENV=production` so the API refuses development identity and runner bypasses at startup.
 - Configure MFA and passkeys in ZITADEL, with MFA required for privileged users.
 - The logout route always clears the local session. Set `ZITADEL_PROVIDER_LOGOUT=true` only after registering the exact `ZITADEL_POST_LOGOUT_REDIRECT_URI` in ZITADEL. Otherwise the browser stays signed in at ZITADEL and a later login can complete silently, which is normal SSO behaviour.

@@ -13,6 +13,7 @@ import (
 type Client struct {
 	baseURL     string
 	userID      string
+	apiToken    string
 	runnerToken string
 	http        *http.Client
 }
@@ -21,6 +22,7 @@ func New(baseURL string) *Client {
 	return &Client{
 		baseURL:     baseURL,
 		userID:      "",
+		apiToken:    os.Getenv("VPS_API_TOKEN"),
 		runnerToken: os.Getenv("VPS_RUNNER_TOKEN"),
 		http:        &http.Client{Timeout: 30 * time.Second},
 	}
@@ -28,6 +30,12 @@ func New(baseURL string) *Client {
 
 func (c *Client) SetUser(userID string) {
 	c.userID = userID
+}
+
+// SetToken configures a bearer token for production API access. When set, the
+// client does not send the development X-VPS-User header.
+func (c *Client) SetToken(token string) {
+	c.apiToken = token
 }
 
 type WhoAmIResponse struct {
@@ -81,15 +89,15 @@ func (c *Client) ListServers(environment, tagKey, tagValue string) (*ListServers
 	path := "/api/v1/servers"
 	sep := "?"
 	if environment != "" {
-		path += fmt.Sprintf("%senvironment=%s", sep, environment)
+		path += fmt.Sprintf("%senvironment=%s", sep, url.QueryEscape(environment))
 		sep = "&"
 	}
 	if tagKey != "" {
-		path += fmt.Sprintf("%stag_key=%s", sep, tagKey)
+		path += fmt.Sprintf("%stag_key=%s", sep, url.QueryEscape(tagKey))
 		sep = "&"
 	}
 	if tagValue != "" {
-		path += fmt.Sprintf("%stag_value=%s", sep, tagValue)
+		path += fmt.Sprintf("%stag_value=%s", sep, url.QueryEscape(tagValue))
 	}
 	var resp ListServersResponse
 	if err := c.get(path, &resp); err != nil {
@@ -132,7 +140,7 @@ type GetServerResponse struct {
 
 func (c *Client) GetServer(serverID string) (*GetServerResponse, error) {
 	var resp GetServerResponse
-	if err := c.get("/api/v1/servers/"+serverID, &resp); err != nil {
+	if err := c.get("/api/v1/servers/"+url.PathEscape(serverID), &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -144,7 +152,7 @@ type CheckServerResponse struct {
 
 func (c *Client) CheckServer(serverID string) (*CheckServerResponse, error) {
 	var resp CheckServerResponse
-	if err := c.post("/api/v1/servers/"+serverID+"/check", nil, &resp); err != nil {
+	if err := c.post("/api/v1/servers/"+url.PathEscape(serverID)+"/check", nil, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -216,8 +224,24 @@ type CreateRegistrationTokenResponse struct {
 }
 
 func (c *Client) CreateRegistrationToken() (*CreateRegistrationTokenResponse, error) {
+	return c.CreateRegistrationTokenForRunner("")
+}
+
+func (c *Client) CreateRegistrationTokenForRunner(runnerID string) (*CreateRegistrationTokenResponse, error) {
 	var resp CreateRegistrationTokenResponse
-	if err := c.post("/api/v1/runners/registration-token", nil, &resp); err != nil {
+	body := any(nil)
+	if runnerID != "" {
+		body = map[string]string{"runner_id": runnerID}
+	}
+	if err := c.post("/api/v1/runners/registration-token", body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) RotateRunnerToken(runnerID string) (*CreateRegistrationTokenResponse, error) {
+	var resp CreateRegistrationTokenResponse
+	if err := c.post("/api/v1/runners/"+url.PathEscape(runnerID)+"/rotate-token", nil, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -236,13 +260,20 @@ type CreateExecutionResponse struct {
 }
 
 func (c *Client) CreateExecution(target, command, reason string) (*CreateExecutionResponse, error) {
+	return c.CreateExecutionWithIdempotencyKey(target, command, reason, "")
+}
+
+// CreateExecutionWithIdempotencyKey makes a retried submission safe. The API
+// persists the key with the original request payload and replays the original
+// response when the same key and payload are sent again.
+func (c *Client) CreateExecutionWithIdempotencyKey(target, command, reason, idempotencyKey string) (*CreateExecutionResponse, error) {
 	body := CreateExecutionRequest{
 		Target:  target,
 		Command: command,
 		Reason:  reason,
 	}
 	var resp CreateExecutionResponse
-	if err := c.post("/api/v1/executions", body, &resp); err != nil {
+	if err := c.postWithHeaders("/api/v1/executions", body, &resp, map[string]string{"Idempotency-Key": idempotencyKey}); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -288,7 +319,7 @@ type GetExecutionResponse struct {
 
 func (c *Client) GetExecution(executionID string) (*GetExecutionResponse, error) {
 	var resp GetExecutionResponse
-	if err := c.get("/api/v1/executions/"+executionID, &resp); err != nil {
+	if err := c.get("/api/v1/executions/"+url.PathEscape(executionID), &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -319,11 +350,11 @@ func (c *Client) ListExecutions(status, limit string) (*ListExecutionsResponse, 
 	path := "/api/v1/executions"
 	sep := "?"
 	if status != "" {
-		path += fmt.Sprintf("%sstatus=%s", sep, status)
+		path += fmt.Sprintf("%sstatus=%s", sep, url.QueryEscape(status))
 		sep = "&"
 	}
 	if limit != "" {
-		path += fmt.Sprintf("%slimit=%s", sep, limit)
+		path += fmt.Sprintf("%slimit=%s", sep, url.QueryEscape(limit))
 	}
 	var resp ListExecutionsResponse
 	if err := c.get(path, &resp); err != nil {
@@ -335,10 +366,10 @@ func (c *Client) ListExecutions(status, limit string) (*ListExecutionsResponse, 
 func (c *Client) ListMyExecutions(status, limit string) (*ListExecutionsResponse, error) {
 	path := "/api/v1/executions?mine=true"
 	if status != "" {
-		path += fmt.Sprintf("&status=%s", status)
+		path += fmt.Sprintf("&status=%s", url.QueryEscape(status))
 	}
 	if limit != "" {
-		path += fmt.Sprintf("&limit=%s", limit)
+		path += fmt.Sprintf("&limit=%s", url.QueryEscape(limit))
 	}
 	var resp ListExecutionsResponse
 	if err := c.get(path, &resp); err != nil {
@@ -350,10 +381,10 @@ func (c *Client) ListMyExecutions(status, limit string) (*ListExecutionsResponse
 func (c *Client) ListDelegatedExecutions(status, limit string) (*ListExecutionsResponse, error) {
 	path := "/api/v1/executions?delegated=true"
 	if status != "" {
-		path += fmt.Sprintf("&status=%s", status)
+		path += fmt.Sprintf("&status=%s", url.QueryEscape(status))
 	}
 	if limit != "" {
-		path += fmt.Sprintf("&limit=%s", limit)
+		path += fmt.Sprintf("&limit=%s", url.QueryEscape(limit))
 	}
 	var resp ListExecutionsResponse
 	if err := c.get(path, &resp); err != nil {
@@ -364,7 +395,7 @@ func (c *Client) ListDelegatedExecutions(status, limit string) (*ListExecutionsR
 
 func (c *Client) CancelExecution(executionID string) (map[string]string, error) {
 	var resp map[string]string
-	if err := c.post("/api/v1/executions/"+executionID+"/cancel", nil, &resp); err != nil {
+	if err := c.post("/api/v1/executions/"+url.PathEscape(executionID)+"/cancel", nil, &resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -386,9 +417,23 @@ type ListAuditResponse struct {
 	Events []AuditEvent `json:"events"`
 }
 
+type VerifyAuditResponse struct {
+	Valid         bool   `json:"valid"`
+	CheckedEvents int    `json:"checked_events"`
+	Error         string `json:"error,omitempty"`
+}
+
 func (c *Client) ListAudit(limit string) (*ListAuditResponse, error) {
 	var resp ListAuditResponse
-	if err := c.get(fmt.Sprintf("/api/v1/audit?limit=%s", limit), &resp); err != nil {
+	if err := c.get(fmt.Sprintf("/api/v1/audit?limit=%s", url.QueryEscape(limit)), &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) VerifyAudit() (*VerifyAuditResponse, error) {
+	var resp VerifyAuditResponse
+	if err := c.get("/api/v1/audit/verify", &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -446,9 +491,40 @@ func (c *Client) DisableSchedule(scheduleID string) (map[string]string, error) {
 	return resp, nil
 }
 
+type AutomationStatus struct {
+	Paused   bool   `json:"paused"`
+	PausedAt string `json:"paused_at,omitempty"`
+	PausedBy string `json:"paused_by,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+func (c *Client) AutomationStatus() (*AutomationStatus, error) {
+	var resp AutomationStatus
+	if err := c.get("/api/v1/automation/status", &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) PauseAutomation(reason string) (*AutomationStatus, error) {
+	var resp AutomationStatus
+	if err := c.post("/api/v1/automation/pause", map[string]string{"reason": reason}, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) ResumeAutomation() (*AutomationStatus, error) {
+	var resp AutomationStatus
+	if err := c.post("/api/v1/automation/resume", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 func (c *Client) get(path string, out any) error {
 	req, _ := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
-	req.Header.Set("X-VPS-User", c.userID)
+	c.setAuth(req)
 	if c.runnerToken != "" {
 		req.Header.Set("X-VPS-Runner-Token", c.runnerToken)
 	}
@@ -464,10 +540,19 @@ func (c *Client) get(path string, out any) error {
 }
 
 func (c *Client) post(path string, body, out any) error {
+	return c.postWithHeaders(path, body, out, nil)
+}
+
+func (c *Client) postWithHeaders(path string, body, out any, headers map[string]string) error {
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequest(http.MethodPost, c.baseURL+path, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-VPS-User", c.userID)
+	for key, value := range headers {
+		if value != "" {
+			req.Header.Set(key, value)
+		}
+	}
+	c.setAuth(req)
 	if c.runnerToken != "" {
 		req.Header.Set("X-VPS-Runner-Token", c.runnerToken)
 	}
@@ -487,7 +572,7 @@ func (c *Client) post(path string, body, out any) error {
 
 func (c *Client) delete(path string, out any) error {
 	req, _ := http.NewRequest(http.MethodDelete, c.baseURL+path, nil)
-	req.Header.Set("X-VPS-User", c.userID)
+	c.setAuth(req)
 	if c.runnerToken != "" {
 		req.Header.Set("X-VPS-Runner-Token", c.runnerToken)
 	}
@@ -503,6 +588,37 @@ func (c *Client) delete(path string, out any) error {
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+type CreateAPITokenResponse struct {
+	Token          string `json:"token"`
+	TokenID        string `json:"token_id"`
+	UserID         string `json:"user_id"`
+	OrganisationID string `json:"organisation_id"`
+	ExpiresAt      string `json:"expires_at"`
+}
+
+func (c *Client) CreateAPIToken(name, userID string, expiresIn int) (*CreateAPITokenResponse, error) {
+	var resp CreateAPITokenResponse
+	body := map[string]any{"name": name, "user_id": userID, "expires_in": expiresIn}
+	if err := c.post("/api/v1/auth/tokens", body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) RevokeAPIToken(tokenID string) error {
+	return c.delete("/api/v1/auth/tokens/"+url.PathEscape(tokenID), &map[string]any{})
+}
+
+func (c *Client) setAuth(req *http.Request) {
+	if c.apiToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiToken)
+		return
+	}
+	if c.userID != "" {
+		req.Header.Set("X-VPS-User", c.userID)
+	}
 }
 
 func (c *Client) parseError(resp *http.Response) error {
@@ -574,7 +690,7 @@ type GetRunbookResponse struct {
 
 func (c *Client) GetRunbook(name string) (*GetRunbookResponse, error) {
 	var resp GetRunbookResponse
-	if err := c.get("/api/v1/runbooks/"+name, &resp); err != nil {
+	if err := c.get("/api/v1/runbooks/"+url.PathEscape(name), &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -607,20 +723,35 @@ func (c *Client) CreateRunbook(req CreateRunbookRequest) (*CreateRunbookResponse
 
 func (c *Client) PublishRunbook(name string) (map[string]string, error) {
 	var resp map[string]string
-	if err := c.post("/api/v1/runbooks/"+name+"/publish", nil, &resp); err != nil {
+	if err := c.post("/api/v1/runbooks/"+url.PathEscape(name)+"/publish", nil, &resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
 }
 
 func (c *Client) RunRunbook(name, target, reason string, params map[string]string) (map[string]any, error) {
+	return c.RunRunbookWithIdempotencyKey(name, target, reason, params, "")
+}
+
+// RunRunbookWithIdempotencyKey makes a retried runbook submission safe. This
+// also covers approval requests, not only direct execution creation.
+func (c *Client) RunRunbookWithIdempotencyKey(name, target, reason string, params map[string]string, idempotencyKey string) (map[string]any, error) {
+	return c.runRunbook(name, target, reason, params, false, idempotencyKey)
+}
+
+func (c *Client) PreflightRunbook(name, target, reason string, params map[string]string) (map[string]any, error) {
+	return c.runRunbook(name, target, reason, params, true, "")
+}
+
+func (c *Client) runRunbook(name, target, reason string, params map[string]string, dryRun bool, idempotencyKey string) (map[string]any, error) {
 	body := map[string]any{
-		"target": target,
-		"reason": reason,
-		"params": params,
+		"target":  target,
+		"reason":  reason,
+		"params":  params,
+		"dry_run": dryRun,
 	}
 	var resp map[string]any
-	if err := c.post("/api/v1/runbooks/"+name+"/run", body, &resp); err != nil {
+	if err := c.postWithHeaders("/api/v1/runbooks/"+url.PathEscape(name)+"/run", body, &resp, map[string]string{"Idempotency-Key": idempotencyKey}); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -643,10 +774,38 @@ type ListApprovalsResponse struct {
 	Approvals []ApprovalItem `json:"approvals"`
 }
 
+type ApprovalDetail struct {
+	ID             string         `json:"id"`
+	RequesterID    string         `json:"requester_id"`
+	RequesterName  string         `json:"requester_name"`
+	ActionType     string         `json:"action_type"`
+	Status         string         `json:"status"`
+	RiskLevel      string         `json:"risk_level"`
+	Reason         string         `json:"reason"`
+	TargetType     string         `json:"target_type"`
+	TargetID       string         `json:"target_id"`
+	TargetSnapshot string         `json:"target_snapshot"`
+	RequestPayload map[string]any `json:"request_payload"`
+	ExpiresAt      string         `json:"expires_at"`
+	CreatedAt      string         `json:"created_at"`
+	DecidedAt      string         `json:"decided_at"`
+	DecisionNote   string         `json:"decision_note"`
+}
+
+func (c *Client) GetApproval(approvalID string) (*ApprovalDetail, error) {
+	var resp struct {
+		Approval ApprovalDetail `json:"approval"`
+	}
+	if err := c.get("/api/v1/approvals/"+url.PathEscape(approvalID), &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Approval, nil
+}
+
 func (c *Client) ListApprovals(status string) (*ListApprovalsResponse, error) {
 	path := "/api/v1/approvals"
 	if status != "" {
-		path += "?status=" + status
+		path += "?status=" + url.QueryEscape(status)
 	}
 	var resp ListApprovalsResponse
 	if err := c.get(path, &resp); err != nil {
@@ -658,7 +817,7 @@ func (c *Client) ListApprovals(status string) (*ListApprovalsResponse, error) {
 func (c *Client) ApproveApproval(approvalID string, note ...string) (map[string]string, error) {
 	var resp map[string]string
 	body := approvalNoteBody(note)
-	if err := c.post("/api/v1/approvals/"+approvalID+"/approve", body, &resp); err != nil {
+	if err := c.post("/api/v1/approvals/"+url.PathEscape(approvalID)+"/approve", body, &resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -667,7 +826,7 @@ func (c *Client) ApproveApproval(approvalID string, note ...string) (map[string]
 func (c *Client) DenyApproval(approvalID string, note ...string) (map[string]string, error) {
 	var resp map[string]string
 	body := approvalNoteBody(note)
-	if err := c.post("/api/v1/approvals/"+approvalID+"/deny", body, &resp); err != nil {
+	if err := c.post("/api/v1/approvals/"+url.PathEscape(approvalID)+"/deny", body, &resp); err != nil {
 		return nil, err
 	}
 	return resp, nil

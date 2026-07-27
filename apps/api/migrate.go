@@ -70,8 +70,16 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	);
 	CREATE TABLE IF NOT EXISTS runner_credentials (
 		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
+		runner_id TEXT REFERENCES runners(id) ON DELETE CASCADE,
 		token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL,
 		revoked_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+	);
+	CREATE TABLE IF NOT EXISTS api_tokens (
+		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
+		user_id TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
+		token_prefix TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
+		expires_at TEXT NOT NULL, revoked_at TEXT, last_used_at TEXT,
+		created_at TEXT NOT NULL DEFAULT (datetime('now'))
 	);
 	CREATE TABLE IF NOT EXISTS executions (
 		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
@@ -104,6 +112,40 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		UNIQUE(execution_id, server_id)
 	);
+	CREATE TABLE IF NOT EXISTS execution_result_receipts (
+		organisation_id TEXT NOT NULL REFERENCES organisations(id),
+		execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
+		target_id TEXT NOT NULL REFERENCES execution_targets(id) ON DELETE CASCADE,
+		lease_id TEXT NOT NULL,
+		runner_id TEXT NOT NULL,
+		payload_hash TEXT NOT NULL,
+		response_code INTEGER NOT NULL DEFAULT 200,
+		response_body TEXT NOT NULL,
+		created_at TEXT NOT NULL DEFAULT (datetime('now')),
+		PRIMARY KEY (target_id, lease_id)
+	);
+	CREATE TABLE IF NOT EXISTS execution_idempotency (
+		organisation_id TEXT NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+		user_id TEXT NOT NULL REFERENCES users(id),
+		idempotency_key TEXT NOT NULL,
+		payload_hash TEXT NOT NULL,
+		execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
+		response_body TEXT NOT NULL,
+		created_at TEXT NOT NULL DEFAULT (datetime('now')),
+		PRIMARY KEY (organisation_id, idempotency_key)
+	);
+	CREATE TABLE IF NOT EXISTS runbook_idempotency (
+		organisation_id TEXT NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+		user_id TEXT NOT NULL REFERENCES users(id),
+		idempotency_key TEXT NOT NULL,
+		payload_hash TEXT NOT NULL,
+		resource_type TEXT NOT NULL,
+		resource_id TEXT NOT NULL,
+		response_status INTEGER NOT NULL,
+		response_body TEXT NOT NULL,
+		created_at TEXT NOT NULL DEFAULT (datetime('now')),
+		PRIMARY KEY (organisation_id, idempotency_key)
+	);
 	CREATE TABLE IF NOT EXISTS audit_events (
 		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
 		occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -112,7 +154,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		action TEXT NOT NULL, target_type TEXT, target_id TEXT, target_display TEXT,
 		environment TEXT, result TEXT NOT NULL, reason TEXT,
 		command_hash TEXT, command_preview TEXT,
-		metadata TEXT NOT NULL DEFAULT '{}'
+		metadata TEXT NOT NULL DEFAULT '{}',
+		previous_hash TEXT NOT NULL DEFAULT '',
+		event_hash TEXT NOT NULL DEFAULT ''
 	);
 	CREATE TABLE IF NOT EXISTS runbooks (
 		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
@@ -176,6 +220,14 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		updated_at TEXT NOT NULL DEFAULT (datetime('now')),
 		UNIQUE(organisation_id, name)
 	);
+	CREATE TABLE IF NOT EXISTS automation_controls (
+		organisation_id TEXT PRIMARY KEY REFERENCES organisations(id) ON DELETE CASCADE,
+		paused INTEGER NOT NULL DEFAULT 0,
+		paused_at TEXT,
+		paused_by_user_id TEXT REFERENCES users(id),
+		reason TEXT NOT NULL DEFAULT '',
+		updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+	);
 	CREATE INDEX IF NOT EXISTS idx_servers_org_status ON servers(organisation_id, status);
 	CREATE INDEX IF NOT EXISTS idx_servers_org_env ON servers(organisation_id, environment);
 	CREATE INDEX IF NOT EXISTS idx_server_tags_org_kv ON server_tags(organisation_id, key, value);
@@ -184,10 +236,16 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_runners_last_seen ON runners(organisation_id, last_seen_at);
 	CREATE INDEX IF NOT EXISTS idx_runner_scopes_runner ON runner_scopes(runner_id);
 	CREATE INDEX IF NOT EXISTS idx_runner_credentials_hash ON runner_credentials(token_hash);
+	CREATE INDEX IF NOT EXISTS idx_runner_credentials_runner ON runner_credentials(runner_id);
+	CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
+	CREATE INDEX IF NOT EXISTS idx_api_tokens_org_user ON api_tokens(organisation_id, user_id);
 	CREATE INDEX IF NOT EXISTS idx_executions_org_status ON executions(organisation_id, status);
 	CREATE INDEX IF NOT EXISTS idx_executions_actor ON executions(actor_user_id, requested_at);
 	CREATE INDEX IF NOT EXISTS idx_execution_targets_exec ON execution_targets(execution_id);
 	CREATE INDEX IF NOT EXISTS idx_execution_targets_server ON execution_targets(server_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_result_receipts_execution ON execution_result_receipts(organisation_id, execution_id);
+	CREATE INDEX IF NOT EXISTS idx_execution_idempotency_execution ON execution_idempotency(organisation_id, execution_id);
+	CREATE INDEX IF NOT EXISTS idx_runbook_idempotency_resource ON runbook_idempotency(organisation_id, resource_type, resource_id);
 	CREATE INDEX IF NOT EXISTS idx_audit_events_org_time ON audit_events(organisation_id, occurred_at);
 	CREATE INDEX IF NOT EXISTS idx_audit_events_actor ON audit_events(organisation_id, actor_user_id, occurred_at);
 	CREATE INDEX IF NOT EXISTS idx_audit_events_action ON audit_events(organisation_id, action, occurred_at);
@@ -221,6 +279,14 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_automation_schedules_due ON automation_schedules(organisation_id, enabled, next_run_at)`); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS automation_controls (
+		organisation_id TEXT PRIMARY KEY REFERENCES organisations(id) ON DELETE CASCADE,
+		paused INTEGER NOT NULL DEFAULT 0, paused_at TEXT,
+		paused_by_user_id TEXT REFERENCES users(id), reason TEXT NOT NULL DEFAULT '',
+		updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+	);`); err != nil {
+		return err
+	}
 	// Idempotent migrations for existing databases
 	_ = addColumnIgnoreErr(ctx, db, "executions", "delegated_by_user_id", "TEXT")
 	_ = addColumnIgnoreErr(ctx, db, "executions", "approval_id", "TEXT")
@@ -235,6 +301,15 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "max_attempts", "INTEGER NOT NULL DEFAULT 3")
 	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "next_attempt_at", "TEXT")
 	_ = addColumnIgnoreErr(ctx, db, "runbook_versions", "allowed_roles", "TEXT NOT NULL DEFAULT '[\"senior_engineer\",\"admin\",\"owner\"]'")
+	_ = addColumnIgnoreErr(ctx, db, "runner_credentials", "runner_id", "TEXT REFERENCES runners(id) ON DELETE CASCADE")
+	_ = addColumnIgnoreErr(ctx, db, "audit_events", "previous_hash", "TEXT NOT NULL DEFAULT ''")
+	_ = addColumnIgnoreErr(ctx, db, "audit_events", "event_hash", "TEXT NOT NULL DEFAULT ''")
+	if err := backfillAuditHashChain(ctx, db); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_runner_credentials_runner ON runner_credentials(runner_id)`); err != nil {
+		return err
+	}
 	return nil
 }
 

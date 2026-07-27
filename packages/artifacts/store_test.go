@@ -48,3 +48,27 @@ func TestLocalStoreGeneratesKey(t *testing.T) {
 		t.Fatalf("key permissions or file missing: %v", err)
 	}
 }
+
+func TestLocalStoreCheckReadsEncryptedArtifact(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "artifacts")
+	key := base64.RawStdEncoding.EncodeToString(make([]byte, 32))
+	store, err := NewLocalStore(root, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Check(); err != nil {
+		t.Fatalf("empty store check failed: %v", err)
+	}
+	if _, err := store.Put("probe", "text/plain", []byte("health")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Check(); err != nil {
+		t.Fatalf("encrypted store check failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "probe.bin"), []byte("corrupt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Check(); err == nil {
+		t.Fatal("expected corrupted encrypted artifact to fail the store check")
+	}
+}

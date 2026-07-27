@@ -4,13 +4,16 @@ import {z} from 'zod';
 
 const apiURL = (process.env.VPS_API_URL || 'http://localhost:8080').replace(/\/$/, '');
 const user = process.env.VPS_USER || '';
+const apiToken = process.env.VPS_API_TOKEN || '';
 const writesEnabled = process.env.VPS_MCP_ALLOW_WRITES === 'true';
 
 type JSONValue = string | number | boolean | null | JSONValue[] | {[key: string]: JSONValue};
 
 class VPSClient {
   private headers(): Record<string, string> {
-    const headers: Record<string, string> = {'content-type': 'application/json', 'x-vps-user': user};
+    const headers: Record<string, string> = {'content-type': 'application/json'};
+    if (apiToken) headers.authorization = `Bearer ${apiToken}`;
+    else if (user) headers['x-vps-user'] = user;
     const sharedSecret = process.env.VPS_WEB_SHARED_SECRET;
     const subject = process.env.VPS_OIDC_SUBJECT;
     const email = process.env.VPS_OIDC_EMAIL;
@@ -91,9 +94,18 @@ server.registerTool('vps_list_executions', {description: 'List execution state a
 
 server.registerTool('vps_get_execution', {description: 'Read an execution timeline, target results, output, and audit-linked state.', inputSchema: {id: z.string().min(1)}}, async ({id}) => safe(() => client.get(`/api/v1/executions/${encodeURIComponent(id)}`)));
 
+server.registerTool('vps_cancel_execution', {description: 'Cancel a created or queued execution after explicit user confirmation. The requester or a senior operator may cancel it. The API records the cancellation in the audit trail.', inputSchema: {id: z.string().min(1), confirm: z.boolean().default(false)}}, async ({id, confirm}) => safe(async () => { requireWriteConfirmation(confirm); return client.post(`/api/v1/executions/${encodeURIComponent(id)}/cancel`, {}); }));
+
 server.registerTool('vps_search_audit', {description: 'Search recent audit events. Use this to explain who requested, approved, or executed an action.', inputSchema: {limit: z.number().int().min(1).max(100).default(50), actor: z.string().optional()}}, async ({limit, actor}) => safe(() => client.get(`/api/v1/audit?limit=${limit}${actor ? `&actor=${encodeURIComponent(actor)}` : ''}`)));
+server.registerTool('vps_verify_audit', {description: 'Verify the organisation audit hash chain and report whether the recorded history is intact.', inputSchema: {}}, async () => safe(() => client.get('/api/v1/audit/verify')));
 
 server.registerTool('vps_list_schedules', {description: 'List interval schedules and their last errors. This is read-only.', inputSchema: {}}, async () => safe(() => client.get('/api/v1/schedules')));
+
+server.registerTool('vps_automation_status', {description: 'Read whether organisation-wide scheduled automation is paused.', inputSchema: {}}, async () => safe(() => client.get('/api/v1/automation/status')));
+
+server.registerTool('vps_pause_automation', {description: 'Pause new scheduled automation after explicit user confirmation. Existing queued executions are not cancelled.', inputSchema: {reason: z.string().min(1), confirm: z.boolean().default(false)}}, async ({reason, confirm}) => safe(async () => { requireWriteConfirmation(confirm); return client.post('/api/v1/automation/pause', {reason}); }));
+
+server.registerTool('vps_resume_automation', {description: 'Resume scheduled automation after explicit user confirmation.', inputSchema: {confirm: z.boolean().default(false)}}, async ({confirm}) => safe(async () => { requireWriteConfirmation(confirm); return client.post('/api/v1/automation/resume', {}); }));
 
 server.registerTool('vps_create_schedule', {description: 'Create an interval schedule after explicit user confirmation. High and critical risk runbooks remain blocked from unattended execution.', inputSchema: {name: z.string().min(1), runbook_name: z.string().min(1), target: z.string().min(1), reason: z.string().min(1), interval_seconds: z.number().int().min(60), params: z.record(z.string()).default({}), next_run_at: z.string().optional(), confirm: z.boolean().default(false)}}, async (input) => safe(async () => { requireWriteConfirmation(input.confirm); return client.post('/api/v1/schedules', input); }));
 

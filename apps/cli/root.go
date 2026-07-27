@@ -14,7 +14,18 @@ var (
 	apiClient *client.Client
 	apiURL    string
 	cfgFile   string
+	version   = "dev"
+	commit    = "unknown"
+	date      = "unknown"
 )
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print the CLI build version",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println(version)
+	},
+}
 
 var tuiCmd = &cobra.Command{
 	Use:   "tui",
@@ -61,6 +72,11 @@ var rootCmd = &cobra.Command{
 		}
 
 		apiClient = client.New(apiURL)
+		if token := viper.GetString("api_token"); token != "" {
+			apiClient.SetToken(token)
+		} else if token := os.Getenv("VPS_API_TOKEN"); token != "" {
+			apiClient.SetToken(token)
+		}
 		if user := os.Getenv("VPS_USER"); user != "" {
 			apiClient.SetUser(user)
 		}
@@ -88,6 +104,8 @@ func init() {
 	rootCmd.AddCommand(execCmd)
 	rootCmd.AddCommand(runbookCmd)
 	rootCmd.AddCommand(approvalCmd)
+	rootCmd.AddCommand(automationCmd)
 	rootCmd.AddCommand(auditCmd)
 	rootCmd.AddCommand(tuiCmd)
+	rootCmd.AddCommand(versionCmd)
 }

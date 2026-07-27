@@ -2,6 +2,16 @@
 
 Use JSON output or the HTTP API from automation. Do not parse the human-readable tables.
 
+Production scripts should use an expiring bearer token:
+
+```bash
+export VPS_API_TOKEN="replace-with-a-short-lived-token"
+curl --fail-with-body -sS -H "Authorization: Bearer $VPS_API_TOKEN" \
+  "$VPS_API_URL/api/v1/health"
+```
+
+The `X-VPS-User` examples below are for local development. They are rejected when `VPS_ENV=production`.
+
 ## Shell scripting
 
 Example Bash workflow with strict error handling:
@@ -97,7 +107,17 @@ func main() {
 }
 ```
 
-The SDK also supports server inventory, runners, executions, approvals, audit events, and schedules. See the method names in `packages/sdk-go/client/client.go` for the current typed surface.
+The SDK also supports server inventory, runners, executions, approvals, audit events, schedules, and organisation-wide automation pause or resume. See the method names in `packages/sdk-go/client/client.go` for the current typed surface.
+
+During an incident, a senior operator can stop new scheduled work and later resume it:
+
+```go
+status, err := api.PauseAutomation("incident response")
+if err != nil { log.Fatal(err) }
+fmt.Println(status.Paused)
+// Existing queued executions are not cancelled by the pause.
+_, err = api.ResumeAutomation()
+```
 
 ## CI patterns
 
@@ -115,4 +135,4 @@ For a state-changing CI job, use a dedicated provisioned identity, a named reaso
 
 ## Idempotency and retries
 
-The current API has execution leases and runner recovery, but scripts should still avoid duplicate submissions. Store the returned execution ID, use a job-specific change identifier in the reason or surrounding system, and check existing execution state before retrying after a network timeout.
+The current API has execution leases and runner recovery. For submissions that may be retried after a network timeout, send a stable `Idempotency-Key`, use the Go SDK's `CreateExecutionWithIdempotencyKey` or `RunRunbookWithIdempotencyKey` method, or pass `--idempotency-key` to the CLI. The same key and payload replay the original execution or approval response, while a changed payload is rejected. Store the returned execution or approval ID and still check state before taking any manual recovery action.

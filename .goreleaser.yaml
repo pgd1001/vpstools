@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 version: 2
 builds:
   - id: vps
@@ -14,7 +15,7 @@ builds:
   - id: api
     main: ./apps/api
     binary: api
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     env:
       - CGO_ENABLED=0
@@ -22,10 +23,11 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
+      - -X main.version={{.Version}}
   - id: runner
     main: ./apps/runner
     binary: runner
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     env:
       - CGO_ENABLED=0
@@ -33,17 +35,50 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
+      - -X main.version={{.Version}}
+
+  - id: backup
+    main: ./apps/api/cmd/backup
+    binary: backup
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
 
 archives:
   - id: default
-    formats: [tar.gz]
+    ids: [vps, api, runner, backup]
+    formats: [tar.gz, zip]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
-      - LICENSE
       - README.md
+      - deploy/README.md
+      - deploy/systemd/*
+      - scripts/backup-alert.sh
+      - scripts/backup-systemd.sh
+      - scripts/check-backup-freshness.sh
+      - scripts/healthcheck.sh
+      - scripts/install-systemd.sh
+      - scripts/rollback-systemd.sh
+      - scripts/upgrade-systemd.sh
+      - scripts/validate-release-layout.ps1
+      - scripts/validate-release.ps1
 
 checksum:
   name_template: "checksums.txt"
+
+sboms:
+  - artifacts: archive
+    documents:
+      - "{{ .ArtifactName }}.sbom.json"
+
+metadata:
+  mod_timestamp: "{{ .CommitTimestamp }}"
 
 release:
   draft: true

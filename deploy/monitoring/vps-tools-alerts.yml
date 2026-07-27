@@ -1,0 +1,73 @@
+groups:
+  - name: vps-tools
+    rules:
+      - alert: VPSToolsAPIUnavailable
+        expr: up{job="vps-tools-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: VPS Tools API is unavailable
+          description: Prometheus cannot scrape the self-contained control plane.
+      - alert: VPSToolsAPIReadinessFailure
+        expr: increase(svrtools_api_readiness_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: VPS Tools readiness checks are failing
+          description: Check the API database, artifact store, and runner service.
+      - alert: VPSToolsAPI5xxSpike
+        expr: increase(svrtools_api_request_failures_total[10m]) > 5
+        labels:
+          severity: warning
+        annotations:
+          summary: VPS Tools API is returning server errors
+          description: Review structured API logs and the audit trail.
+      - alert: VPSToolsRateLimitEvents
+        expr: increase(svrtools_api_rate_limited_total[10m]) > 20
+        labels:
+          severity: warning
+        annotations:
+          summary: VPS Tools rate-limit rejections increased
+          description: Investigate client retries, credential abuse, or an attack.
+      - alert: VPSToolsDeadLetterJobs
+        expr: svrtools_queue_dead_letter_jobs > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: VPS Tools has dead-lettered execution targets
+          description: Inspect the execution, runner health, and audit trail before retrying work.
+      - alert: VPSToolsQueueWithoutRunner
+        expr: svrtools_queue_pending_jobs > 0 and svrtools_runners_active == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: VPS Tools has queued work but no active runner
+          description: Check runner registration, credentials, service state, and network access.
+      - alert: VPSToolsRunnerUnavailable
+        expr: up{job="vps-tools-runner"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: VPS Tools runner health endpoint is unavailable
+          description: Check the runner process, RUNNER_HEALTH_ADDR, and systemd service state.
+      - alert: VPSToolsRunnerNotRegistered
+        expr: svrtools_runner_registered{job="vps-tools-runner"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: VPS Tools runner is not registered with the control plane
+          description: Check the runner credential, API URL, and control-plane readiness.
+      - alert: VPSToolsArtifactStoreLowDisk
+        expr: svrtools_artifact_store_free_ratio < 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: VPS Tools artefact storage is nearly full
+          description: Free space on the filesystem containing the local artefact store is below 10 percent. Review retention and capacity before executions fail.

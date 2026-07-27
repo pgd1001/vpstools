@@ -1,0 +1,11 @@
+[Unit]
+Description=Run VPS Tools health check periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Unit=vps-tools-healthcheck.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

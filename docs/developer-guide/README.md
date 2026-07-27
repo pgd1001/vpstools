@@ -4,7 +4,7 @@ The [documentation hub](../README.md) links to the user, operator, API, automati
 
 ## Prerequisites
 
-- **Go 1.24+**
+- **Go version from `go.mod`**
 - **Docker** (optional, only needed for PostgreSQL and SSH test target)
 
 ## Quick start (self-contained, no Docker)

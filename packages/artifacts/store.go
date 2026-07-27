@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Metadata struct {
@@ -24,6 +25,7 @@ type Store interface {
 	Put(id, contentType string, data []byte) (Metadata, error)
 	Get(id string) ([]byte, Metadata, error)
 	Delete(id string) error
+	Check() error
 }
 
 type LocalStore struct {
@@ -104,6 +106,33 @@ func (s *LocalStore) Get(id string) ([]byte, Metadata, error) {
 }
 
 func (s *LocalStore) Delete(id string) error { return os.Remove(s.path(id)) }
+
+// Check verifies that the backing directory is accessible and that one
+// existing encrypted artefact, when present, can be authenticated and read.
+func (s *LocalStore) Check() error {
+	info, err := os.Stat(s.root)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("artifact path is not a directory")
+	}
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".bin") {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".bin")
+		if _, _, err := s.Get(id); err != nil {
+			return fmt.Errorf("read encrypted artifact %s: %w", id, err)
+		}
+		break
+	}
+	return nil
+}
 
 func (s *LocalStore) path(id string) string {
 	return filepath.Join(s.root, filepath.Base(id)+".bin")

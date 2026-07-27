@@ -27,6 +27,7 @@ Use --wait to poll for completion and display results.`,
 		target := args[0]
 		command := args[1:]
 		reason, _ := cmd.Flags().GetString("reason")
+		idempotencyKey, _ := cmd.Flags().GetString("idempotency-key")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		wait, _ := cmd.Flags().GetBool("wait")
 		timeout, _ := cmd.Flags().GetInt("timeout")
@@ -49,7 +50,7 @@ Use --wait to poll for completion and display results.`,
 			return
 		}
 
-		resp, err := apiClient.CreateExecution(target, cmdStr, reason)
+		resp, err := apiClient.CreateExecutionWithIdempotencyKey(target, cmdStr, reason, idempotencyKey)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -249,6 +250,7 @@ var execListCmd = &cobra.Command{
 
 func init() {
 	execCmd.Flags().String("reason", "", "Reason for execution")
+	execCmd.Flags().String("idempotency-key", "", "Stable retry key for safely resubmitting the same execution")
 	execCmd.Flags().Bool("dry-run", false, "Preview without executing")
 	execCmd.Flags().Bool("wait", false, "Wait for execution to complete")
 	execCmd.Flags().Int("timeout", 300, "Timeout in seconds (with --wait)")

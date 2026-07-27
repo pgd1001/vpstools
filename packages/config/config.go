@@ -4,33 +4,44 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 // BackendConfig describes the deployment tier selected by environment variables.
 // The default tier intentionally needs no external services.
 type BackendConfig struct {
-	DatabaseDriver string
-	DatabaseURL    string
-	ArtifactStore  string
-	ArtifactsDir   string
-	JobDispatch    string
-	Scheduler      string
-	EventBus       string
-	ArtifactKey    string
+	DatabaseDriver        string
+	DatabaseURL           string
+	ArtifactStore         string
+	ArtifactsDir          string
+	JobDispatch           string
+	Scheduler             string
+	EventBus              string
+	ArtifactKey           string
+	ApprovalExpirySeconds int
 }
 
 func Load() BackendConfig {
 	databaseURL := envOrDefault("DATABASE_URL", envOrDefault("DB_PATH", "./svrtools.db"))
 	artifactsDir := envOrDefault("ARTIFACTS_DIR", envOrDefault("VPS_ARTIFACTS_DIR", "./data/artifacts"))
+	approvalExpiry := 3600
+	if value := os.Getenv("APPROVAL_EXPIRY_SECONDS"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			approvalExpiry = parsed
+		} else {
+			approvalExpiry = -1
+		}
+	}
 	return BackendConfig{
-		DatabaseDriver: envOrDefault("DATABASE_DRIVER", "sqlite"),
-		DatabaseURL:    databaseURL,
-		ArtifactStore:  envOrDefault("ARTIFACT_STORE", "local"),
-		ArtifactsDir:   filepath.Clean(artifactsDir),
-		JobDispatch:    envOrDefault("JOB_DISPATCH", "database"),
-		Scheduler:      envOrDefault("SCHEDULER", "embedded"),
-		EventBus:       envOrDefault("EVENT_BUS", "disabled"),
-		ArtifactKey:    os.Getenv("ARTIFACT_ENCRYPTION_KEY"),
+		DatabaseDriver:        envOrDefault("DATABASE_DRIVER", "sqlite"),
+		DatabaseURL:           databaseURL,
+		ArtifactStore:         envOrDefault("ARTIFACT_STORE", "local"),
+		ArtifactsDir:          filepath.Clean(artifactsDir),
+		JobDispatch:           envOrDefault("JOB_DISPATCH", "database"),
+		Scheduler:             envOrDefault("SCHEDULER", "embedded"),
+		EventBus:              envOrDefault("EVENT_BUS", "disabled"),
+		ArtifactKey:           os.Getenv("ARTIFACT_ENCRYPTION_KEY"),
+		ApprovalExpirySeconds: approvalExpiry,
 	}
 }
 
@@ -64,6 +75,9 @@ func (c BackendConfig) Validate() error {
 	}
 	if c.ArtifactStore == "local" && c.ArtifactsDir == "." {
 		return fmt.Errorf("ARTIFACTS_DIR must not be the current directory")
+	}
+	if c.ApprovalExpirySeconds < 60 || c.ApprovalExpirySeconds > 30*24*60*60 {
+		return fmt.Errorf("APPROVAL_EXPIRY_SECONDS must be between 60 and 2592000")
 	}
 	return nil
 }

@@ -14,7 +14,7 @@ Check the startup output for the selected tier and configuration validation erro
 Common causes include:
 
 - The SQLite directory does not exist or is not writable.
-- `VPS_ARTIFACT_ENCRYPTION_KEY` is missing or invalid.
+- `ARTIFACT_ENCRYPTION_KEY` is missing or invalid.
 - An external database or object-store URL is incomplete.
 - Another process already owns the configured HTTP port.
 - A migration cannot acquire the SQLite writer lock.

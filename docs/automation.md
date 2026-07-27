@@ -24,6 +24,7 @@ At-least-once concerns still apply. Runbook actions should be idempotent, and op
 - High and critical risk schedules are rejected from unattended execution.
 - Every queued action has an automation actor and audit metadata.
 - Disabling a schedule preserves its history.
+- Senior operators can pause new scheduled submissions across the organisation during an incident. Existing queued executions are not cancelled by the pause.
 
 ## API example
 
@@ -48,6 +49,12 @@ List and disable it:
 ```bash
 curl -H 'X-VPS-User: user_senior' http://localhost:8080/api/v1/schedules
 curl -X DELETE -H 'X-VPS-User: user_senior' http://localhost:8080/api/v1/schedules/<schedule-id>
+
+# Emergency control
+curl -X POST -H 'Content-Type: application/json' -H 'X-VPS-User: user_senior' \
+  -d '{"reason":"incident response"}' http://localhost:8080/api/v1/automation/pause
+curl -H 'X-VPS-User: user_senior' http://localhost:8080/api/v1/automation/status
+curl -X POST -H 'X-VPS-User: user_senior' http://localhost:8080/api/v1/automation/resume
 ```
 
 ## Schedule design examples
@@ -64,4 +71,4 @@ Use a human approval workflow for changes such as package upgrades, service rest
 
 ## Future automation work
 
-Event triggers, maintenance windows, health gates, post-execution verification, rollback, notifications, escalation rules, a global pause switch, and richer retry policies remain planned. See [known limitations](KNOWN_LIMITATIONS.md).
+Event triggers, maintenance windows, health gates, post-execution verification, rollback, notifications, escalation rules, and richer retry policies remain planned. See [known limitations](KNOWN_LIMITATIONS.md).

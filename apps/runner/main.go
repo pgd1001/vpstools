@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -18,11 +20,16 @@ import (
 	"github.com/pgd1001/svrtools/packages/sshx"
 )
 
+var version = "dev"
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	health := &runnerHealth{}
+	stopHealth := startHealthServer(ctx, os.Getenv("RUNNER_HEALTH_ADDR"), health, logger)
+	defer stopHealth()
 
 	apiURL := os.Getenv("API_URL")
 	if apiURL == "" {
@@ -51,8 +58,9 @@ func main() {
 	runnerID := registerRunner(ctx, httpClient, apiURL, runnerName, hostname, runnerToken, logger)
 	if runnerID == "" {
 		logger.Error("runner cannot start without successful registration")
-		return
+		os.Exit(1)
 	}
+	health.registered.Store(true)
 
 	lastHeartbeat := time.Now()
 	pollInterval := 2 * time.Second
@@ -81,6 +89,10 @@ func main() {
 		}
 
 		logger.Info("claimed job", "execution_id", job.ExecutionID, "target_id", job.TargetID)
+		health.claimed.Add(1)
+		leaseCtx, stopLeaseRenewal := context.WithCancel(ctx)
+		leaseRenewed := make(chan struct{})
+		go renewLeaseLoop(leaseCtx, httpClient, apiURL, runnerID, job, runnerToken, logger, leaseRenewed)
 
 		var result sshx.Result
 		if simulate {
@@ -114,13 +126,124 @@ func main() {
 			}
 			cancel()
 		}
+		stopLeaseRenewal()
+		<-leaseRenewed
 
 		logger.Info("job completed", "execution_id", job.ExecutionID, "exit_code", result.ExitCode, "duration_ms", result.DurationMs)
+		health.completed.Add(1)
+		health.lastCompletionUnix.Store(time.Now().Unix())
 
-		if err := submitResult(ctx, httpClient, apiURL, runnerID, job.TargetID, job.ExecutionID, job.LeaseID, runnerToken, result); err != nil {
+		if err := submitResultWithRetry(ctx, httpClient, apiURL, runnerID, job.TargetID, job.ExecutionID, job.LeaseID, runnerToken, result); err != nil {
 			logger.Error("failed to submit result", "execution_id", job.ExecutionID, "error", err)
 		}
 	}
+}
+
+type runnerHealth struct {
+	registered         atomic.Bool
+	claimed            atomic.Uint64
+	completed          atomic.Uint64
+	lastCompletionUnix atomic.Int64
+}
+
+func startHealthServer(ctx context.Context, address string, state *runnerHealth, logger *slog.Logger) func() {
+	if address == "" {
+		return func() {}
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		logger.Error("runner health endpoint failed to start", "address", address, "error", err)
+		return func() {}
+	}
+	mux := runnerHealthMux(state)
+	server := &http.Server{Handler: mux}
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			logger.Error("runner health endpoint stopped", "error", err)
+		}
+	}()
+	logger.Info("runner health endpoint started", "address", address)
+	return func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}
+}
+
+func runnerHealthMux(state *runnerHealth) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		if !state.registered.Load() {
+			writeRunnerHealthJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "starting"})
+			return
+		}
+		writeRunnerHealthJSON(w, http.StatusOK, map[string]any{"status": "healthy", "jobs_claimed": state.claimed.Load(), "jobs_completed": state.completed.Load(), "last_completion_unix": state.lastCompletionUnix.Load()})
+	})
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		fmt.Fprintf(w, "# HELP svrtools_runner_registered Runner has registered with the control plane.\n# TYPE svrtools_runner_registered gauge\nsvrtools_runner_registered %d\n", boolMetric(state.registered.Load()))
+		fmt.Fprintf(w, "# HELP svrtools_runner_jobs_claimed_total Jobs claimed by this runner.\n# TYPE svrtools_runner_jobs_claimed_total counter\nsvrtools_runner_jobs_claimed_total %d\n", state.claimed.Load())
+		fmt.Fprintf(w, "# HELP svrtools_runner_jobs_completed_total Jobs completed by this runner.\n# TYPE svrtools_runner_jobs_completed_total counter\nsvrtools_runner_jobs_completed_total %d\n", state.completed.Load())
+	})
+	return mux
+}
+
+func writeRunnerHealthJSON(w http.ResponseWriter, status int, value map[string]any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func boolMetric(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func renewLeaseLoop(ctx context.Context, client *http.Client, apiURL, runnerID string, job *job, token string, logger *slog.Logger, done chan<- struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := renewLease(ctx, client, apiURL, runnerID, job, token); err != nil {
+				logger.Warn("lease renewal failed", "execution_id", job.ExecutionID, "target_id", job.TargetID, "lease_id", job.LeaseID, "error", err)
+			} else {
+				logger.Debug("lease renewed", "execution_id", job.ExecutionID, "target_id", job.TargetID, "lease_id", job.LeaseID)
+			}
+		}
+	}
+}
+
+func renewLease(ctx context.Context, client *http.Client, apiURL, runnerID string, job *job, token string) error {
+	body, err := json.Marshal(map[string]string{
+		"execution_id": job.ExecutionID,
+		"target_id":    job.TargetID,
+		"runner_id":    runnerID,
+		"lease_id":     job.LeaseID,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL+"/api/v1/jobs/renew", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-VPS-Runner-Token", token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func registerRunner(ctx context.Context, client *http.Client, apiURL, name, hostname, token string, logger *slog.Logger) string {
@@ -128,7 +251,7 @@ func registerRunner(ctx context.Context, client *http.Client, apiURL, name, host
 		"name":        name,
 		"hostname":    hostname,
 		"platform":    runtime.GOOS,
-		"version":     "0.2.0",
+		"version":     version,
 		"ip_address":  getOutboundIP(),
 		"runner_type": "customer_managed",
 	}
@@ -142,6 +265,10 @@ func registerRunner(ctx context.Context, client *http.Client, apiURL, name, host
 		return ""
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		logger.Warn("runner registration rejected", "status", resp.StatusCode)
+		return ""
+	}
 	var regResp struct {
 		RunnerID string `json:"runner_id"`
 		Status   string `json:"status"`
@@ -156,7 +283,7 @@ func sendHeartbeat(ctx context.Context, client *http.Client, apiURL, runnerID, h
 		"runner_id": runnerID,
 		"hostname":  hostname,
 		"platform":  runtime.GOOS,
-		"version":   "0.2.0",
+		"version":   version,
 	}
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, apiURL+"/api/v1/runners/heartbeat", bytes.NewReader(b))
@@ -168,6 +295,10 @@ func sendHeartbeat(ctx context.Context, client *http.Client, apiURL, runnerID, h
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		logger.Warn("heartbeat rejected", "runner_id", runnerID, "status", resp.StatusCode)
+		return
+	}
 	logger.Info("heartbeat sent", "runner_id", runnerID)
 }
 
@@ -202,6 +333,14 @@ type job struct {
 	User        string `json:"user"`
 	Timeout     int    `json:"timeout"`
 	LeaseID     string `json:"lease_id"`
+}
+
+type resultSubmissionError struct {
+	status int
+}
+
+func (e *resultSubmissionError) Error() string {
+	return fmt.Sprintf("unexpected status: %d", e.status)
 }
 
 func claimJob(ctx context.Context, client *http.Client, apiURL, runnerID, token string) (*job, error) {
@@ -262,9 +401,33 @@ func submitResult(ctx context.Context, client *http.Client, apiURL, runnerID, ta
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		return &resultSubmissionError{status: resp.StatusCode}
 	}
 	return nil
+}
+
+func submitResultWithRetry(ctx context.Context, client *http.Client, apiURL, runnerID, targetID, execID, leaseID, token string, result sshx.Result) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := submitResult(ctx, client, apiURL, runnerID, targetID, execID, leaseID, token, result); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			if statusErr, ok := err.(*resultSubmissionError); ok && statusErr.status != http.StatusRequestTimeout && statusErr.status != http.StatusTooManyRequests && statusErr.status < http.StatusInternalServerError {
+				return err
+			}
+		}
+		if attempt < 2 {
+			timer := time.NewTimer(time.Duration(attempt+1) * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return lastErr
 }
 
 func parsePort(v string) int {

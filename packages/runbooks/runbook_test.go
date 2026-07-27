@@ -86,3 +86,22 @@ func TestValidateRejectsInvalidParameterDefinitions(t *testing.T) {
 		t.Fatal("expected invalid parameter name to fail")
 	}
 }
+
+func TestParseParameterValuesRejectsMalformedAndDuplicateEntries(t *testing.T) {
+	if _, err := ParseParameterValues("service"); err == nil {
+		t.Fatal("expected malformed parameter to fail")
+	}
+	if _, err := ParseParameterValues("service=api,service=web"); err == nil {
+		t.Fatal("expected duplicate parameter to fail")
+	}
+}
+
+func TestParseParameterValuesKeepsEmptyValues(t *testing.T) {
+	params, err := ParseParameterValues("note=")
+	if err != nil {
+		t.Fatalf("parse parameters: %v", err)
+	}
+	if value, ok := params["note"]; !ok || value != "" {
+		t.Fatalf("expected empty value to be retained, got %#v", params)
+	}
+}
