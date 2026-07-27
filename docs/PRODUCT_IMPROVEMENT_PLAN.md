@@ -91,6 +91,8 @@ The first implementation slice is complete and verified. These items are now imp
 - Systemd backup freshness now runs on a timer, verifies the current manifest checksum and backup contents, checks replicated backups when configured, and raises the existing backup alert on failure.
 - The web console now has a Playwright smoke harness covering production and development-auth builds, navigation, runbook search, guided preflight, approval denial with a decision note, requester cancellation of queued execution, and identity switching. CI installs Chromium and runs both modes, while the web dependency tree is pinned and passes `npm audit` with zero reported vulnerabilities.
 - SDK and web resource actions now escape path identifiers and query filters consistently with the MCP and other API clients. This covers servers, runners, executions, runbooks, approvals, schedules, audit filters, and execution filters, with SDK contract coverage for encoded approval paths and filters.
+- A bounded read-only AI analysis workflow is now available through the API, Go SDK, CLI, web execution details, and MCP. It supports explicit OpenAI-compatible or local providers, redacts prompts, evidence, and responses, persists request metadata and evidence locally, and records success or failure in the audit trail.
+- A local-to-S3 artifact migration helper now preserves stable IDs, verifies read-back checksums, skips matching objects, refuses conflicts by default, and leaves both source and destination recoverable during migration.
 
 The remaining items in this document are still planned unless explicitly marked here or in a future release note. The schedule and AI changes are foundations, not complete end-user features.
 

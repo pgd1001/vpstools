@@ -13,7 +13,7 @@ Execution requests always run preflight first. High and critical risk runbooks f
 
 ## Tools
 
-Read-only tools cover health, identity, servers, runbooks, preflight, approvals, executions, audit search, schedules, and automation state. Controlled-write tools cover runbook execution requests, approval decisions, schedule creation or disabling, and the organisation-wide automation pause or resume.
+Read-only tools cover health, identity, servers, runbooks, preflight, approvals, executions, audit search, schedules, automation state, audit-chain verification, and bounded read-only AI analysis. Controlled-write tools cover runbook execution requests, approval decisions, schedule creation or disabling, and the organisation-wide automation pause or resume. The AI tool only analyses supplied or execution evidence and never queues work.
 
 The server currently provides:
 

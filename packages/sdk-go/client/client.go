@@ -47,6 +47,36 @@ type WhoAmIResponse struct {
 	Role           string `json:"role"`
 }
 
+type AIEvidence struct {
+	ID        string `json:"id,omitempty"`
+	Kind      string `json:"kind"`
+	Title     string `json:"title"`
+	Content   string `json:"content"`
+	SourceURI string `json:"source_uri,omitempty"`
+}
+type AIAnalysisRequest struct {
+	Question    string       `json:"question"`
+	ExecutionID string       `json:"execution_id,omitempty"`
+	Evidence    []AIEvidence `json:"evidence,omitempty"`
+}
+type AIAnalysisResponse struct {
+	AnalysisID    string         `json:"analysis_id"`
+	Text          string         `json:"text"`
+	Model         string         `json:"model"`
+	RequestID     string         `json:"request_id"`
+	Usage         map[string]int `json:"usage"`
+	EvidenceCount int            `json:"evidence_count"`
+	ReadOnly      bool           `json:"read_only"`
+}
+
+func (c *Client) AnalyzeAI(req AIAnalysisRequest) (*AIAnalysisResponse, error) {
+	var resp AIAnalysisResponse
+	if err := c.post("/api/v1/ai/analyze", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 type HealthResponse struct {
 	Status         string `json:"status"`
 	Database       string `json:"database"`

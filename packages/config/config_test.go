@@ -80,3 +80,24 @@ func TestApprovalExpiryCanBeConfiguredWithinSafeBounds(t *testing.T) {
 		t.Fatal("expected non-numeric approval expiry to be rejected")
 	}
 }
+
+func TestAIConfigurationRequiresProviderEndpointAndModel(t *testing.T) {
+	t.Setenv("AI_PROVIDER", "openai-compatible")
+	t.Setenv("AI_ENDPOINT", "")
+	t.Setenv("AI_MODEL", "")
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "AI_ENDPOINT") {
+		t.Fatalf("expected missing endpoint error, got %v", err)
+	}
+	t.Setenv("AI_ENDPOINT", "http://localhost:11434/v1")
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "AI_MODEL") {
+		t.Fatalf("expected missing model error, got %v", err)
+	}
+	t.Setenv("AI_MODEL", "local-model")
+	if err := Load().Validate(); err != nil {
+		t.Fatalf("valid AI configuration rejected: %v", err)
+	}
+	t.Setenv("AI_ENDPOINT", "file:///tmp/model")
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "AI_ENDPOINT") {
+		t.Fatalf("expected invalid endpoint error, got %v", err)
+	}
+}

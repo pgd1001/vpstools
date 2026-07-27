@@ -71,6 +71,7 @@ Sensitive commands are returned as redacted previews. The raw execution command 
 | POST | `/api/v1/automation/pause` | Stop new scheduled automation runs |
 | POST | `/api/v1/automation/resume` | Allow scheduled automation runs again |
 | GET | `/api/v1/audit` | Search audit events |
+| POST | `/api/v1/ai/analyze` | Run bounded, read-only analysis over supplied or execution evidence |
 
 Runner-only endpoints are `GET /api/v1/jobs/next`, `POST /api/v1/jobs/renew`, and `POST /api/v1/jobs/result`. They require a valid runner credential and must not be exposed directly to end users. Runners renew active leases while long-running commands are executing. Result submissions are receipt-backed, so retrying the same target and lease is safe.
 
@@ -81,6 +82,22 @@ Auditors and senior operators can call `GET /api/v1/audit/verify` to validate th
 The registration-token body is optional. Send `{"runner_id":"rnr_..."}` to bind the one-hour credential to an existing runner. The response contains the secret once. Store it securely and do not log it.
 
 Automation pause is organisation-wide and requires a senior engineer or above. It prevents new embedded-scheduler runs from being queued. Existing queued executions are not cancelled, so operators should inspect and cancel those separately when the incident requires it. Both pause and resume are audited.
+
+## Read-only AI analysis
+
+AI analysis is available only when the API is explicitly configured with `AI_PROVIDER=openai-compatible`, `AI_ENDPOINT`, and `AI_MODEL`. The endpoint accepts a question and optional `execution_id` or evidence items. Execution output is redacted before it is sent to the provider. The request, redacted evidence, response, and audit event are stored in the self-contained SQLite tier. The operation never queues a job or changes infrastructure.
+
+```http
+POST /api/v1/ai/analyze
+Content-Type: application/json
+
+{
+  "question": "Summarise the failed targets and identify the next safe diagnostic step",
+  "execution_id": "exec_123"
+}
+```
+
+The response includes `analysis_id`, `text`, `model`, `evidence_count`, and `read_only: true`. Provider errors return a generic failure to the caller. Detailed provider errors are retained only in the redacted, bounded request record.
 
 ## Runbook preflight
 

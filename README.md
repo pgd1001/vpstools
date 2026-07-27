@@ -141,7 +141,7 @@ Interval schedules are available to senior engineers through the API and web con
 
 The current implementation includes the CLI to API to runner vertical slice, inventory, runner registration, execution, runbooks, approvals, RBAC, audit events, the TUI, the web console, schedules, local encrypted artefacts, MCP tools, and the self-contained deployment path.
 
-The extended PostgreSQL, S3, and JetStream adapters, full migration tooling, and unattended high-risk approval flow remain planned. See [known limitations](docs/KNOWN_LIMITATIONS.md) and the [product improvement plan](docs/PRODUCT_IMPROVEMENT_PLAN.md) for the current boundary.
+The extended PostgreSQL and JetStream adapters, complete S3 backup and cutover tooling, and unattended high-risk approval flow remain planned. Local-to-S3 artefact migration and bounded read-only AI analysis are available as explicit features. See [known limitations](docs/KNOWN_LIMITATIONS.md) and the [product improvement plan](docs/PRODUCT_IMPROVEMENT_PLAN.md) for the current boundary.
 
 ## Development checks
 

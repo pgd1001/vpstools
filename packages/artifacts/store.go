@@ -21,6 +21,10 @@ import (
 	"time"
 )
 
+// ErrNotFound indicates that an object does not exist in an object store.
+// Callers can use errors.Is when deciding whether a migration should create it.
+var ErrNotFound = errors.New("artifact not found")
+
 type Metadata struct {
 	ID          string
 	ContentType string
@@ -270,6 +274,9 @@ func (s *S3Store) doResponse(req *http.Request, body []byte) (*http.Response, er
 			if resp != nil {
 				defer resp.Body.Close()
 				b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+				if resp.StatusCode == http.StatusNotFound {
+					return nil, fmt.Errorf("%w: S3 request failed with status %d: %s", ErrNotFound, resp.StatusCode, strings.TrimSpace(string(b)))
+				}
 				return nil, fmt.Errorf("S3 request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 			}
 			return nil, err

@@ -104,6 +104,7 @@ server.registerTool('vps_cancel_execution', {description: 'Cancel a created or q
 
 server.registerTool('vps_search_audit', {description: 'Search recent audit events. Use this to explain who requested, approved, or executed an action.', inputSchema: {limit: z.number().int().min(1).max(100).default(50), actor: z.string().optional()}}, async ({limit, actor}) => safe(() => client.get(`/api/v1/audit?limit=${limit}${actor ? `&actor=${encodeURIComponent(actor)}` : ''}`)));
 server.registerTool('vps_verify_audit', {description: 'Verify the organisation audit hash chain and report whether the recorded history is intact.', inputSchema: {}}, async () => safe(() => client.get('/api/v1/audit/verify')));
+server.registerTool('vps_analyse_read_only', {description: 'Ask the configured AI provider for bounded, read-only analysis using supplied evidence or redacted output from an execution. This never changes infrastructure.', inputSchema: {question: z.string().min(1).max(16000), execution_id: z.string().optional()}}, async ({question, execution_id}) => safe(() => client.post('/api/v1/ai/analyze', {question, execution_id})));
 
 server.registerTool('vps_list_schedules', {description: 'List interval schedules and their last errors. This is read-only.', inputSchema: {}}, async () => safe(() => client.get('/api/v1/schedules')));
 

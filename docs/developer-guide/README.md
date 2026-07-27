@@ -151,7 +151,7 @@ The configuration loader recognises PostgreSQL, S3-compatible storage, JetStream
 
 Schedules use a fixed interval and the same runbook policy checks as manual execution. Each queued scheduled execution records `user_automation` as its actor and includes a schedule reference in the audit metadata. High and critical risk schedules are rejected from unattended execution.
 
-The `packages/ai` package defines a provider interface, a redacting wrapper for prompts, evidence, and responses, and an OpenAI-compatible HTTP provider for managed gateways or local model servers. There is not yet a user-facing AI endpoint or evidence retrieval service, so configuring a provider does not change the default API workflow.
+The `packages/ai` package defines a provider interface, a redacting wrapper for prompts, evidence, and responses, and an OpenAI-compatible HTTP provider for managed gateways or local model servers. When `AI_PROVIDER=openai-compatible`, the API exposes a bounded read-only analysis endpoint. It can use supplied evidence or redacted output from an execution, persists request metadata and evidence in SQLite, and writes an audit event. The same operation is available through `vps ai analyze`, the Go SDK, the web execution detail view, and `vps_analyse_read_only` in MCP. Retrieval across an organisation, conversations, streaming, provider failover, and model administration remain future work.
 
 ### MCP and agent integration
 

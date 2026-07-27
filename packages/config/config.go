@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -36,6 +37,13 @@ type BackendConfig struct {
 	S3MaxRetries           int
 	S3RetryBackoff         time.Duration
 	ApprovalExpirySeconds  int
+	AIProvider             string
+	AIEndpoint             string
+	AIAPIKey               string
+	AIModel                string
+	AITimeout              time.Duration
+	AIMaxPromptBytes       int
+	AIMaxResponseBytes     int64
 }
 
 func Load() BackendConfig {
@@ -72,6 +80,13 @@ func Load() BackendConfig {
 		S3MaxRetries:           intEnv("S3_MAX_RETRIES"),
 		S3RetryBackoff:         durationEnv("S3_RETRY_BACKOFF"),
 		ApprovalExpirySeconds:  approvalExpiry,
+		AIProvider:             strings.TrimSpace(os.Getenv("AI_PROVIDER")),
+		AIEndpoint:             strings.TrimSpace(os.Getenv("AI_ENDPOINT")),
+		AIAPIKey:               os.Getenv("AI_API_KEY"),
+		AIModel:                strings.TrimSpace(os.Getenv("AI_MODEL")),
+		AITimeout:              durationEnv("AI_TIMEOUT"),
+		AIMaxPromptBytes:       intEnv("AI_MAX_PROMPT_BYTES"),
+		AIMaxResponseBytes:     int64(intEnv("AI_MAX_RESPONSE_BYTES")),
 	}
 }
 
@@ -110,6 +125,24 @@ func (c BackendConfig) Validate() error {
 	}
 	if c.ApprovalExpirySeconds < 60 || c.ApprovalExpirySeconds > 30*24*60*60 {
 		return fmt.Errorf("APPROVAL_EXPIRY_SECONDS must be between 60 and 2592000")
+	}
+	if c.AIProvider != "" && c.AIProvider != "openai-compatible" {
+		return fmt.Errorf("unsupported AI_PROVIDER %q, expected openai-compatible", c.AIProvider)
+	}
+	if c.AIProvider != "" && c.AIEndpoint == "" {
+		return fmt.Errorf("AI_ENDPOINT is required when AI_PROVIDER is configured")
+	}
+	if c.AIProvider != "" && c.AIModel == "" {
+		return fmt.Errorf("AI_MODEL is required when AI_PROVIDER is configured")
+	}
+	if c.AIProvider != "" {
+		endpoint, err := url.Parse(c.AIEndpoint)
+		if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") {
+			return fmt.Errorf("AI_ENDPOINT must be an absolute http or https URL")
+		}
+	}
+	if c.AITimeout < 0 || c.AIMaxPromptBytes < 0 || c.AIMaxResponseBytes < 0 {
+		return fmt.Errorf("AI limits must not be negative")
 	}
 	return nil
 }

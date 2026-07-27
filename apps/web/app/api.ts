@@ -40,6 +40,7 @@ export type Schedule = { id:string; name:string; runbook_name:string; target:str
 export type AutomationStatus = { paused:boolean; paused_at?:string; paused_by?:string; reason?:string };
 export type Health = { status:string; database:string; version?:string; deployment_tier?:string; database_driver?:string; artifact_store?:string; job_dispatch?:string };
 export type Readiness = { status:string; database:string; artifacts:string };
+export type AIAnalysis = { analysis_id:string; text:string; model:string; request_id?:string; evidence_count:number; read_only:boolean };
 
 let user = '';
 
@@ -126,6 +127,7 @@ export const api = {
   disableSchedule: (id:string) => mutate('DELETE', `/api/v1/schedules/${encodeURIComponent(id)}`),
   cancelExecution: (id:string) => post(`/api/v1/executions/${encodeURIComponent(id)}/cancel`),
   audit: (actor?:string) => get<{events:AuditEvent[]}>(`/api/v1/audit?limit=50${actor?`&actor=${encodeURIComponent(actor)}`:''}`),
+  analyzeAI: (body: {question:string; execution_id?:string}) => post<AIAnalysis>('/api/v1/ai/analyze', body),
   approve: (id:string, note?:string) => post(`/api/v1/approvals/${encodeURIComponent(id)}/approve`, note ? {note} : undefined),
   deny: (id:string, note?:string) => post(`/api/v1/approvals/${encodeURIComponent(id)}/deny`, note ? {note} : undefined),
   setUser: (u:string) => { user = u; if (typeof window !== 'undefined') localStorage.setItem('vps_user', u); },

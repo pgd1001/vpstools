@@ -128,6 +128,26 @@ AI requests can contain operational data, command output, hostnames, and inciden
 
 The self-contained tier records AI request metadata and redacted content according to retention settings. Small evidence objects remain in the local artefact store. Customers with stricter data boundaries can use a local model and keep the API, runner, database, and artefacts inside their own environment.
 
+## Read-only analysis
+
+The API exposes a bounded analysis operation when an administrator explicitly configures an OpenAI-compatible provider or a local model server:
+
+```text
+AI_PROVIDER=openai-compatible
+AI_ENDPOINT=http://127.0.0.1:11434/v1
+AI_MODEL=your-local-model
+```
+
+The endpoint accepts a question and either supplied evidence or an execution ID. Execution output is redacted before it reaches the provider. Requests, redacted evidence, responses, and success or failure audit events are stored in the local metadata database. The operation never creates a job, changes a server, or bypasses approvals.
+
+The same operation is available to scripts and agents:
+
+```bash
+vps ai analyze --execution exec_123 --question "Summarise failures and identify the next safe diagnostic step"
+```
+
+MCP clients can call `vps_analyse_read_only`. The Go SDK exposes `AnalyzeAI`. Set a local model endpoint when operational data must remain inside the customer environment. Managed providers are also supported when their data-handling policy is acceptable.
+
 Assistants should return evidence, not just a conclusion. A useful result includes the execution ID, target, runbook version, state transition, relevant output, audit event ID, and a clear statement when no change was made.
 
 ## Automation patterns for agents

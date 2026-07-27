@@ -107,6 +107,7 @@ func init() {
 	rootCmd.AddCommand(approvalCmd)
 	rootCmd.AddCommand(automationCmd)
 	rootCmd.AddCommand(auditCmd)
+	rootCmd.AddCommand(aiCmd)
 	rootCmd.AddCommand(tuiCmd)
 	rootCmd.AddCommand(versionCmd)
 }

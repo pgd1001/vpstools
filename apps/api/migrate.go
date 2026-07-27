@@ -228,6 +228,20 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		reason TEXT NOT NULL DEFAULT '',
 		updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 	);
+	CREATE TABLE IF NOT EXISTS ai_requests (
+		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
+		actor_user_id TEXT NOT NULL REFERENCES users(id), status TEXT NOT NULL,
+		request_json TEXT NOT NULL DEFAULT '{}', response_text TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '', provider_request_id TEXT NOT NULL DEFAULT '',
+		duration_ms INTEGER NOT NULL DEFAULT 0, error_summary TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL DEFAULT (datetime('now'))
+	);
+	CREATE TABLE IF NOT EXISTS ai_evidence (
+		id TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES ai_requests(id) ON DELETE CASCADE,
+		organisation_id TEXT NOT NULL REFERENCES organisations(id), ordinal INTEGER NOT NULL,
+		kind TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, source_uri TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL DEFAULT (datetime('now'))
+	);
 	CREATE INDEX IF NOT EXISTS idx_servers_org_status ON servers(organisation_id, status);
 	CREATE INDEX IF NOT EXISTS idx_servers_org_env ON servers(organisation_id, environment);
 	CREATE INDEX IF NOT EXISTS idx_server_tags_org_kv ON server_tags(organisation_id, key, value);
@@ -257,6 +271,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_execution_events_execution ON execution_events(execution_id, occurred_at);
 	CREATE INDEX IF NOT EXISTS idx_artifact_records_owner ON artifact_records(organisation_id, owner_type, owner_id);
 	CREATE INDEX IF NOT EXISTS idx_automation_schedules_due ON automation_schedules(organisation_id, enabled, next_run_at);
+	CREATE INDEX IF NOT EXISTS idx_ai_requests_org_time ON ai_requests(organisation_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_ai_evidence_request ON ai_evidence(request_id, ordinal);
 	`
 	_, err := db.ExecContext(ctx, schema)
 	if err != nil {

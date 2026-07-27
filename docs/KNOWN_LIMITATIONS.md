@@ -31,14 +31,14 @@
 - **No Git sync.** Runbooks live in the database only. Git-backed runbooks planned.
 - **Approval expiry is installation-wide.** It defaults to one hour and can be changed with `APPROVAL_EXPIRY_SECONDS`, but per-policy and per-risk expiry windows are not yet supported.
 - **No delegation chains.** Approvals are single-level. No multi-level approval workflows.
-- **AI provider boundary only.** The code has a vendor-neutral provider contract and redaction wrapper, but there is no user-facing AI assistant, configured model adapter, evidence retrieval service, or local-model administration workflow yet.
+- **AI assistance is bounded and read-only.** The API, CLI, web console, SDK, and MCP can analyse supplied evidence or redacted execution output through an explicitly configured OpenAI-compatible or local model provider. AI cannot queue infrastructure work. Conversation history, retrieval across an organisation, model administration, streaming responses, and provider failover remain future work.
 - **MCP is a local stdio integration.** The MCP server exposes the current API capabilities and is intended to run on a trusted host. It does not yet provide hosted MCP transport, streaming execution output, dynamic resources, or a packaged installer. Writes are disabled by default and remain limited to API-backed actions.
 
 ## Infrastructure
 
 - **The extended tier is not runtime-enabled as a whole.** S3-compatible artifact storage can be selected when its complete configuration validates. PostgreSQL, JetStream, external scheduling, and NATS event settings remain fail-closed because their runtime adapters and migration tests are not shipped. The self-contained SQLite, local artefact, database polling, and embedded scheduler tier remains the default.
 - **S3 storage has a deliberately narrow support boundary.** The API composes the isolated S3-compatible store with client-side encryption, optional S3 server-side encryption, retries, and checksum verification. PostgreSQL metadata, JetStream dispatch, external scheduling, and NATS events are not enabled by selecting S3.
-- **S3 deployments need a separate backup plan.** The current `backup` command and restore smoke path cover SQLite metadata and local artefacts. They do not yet export or restore S3 objects, lifecycle state, or S3-backed artefact manifests as a complete deployment backup.
+- **S3 deployments need a separate backup plan.** The `artifact-migrate` helper now copies local encrypted artefacts to S3, preserves IDs, verifies checksums, and refuses conflicts by default. The current `backup` command and restore smoke path still do not export or restore S3 objects, lifecycle state, or S3-backed artefact manifests as a complete deployment backup.
 - **PostgreSQL migrations are being kept in parity with SQLite.** The migration set and schema contract tests cover fields used by the current runtime, including tokens, automation, idempotency, receipts, and audit data. A live PostgreSQL repository, startup selection, row-level security policy, and migration rehearsal are still required before PostgreSQL can be advertised as a supported backend.
 
 - **SQLite is the default deployment database.** PostgreSQL is an optional extension for higher concurrency and horizontal scaling. SQLite remains single-writer and does not provide HA.

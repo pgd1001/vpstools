@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pgd1001/svrtools/packages/ai"
 	"github.com/pgd1001/svrtools/packages/artifacts"
 	"github.com/pgd1001/svrtools/packages/authz"
 	"github.com/pgd1001/svrtools/packages/config"
@@ -83,6 +84,9 @@ func main() {
 		logger.Error("seed failed", "error", err)
 		os.Exit(1)
 	}
+	if apiBackends.AIProvider == "openai-compatible" {
+		apiAIProvider = ai.RedactingProvider{Inner: ai.HTTPProvider{Endpoint: apiBackends.AIEndpoint, APIKey: apiBackends.AIAPIKey, Model: apiBackends.AIModel, Timeout: apiBackends.AITimeout, MaxResponse: aiResponseLimit(), HTTPClient: nil}, Redact: redact.Stdout}
+	}
 
 	logger.Info("database ready", "tier", apiBackends.Tier(), "database_driver", apiBackends.DatabaseDriver, "artifact_store", apiBackends.ArtifactStore, "job_dispatch", apiBackends.JobDispatch)
 	go runEmbeddedScheduler(ctx, db, logger)
@@ -121,6 +125,7 @@ func main() {
 	})
 
 	mux.HandleFunc("/api/v1/whoami", withAuth(db, handleWhoAmI))
+	mux.HandleFunc("/api/v1/ai/analyze", withAuth(db, handleAIAnalyze))
 	mux.HandleFunc("/api/v1/auth/tokens", withAuth(db, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
