@@ -419,8 +419,8 @@ func NewLocalStore(root, key string) (*LocalStore, error) {
 }
 
 func (s *LocalStore) Put(id, contentType string, data []byte) (Metadata, error) {
-	if id == "" {
-		return Metadata{}, errors.New("artifact id is required")
+	if err := validateArtifactID(id); err != nil {
+		return Metadata{}, err
 	}
 	hash := sha256.Sum256(data)
 	nonce := make([]byte, s.aead.NonceSize())
@@ -436,6 +436,9 @@ func (s *LocalStore) Put(id, contentType string, data []byte) (Metadata, error) 
 }
 
 func (s *LocalStore) Get(id string) ([]byte, Metadata, error) {
+	if err := validateArtifactID(id); err != nil {
+		return nil, Metadata{}, err
+	}
 	contents, err := os.ReadFile(s.path(id))
 	if err != nil {
 		return nil, Metadata{}, err
@@ -452,7 +455,12 @@ func (s *LocalStore) Get(id string) ([]byte, Metadata, error) {
 	return data, Metadata{ID: id, Size: int64(len(data)), SHA256: fmt.Sprintf("%x", hash)}, nil
 }
 
-func (s *LocalStore) Delete(id string) error { return os.Remove(s.path(id)) }
+func (s *LocalStore) Delete(id string) error {
+	if err := validateArtifactID(id); err != nil {
+		return err
+	}
+	return os.Remove(s.path(id))
+}
 
 // Check verifies that the backing directory is accessible and that one
 // existing encrypted artefact, when present, can be authenticated and read.

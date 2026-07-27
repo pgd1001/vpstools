@@ -274,3 +274,23 @@ func TestLocalStoreCheckReadsEncryptedArtifact(t *testing.T) {
 		t.Fatal("expected corrupted encrypted artifact to fail the store check")
 	}
 }
+
+func TestLocalStoreRejectsUnsafeArtifactIDs(t *testing.T) {
+	store, err := NewLocalStore(filepath.Join(t.TempDir(), "artifacts"), base64.RawStdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"", "../outside", `..\outside`, "/absolute", "a?b"} {
+		t.Run(id, func(t *testing.T) {
+			if _, err := store.Put(id, "text/plain", []byte("data")); err == nil {
+				t.Fatal("unsafe artifact ID was accepted")
+			}
+			if _, _, err := store.Get(id); err == nil {
+				t.Fatal("unsafe artifact ID was read")
+			}
+			if err := store.Delete(id); err == nil {
+				t.Fatal("unsafe artifact ID was deleted")
+			}
+		})
+	}
+}
