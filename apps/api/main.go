@@ -608,17 +608,17 @@ func resolveAPITokenActor(ctx context.Context, db *sql.DB, token string) (*authz
 		return nil, fmt.Errorf("API token is empty")
 	}
 	var actor authz.Actor
-	err := db.QueryRowContext(ctx, `
+	err := apiQueryRow(ctx, db, `
 		SELECT u.id, u.email, u.display_name, t.organisation_id, m.role
 		FROM api_tokens t
 		JOIN users u ON u.id = t.user_id AND u.status = 'active'
 		JOIN memberships m ON m.user_id = t.user_id AND m.organisation_id = t.organisation_id AND m.status = 'active'
-		WHERE t.token_hash = ? AND t.revoked_at IS NULL AND t.expires_at > datetime('now')`, hashToken(token)).Scan(
+		WHERE t.token_hash = ? AND t.revoked_at IS NULL AND t.expires_at > `+apiCurrentTime(), hashToken(token)).Scan(
 		&actor.UserID, &actor.Email, &actor.DisplayName, &actor.OrganisationID, &actor.Role)
 	if err != nil {
 		return nil, fmt.Errorf("API token is invalid or expired")
 	}
-	_, _ = db.ExecContext(ctx, "UPDATE api_tokens SET last_used_at = datetime('now') WHERE token_hash = ? AND revoked_at IS NULL", hashToken(token))
+	_, _ = apiExec(ctx, db, "UPDATE api_tokens SET last_used_at = "+apiCurrentTime()+" WHERE token_hash = ? AND revoked_at IS NULL", hashToken(token))
 	return &actor, nil
 }
 
@@ -661,13 +661,13 @@ func authenticateRunnerCredential(db *sql.DB, r *http.Request) (string, string, 
 		return "", "", fmt.Errorf("runner registration credential required")
 	}
 	var orgID, runnerID string
-	err := db.QueryRowContext(r.Context(), `SELECT organisation_id, COALESCE(runner_id,'') FROM runner_credentials WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > datetime('now')`, hashToken(token)).Scan(&orgID, &runnerID)
+	err := apiQueryRow(r.Context(), db, `SELECT organisation_id, COALESCE(runner_id,'') FROM runner_credentials WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > `+apiCurrentTime(), hashToken(token)).Scan(&orgID, &runnerID)
 	if err != nil {
 		return "", "", fmt.Errorf("invalid or expired runner registration credential")
 	}
 	if runnerID != "" {
 		var status string
-		if err := db.QueryRowContext(r.Context(), "SELECT status FROM runners WHERE id = ? AND organisation_id = ?", runnerID, orgID).Scan(&status); err != nil || status == "revoked" {
+		if err := apiQueryRow(r.Context(), db, "SELECT status FROM runners WHERE id = ? AND organisation_id = ?", runnerID, orgID).Scan(&status); err != nil || status == "revoked" {
 			return "", "", fmt.Errorf("runner credential is no longer valid")
 		}
 	}
@@ -700,7 +700,7 @@ func handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var orgName string
-	dbFrom(r).QueryRowContext(r.Context(), "SELECT name FROM organisations WHERE id = ?", actor.OrganisationID).Scan(&orgName)
+	apiQueryRow(r.Context(), dbFrom(r), "SELECT name FROM organisations WHERE id = ?", actor.OrganisationID).Scan(&orgName)
 	writeJSON(w, 200, map[string]any{
 		"user_id":         actor.UserID,
 		"email":           actor.Email,
@@ -751,7 +751,7 @@ func handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var provisionedUser string
-	err = dbFrom(r).QueryRowContext(r.Context(), `
+	err = apiQueryRow(r.Context(), dbFrom(r), `
 		SELECT u.id FROM users u
 		JOIN memberships m ON m.user_id = u.id AND m.organisation_id = ? AND m.status = 'active'
 		WHERE u.id = ? AND u.status = 'active'`, actor.OrganisationID, req.UserID).Scan(&provisionedUser)
@@ -771,7 +771,7 @@ func handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	if len(tokenPrefix) > 8 {
 		tokenPrefix = tokenPrefix[:8]
 	}
-	_, err = dbFrom(r).ExecContext(r.Context(), `
+	_, err = apiExec(r.Context(), dbFrom(r), `
 		INSERT INTO api_tokens (id, organisation_id, user_id, name, token_prefix, token_hash, expires_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`, tokenID, actor.OrganisationID, provisionedUser, req.Name, tokenPrefix, hashToken(token), expiresAt)
 	if err != nil {
@@ -801,8 +801,8 @@ func handleRevokeAPIToken(w http.ResponseWriter, r *http.Request, tokenID string
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid token id"})
 		return
 	}
-	result, err := dbFrom(r).ExecContext(r.Context(), `
-		UPDATE api_tokens SET revoked_at = datetime('now')
+	result, err := apiExec(r.Context(), dbFrom(r), `
+		UPDATE api_tokens SET revoked_at = `+apiCurrentTime()+`
 		WHERE id = ? AND organisation_id = ? AND revoked_at IS NULL`, tokenID, actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to revoke API token"})
@@ -845,7 +845,7 @@ func handleListServers(w http.ResponseWriter, r *http.Request) {
 
 	query += " ORDER BY s.name ASC"
 
-	rows, err := dbFrom(r).QueryContext(r.Context(), query, args...)
+	rows, err := apiQuery(r.Context(), dbFrom(r), query, args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "query failed"})
 		return
@@ -932,7 +932,7 @@ func handleAddServer(w http.ResponseWriter, r *http.Request) {
 
 	serverID := "srv_" + shortID()
 
-	_, err := dbFrom(r).ExecContext(r.Context(),
+	_, err := apiExec(r.Context(), dbFrom(r),
 		`INSERT INTO servers (id, organisation_id, name, hostname, public_ip, private_ip, ssh_port, ssh_username, environment, provider)
 		VALUES (?,?,?,?,?,?,?,?,?,?)`,
 		serverID, actor.OrganisationID, req.Name, sqlNullString(req.Hostname), sqlNullString(req.PublicIP),
@@ -944,7 +944,7 @@ func handleAddServer(w http.ResponseWriter, r *http.Request) {
 
 	for _, t := range req.Tags {
 		if t.Key != "" {
-			dbFrom(r).ExecContext(r.Context(),
+			apiExec(r.Context(), dbFrom(r),
 				"INSERT INTO server_tags (organisation_id, server_id, key, value) VALUES (?,?,?,?)",
 				actor.OrganisationID, serverID, t.Key, t.Value)
 		}
@@ -988,7 +988,7 @@ func handleUpdateServer(w http.ResponseWriter, r *http.Request, serverID string)
 		return
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(r.Context(), `UPDATE servers SET name=?, hostname=?, public_ip=?, private_ip=?, ssh_port=?, ssh_username=?, environment=?, provider=? WHERE id=? AND organisation_id=? AND status != 'archived'`, req.Name, sqlNullString(req.Hostname), sqlNullString(req.PublicIP), sqlNullString(req.PrivateIP), req.SSHPort, sqlNullString(req.SSHUsername), req.Environment, sqlNullString(req.Provider), serverID, actor.OrganisationID)
+	res, err := apiExec(r.Context(), tx, `UPDATE servers SET name=?, hostname=?, public_ip=?, private_ip=?, ssh_port=?, ssh_username=?, environment=?, provider=? WHERE id=? AND organisation_id=? AND status != 'archived'`, req.Name, sqlNullString(req.Hostname), sqlNullString(req.PublicIP), sqlNullString(req.PrivateIP), req.SSHPort, sqlNullString(req.SSHUsername), req.Environment, sqlNullString(req.Provider), serverID, actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to update server"})
 		return
@@ -998,13 +998,13 @@ func handleUpdateServer(w http.ResponseWriter, r *http.Request, serverID string)
 		writeJSON(w, 404, map[string]string{"error": "server not found"})
 		return
 	}
-	if _, err = tx.ExecContext(r.Context(), "DELETE FROM server_tags WHERE server_id=? AND organisation_id=?", serverID, actor.OrganisationID); err != nil {
+	if _, err = apiExec(r.Context(), tx, "DELETE FROM server_tags WHERE server_id=? AND organisation_id=?", serverID, actor.OrganisationID); err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to update tags"})
 		return
 	}
 	for _, t := range req.Tags {
 		if t.Key != "" {
-			if _, err = tx.ExecContext(r.Context(), "INSERT INTO server_tags (organisation_id, server_id, key, value) VALUES (?,?,?,?)", actor.OrganisationID, serverID, t.Key, t.Value); err != nil {
+			if _, err = apiExec(r.Context(), tx, "INSERT INTO server_tags (organisation_id, server_id, key, value) VALUES (?,?,?,?)", actor.OrganisationID, serverID, t.Key, t.Value); err != nil {
 				writeJSON(w, 500, map[string]string{"error": "failed to update tags"})
 				return
 			}
@@ -1024,7 +1024,7 @@ func handleArchiveServer(w http.ResponseWriter, r *http.Request, id string) {
 		writeDenial(w, r, actor, "server.archived", "server", r.URL.Path, dec)
 		return
 	}
-	res, err := dbFrom(r).ExecContext(r.Context(), "UPDATE servers SET status='archived' WHERE id=? AND organisation_id=? AND status != 'archived'", id, actor.OrganisationID)
+	res, err := apiExec(r.Context(), dbFrom(r), "UPDATE servers SET status='archived' WHERE id=? AND organisation_id=? AND status != 'archived'", id, actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to archive server"})
 		return
@@ -1066,7 +1066,7 @@ func handleGetServer(w http.ResponseWriter, r *http.Request, serverID string) {
 		Tags: loadTags(r.Context(), db, actor.OrganisationID, serverID),
 	}
 
-	err := db.QueryRowContext(r.Context(),
+	err := apiQueryRow(r.Context(), db,
 		`SELECT id, name, COALESCE(hostname,''), COALESCE(public_ip,''), COALESCE(private_ip,''),
 		ssh_port, COALESCE(ssh_username,''), environment, COALESCE(provider,''),
 		COALESCE(os_name,''), COALESCE(os_version,''), COALESCE(kernel_version,''),
@@ -1095,7 +1095,7 @@ func handleCheckServer(w http.ResponseWriter, r *http.Request, serverID string) 
 	db := dbFrom(r)
 	var host, sshUser string
 	var sshPort int
-	err := db.QueryRowContext(r.Context(),
+	err := apiQueryRow(r.Context(), db,
 		"SELECT COALESCE(hostname, public_ip, ''), ssh_port, COALESCE(ssh_username,'') FROM servers WHERE id = ? AND organisation_id = ?",
 		serverID, actor.OrganisationID).Scan(&host, &sshPort, &sshUser)
 	if err != nil {
@@ -1105,9 +1105,12 @@ func handleCheckServer(w http.ResponseWriter, r *http.Request, serverID string) 
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	db.ExecContext(r.Context(),
+	if _, err := apiExec(r.Context(), db,
 		"UPDATE servers SET status = 'active', last_check_at = ?, last_seen_at = ? WHERE id = ?",
-		now, now, serverID)
+		now, now, serverID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update server check"})
+		return
+	}
 
 	checkResult := map[string]any{
 		"server_id":  serverID,
@@ -1118,7 +1121,7 @@ func handleCheckServer(w http.ResponseWriter, r *http.Request, serverID string) 
 	}
 
 	var osName, osVer, kernel, arch string
-	db.QueryRowContext(r.Context(),
+	apiQueryRow(r.Context(), db,
 		"SELECT COALESCE(os_name,''), COALESCE(os_version,''), COALESCE(kernel_version,''), COALESCE(architecture,'') FROM servers WHERE id = ?",
 		serverID).Scan(&osName, &osVer, &kernel, &arch)
 
@@ -1127,7 +1130,7 @@ func handleCheckServer(w http.ResponseWriter, r *http.Request, serverID string) 
 		osVer = "unknown"
 		kernel = "unknown"
 		arch = "amd64"
-		db.ExecContext(r.Context(),
+		apiExec(r.Context(), db,
 			"UPDATE servers SET os_name=?, os_version=?, kernel_version=?, architecture=? WHERE id=?",
 			osName, osVer, kernel, arch, serverID)
 	}
@@ -1143,7 +1146,7 @@ func handleCheckServer(w http.ResponseWriter, r *http.Request, serverID string) 
 
 func handleListRunners(w http.ResponseWriter, r *http.Request) {
 	actor, _ := authz.RequireActor(r.Context())
-	rows, err := dbFrom(r).QueryContext(r.Context(),
+	rows, err := apiQuery(r.Context(), dbFrom(r),
 		`SELECT id, name, runner_type, status, COALESCE(version,''), COALESCE(hostname,''),
 		COALESCE(platform,''), COALESCE(ip_address,''), COALESCE(last_seen_at,''),
 		COALESCE(registered_at,''), COALESCE(revoked_at,''), created_at
@@ -1198,7 +1201,7 @@ func handleCreateManagedRunner(w http.ResponseWriter, r *http.Request) {
 		req.RunnerType = "customer_managed"
 	}
 	id := "rnr_" + shortID()
-	_, err := dbFrom(r).ExecContext(r.Context(), `INSERT INTO runners (id, organisation_id, name, runner_type, status) VALUES (?,?,?,?, 'pending')`, id, actor.OrganisationID, req.Name, req.RunnerType)
+	_, err := apiExec(r.Context(), dbFrom(r), `INSERT INTO runners (id, organisation_id, name, runner_type, status) VALUES (?,?,?,?, 'pending')`, id, actor.OrganisationID, req.Name, req.RunnerType)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to create runner"})
 		return
@@ -1228,7 +1231,7 @@ func handleUpdateRunner(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, 400, map[string]string{"error": "invalid status"})
 		return
 	}
-	res, err := dbFrom(r).ExecContext(r.Context(), "UPDATE runners SET name=?, status=? WHERE id=? AND organisation_id=? AND status != 'revoked'", req.Name, req.Status, id, actor.OrganisationID)
+	res, err := apiExec(r.Context(), dbFrom(r), "UPDATE runners SET name=?, status=? WHERE id=? AND organisation_id=? AND status != 'revoked'", req.Name, req.Status, id, actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to update runner"})
 		return
@@ -1248,7 +1251,7 @@ func handleRevokeRunner(w http.ResponseWriter, r *http.Request, id string) {
 		writeDenial(w, r, actor, "runner.revoked", "runner", id, authz.Deny("runner_management_required", "Runner management requires a privileged role."))
 		return
 	}
-	res, err := dbFrom(r).ExecContext(r.Context(), "UPDATE runners SET status='revoked', revoked_at=datetime('now') WHERE id=? AND organisation_id=? AND status != 'revoked'", id, actor.OrganisationID)
+	res, err := apiExec(r.Context(), dbFrom(r), "UPDATE runners SET status='revoked', revoked_at="+apiCurrentTime()+" WHERE id=? AND organisation_id=? AND status != 'revoked'", id, actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to revoke runner"})
 		return
@@ -1258,7 +1261,7 @@ func handleRevokeRunner(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, 404, map[string]string{"error": "runner not found"})
 		return
 	}
-	if _, err := dbFrom(r).ExecContext(r.Context(), "UPDATE runner_credentials SET revoked_at = datetime('now') WHERE runner_id = ? AND revoked_at IS NULL", id); err != nil {
+	if _, err := apiExec(r.Context(), dbFrom(r), "UPDATE runner_credentials SET revoked_at = "+apiCurrentTime()+" WHERE runner_id = ? AND revoked_at IS NULL", id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "runner revoked but credential revocation failed"})
 		return
 	}
@@ -1297,9 +1300,10 @@ func handleRegisterRunner(w http.ResponseWriter, r *http.Request) {
 
 	db := dbFromRequest(r)
 	if credentialRunnerID != "" {
-		result, updateErr := db.ExecContext(r.Context(),
-			`UPDATE runners SET status='active', version=?, hostname=?, platform=?, ip_address=?, registered_at=COALESCE(registered_at,datetime('now')), last_seen_at=datetime('now'), updated_at=datetime('now') WHERE id=? AND organisation_id=? AND status != 'revoked'`,
-			sqlNullString(req.Version), sqlNullString(req.Hostname), sqlNullString(req.Platform), sqlNullString(req.IPAddress), credentialRunnerID, orgID)
+		now := time.Now().UTC()
+		result, updateErr := apiExec(r.Context(), db,
+			`UPDATE runners SET status='active', version=?, hostname=?, platform=?, ip_address=?, registered_at=COALESCE(registered_at,?), last_seen_at=?, updated_at=? WHERE id=? AND organisation_id=? AND status != 'revoked'`,
+			sqlNullString(req.Version), sqlNullString(req.Hostname), sqlNullString(req.Platform), sqlNullString(req.IPAddress), now, now, now, credentialRunnerID, orgID)
 		if updateErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to register runner"})
 			return
@@ -1310,21 +1314,25 @@ func handleRegisterRunner(w http.ResponseWriter, r *http.Request) {
 		}
 		runnerID = credentialRunnerID
 	} else {
-		_, err = db.ExecContext(r.Context(),
+		now := time.Now().UTC()
+		_, err = apiExec(r.Context(), db,
 			`INSERT INTO runners (id, organisation_id, name, runner_type, status, version, hostname, platform, ip_address, registered_at)
-			VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))`,
+			VALUES (?,?,?,?,?,?,?,?,?,?)`,
 			runnerID, orgID, req.Name, req.RunnerType, "active",
 			sqlNullString(req.Version), sqlNullString(req.Hostname), sqlNullString(req.Platform),
-			sqlNullString(req.IPAddress))
+			sqlNullString(req.IPAddress), now)
 		if err != nil {
 			writeJSON(w, 500, map[string]string{"error": "failed to register runner: " + err.Error()})
 			return
 		}
 	}
 
-	db.ExecContext(r.Context(),
-		"INSERT INTO runner_scopes (id, organisation_id, runner_id, scope_type, scope_value) VALUES (?,?,?,?,?)",
-		"rsc_"+shortID(), orgID, runnerID, "all", "*")
+	if _, err := apiExec(r.Context(), db,
+		"INSERT INTO runner_scopes (id, organisation_id, runner_id, scope_type, scope_value) VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING",
+		"rsc_"+shortID(), orgID, runnerID, "all", "*"); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to assign runner scope"})
+		return
+	}
 
 	writeAuditEvent(r.Context(), db, orgID, "", "runner.registered", "runner", runnerID, "success", map[string]any{"name": req.Name})
 	writeJSON(w, 201, map[string]any{"runner_id": runnerID, "organisation_id": orgID, "status": "active"})
@@ -1351,9 +1359,10 @@ func handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := dbFromRequest(r).ExecContext(r.Context(),
-		"UPDATE runners SET status = 'active', last_seen_at = datetime('now'), hostname = COALESCE(NULLIF(?,''), hostname), platform = COALESCE(NULLIF(?,''), platform), version = COALESCE(NULLIF(?,''), version) WHERE id = ? AND organisation_id = ?",
-		req.Hostname, req.Platform, req.Version, req.RunnerID, orgID)
+	now := time.Now().UTC()
+	result, err := apiExec(r.Context(), dbFromRequest(r),
+		"UPDATE runners SET status = 'active', last_seen_at = ?, hostname = COALESCE(NULLIF(?,''), hostname), platform = COALESCE(NULLIF(?,''), platform), version = COALESCE(NULLIF(?,''), version) WHERE id = ? AND organisation_id = ?",
+		now, req.Hostname, req.Platform, req.Version, req.RunnerID, orgID)
 	if err != nil {
 		writeJSON(w, 404, map[string]string{"error": "runner not found"})
 		return
@@ -1394,13 +1403,13 @@ func handleCreateRegistrationToken(w http.ResponseWriter, r *http.Request) {
 func createRunnerCredential(ctx context.Context, db *sql.DB, orgID, actorID, runnerID string) (string, error) {
 	if runnerID != "" {
 		var status string
-		if err := db.QueryRowContext(ctx, "SELECT status FROM runners WHERE id = ? AND organisation_id = ?", runnerID, orgID).Scan(&status); err != nil {
+		if err := apiQueryRow(ctx, db, "SELECT status FROM runners WHERE id = ? AND organisation_id = ?", runnerID, orgID).Scan(&status); err != nil {
 			return "", fmt.Errorf("runner not found")
 		}
 		if status == "revoked" {
 			return "", fmt.Errorf("runner is revoked")
 		}
-		if _, err := db.ExecContext(ctx, "UPDATE runner_credentials SET revoked_at = datetime('now') WHERE runner_id = ? AND revoked_at IS NULL", runnerID); err != nil {
+		if _, err := apiExec(ctx, db, "UPDATE runner_credentials SET revoked_at = "+apiCurrentTime()+" WHERE runner_id = ? AND revoked_at IS NULL", runnerID); err != nil {
 			return "", fmt.Errorf("failed to revoke previous runner credentials")
 		}
 	}
@@ -1408,7 +1417,8 @@ func createRunnerCredential(ctx context.Context, db *sql.DB, orgID, actorID, run
 	if token == "" {
 		return "", fmt.Errorf("failed to generate registration token")
 	}
-	if _, err := db.ExecContext(ctx, "INSERT INTO runner_credentials (id, organisation_id, runner_id, token_hash, expires_at) VALUES (?,?,?,?,datetime('now','+1 hour'))", "rct_"+shortID(), orgID, sqlNullString(runnerID), hashToken(token)); err != nil {
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	if _, err := apiExec(ctx, db, "INSERT INTO runner_credentials (id, organisation_id, runner_id, token_hash, expires_at) VALUES (?,?,?,?,?)", "rct_"+shortID(), orgID, sqlNullString(runnerID), hashToken(token), expiresAt); err != nil {
 		return "", fmt.Errorf("failed to create registration token")
 	}
 	writeAuditEvent(ctx, db, orgID, actorID, "runner.credential.rotated", "runner", runnerID, "success", map[string]any{"expires_in": 3600})
@@ -1978,7 +1988,7 @@ func sqlNullString(v string) sql.NullString {
 }
 
 func loadTags(ctx context.Context, db *sql.DB, orgID, serverID string) []tag {
-	rows, err := db.QueryContext(ctx,
+	rows, err := apiQuery(ctx, db,
 		"SELECT key, value FROM server_tags WHERE organisation_id = ? AND server_id = ? ORDER BY key", orgID, serverID)
 	if err != nil {
 		return nil
