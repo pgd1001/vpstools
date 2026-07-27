@@ -20,9 +20,20 @@ record_manifest="${EXTENDED_BACKUP}/manifest.json"
 command -v "${artifact_migrate_bin}" >/dev/null 2>&1 || { printf 'artifact-migrate binary is required to verify S3 artefacts: %s\n' "${artifact_migrate_bin}" >&2; exit 1; }
 [[ -f "${record_manifest}" ]] || { printf 'Extended backup manifest does not exist: %s\n' "${record_manifest}" >&2; exit 1; }
 
+safe_relative_path() {
+  case "$1" in
+    ''|/*|../*|*/../*|*\\*)
+      printf 'unsafe path in extended backup manifest: %s\n' "$1" >&2
+      exit 1
+      ;;
+  esac
+}
+
 postgres_dump="$(sed -n 's/^[[:space:]]*"postgres_dump":[[:space:]]*"\([^"]*\)".*/\1/p' "${record_manifest}")"
 artifact_manifest="$(sed -n 's/^[[:space:]]*"artifact_manifest":[[:space:]]*"\([^"]*\)".*/\1/p' "${record_manifest}")"
 [[ -n "${postgres_dump}" && -n "${artifact_manifest}" ]] || { printf 'Extended backup manifest is incomplete: %s\n' "${record_manifest}" >&2; exit 1; }
+safe_relative_path "${postgres_dump}"
+safe_relative_path "${artifact_manifest}"
 postgres_dump="${EXTENDED_BACKUP}/${postgres_dump}"
 artifact_manifest="${EXTENDED_BACKUP}/${artifact_manifest}"
 [[ -f "${postgres_dump}" ]] || { printf 'PostgreSQL dump does not exist: %s\n' "${postgres_dump}" >&2; exit 1; }
