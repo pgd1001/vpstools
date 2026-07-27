@@ -135,4 +135,4 @@ vps tui
 | `h` | Help |
 | `q` | Back or quit |
 
-The TUI schedule view is read-only. Create and disable schedules from the web console, API, or MCP tools.
+The TUI schedule view supports guided schedule creation and confirmed disabling of enabled schedules. Use the web console, API, CLI, or MCP tools when scripting or administering schedules in bulk.
