@@ -123,6 +123,18 @@ func configurePostgresRLS(ctx context.Context, db *sql.DB) error {
 	if apiBackends.DatabaseDriver != "postgres" || !apiBackends.PostgresRLS {
 		return nil
 	}
+	var ownsTables bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM pg_class c
+		JOIN pg_roles r ON r.oid = c.relowner
+		WHERE c.relname = 'servers' AND c.relnamespace = current_schema()::regnamespace
+		  AND r.rolname = current_user
+	)`).Scan(&ownsTables); err != nil {
+		return fmt.Errorf("check PostgreSQL RLS table ownership: %w", err)
+	}
+	if !ownsTables {
+		return verifyPostgresRLSPolicies(ctx, db)
+	}
 	if _, err := db.ExecContext(ctx, `
 		CREATE OR REPLACE FUNCTION vps_current_organisation() RETURNS text
 		LANGUAGE sql STABLE AS $$ SELECT NULLIF(current_setting('vps.organisation_id', true), '') $$;
@@ -147,6 +159,17 @@ func configurePostgresRLS(ctx context.Context, db *sql.DB) error {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("configure PostgreSQL RLS for %s: %w", table, err)
 		}
+	}
+	return nil
+}
+
+func verifyPostgresRLSPolicies(ctx context.Context, db *sql.DB) error {
+	var policyCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_policies WHERE schemaname = current_schema() AND policyname LIKE 'vps_tenant_%'`).Scan(&policyCount); err != nil {
+		return fmt.Errorf("inspect PostgreSQL RLS policies: %w", err)
+	}
+	if policyCount != 19 {
+		return fmt.Errorf("PostgreSQL RLS requires policies installed by the migration owner, found %d of 19", policyCount)
 	}
 	return nil
 }

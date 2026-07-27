@@ -54,6 +54,11 @@ Do not delete the local source stores as part of the first migration. Storage cl
 
 The self-contained SQLite, local artefact, database polling, and embedded scheduler path is the supported default. PostgreSQL is now an opt-in metadata backend. The API applies the versioned PostgreSQL migrations and verifies the live schema before serving requests. Row-level security, independent external scheduling, and a horizontally independent queue are still separate hardening milestones. S3 and the JetStream notification bridge are available as controlled extensions. The artifact helper is intentionally limited to local-to-S3 transfer and read-back verification. It doesn't migrate database metadata, delete local files, reconcile objects missing from the local source, or perform cutover.
 
+When enabling `POSTGRES_RLS=true`, perform the first API bootstrap with the
+migration-owner connection so the API can install the policies. After that
+bootstrap, switch `DATABASE_URL` to a separate non-owner application role and
+restart the API. It verifies the 19 policies without attempting schema DDL.
+
 ## Local-to-S3 artifact migration
 
 Set the S3 settings described in the deployment configuration, then run the helper while the local source remains available:
