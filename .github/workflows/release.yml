@@ -95,7 +95,7 @@ jobs:
           curl --fail --silent http://127.0.0.1:3000 >/dev/null || { cat "$RUNNER_TEMP/vps-tools-web.log"; exit 1; }
           WEB_BASE_URL=http://127.0.0.1:3000 npm run smoke
 
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: v2.17.0
