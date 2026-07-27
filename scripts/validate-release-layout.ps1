@@ -3,7 +3,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$archives = @(Get-ChildItem -LiteralPath $DistDirectory -Filter '*.zip' -File)
+$archives = @(Get-ChildItem -LiteralPath $DistDirectory -Filter '*_windows_*.zip' -File)
 if ($archives.Count -eq 0) { throw "No Windows release archives found in $DistDirectory" }
 
 foreach ($archive in $archives) {
