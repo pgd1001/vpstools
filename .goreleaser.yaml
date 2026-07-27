@@ -64,6 +64,7 @@ archives:
       - scripts/check-backup-freshness.sh
       - scripts/healthcheck.sh
       - scripts/install-systemd.sh
+      - scripts/production-acceptance.sh
       - scripts/rollback-systemd.sh
       - scripts/upgrade-systemd.sh
       - scripts/validate-release-layout.ps1

@@ -18,6 +18,7 @@ foreach ($archive in $archives) {
       'README.md',
       'deploy/README.md',
       'scripts/install-systemd.sh',
+      'scripts/production-acceptance.sh',
       'scripts/upgrade-systemd.sh',
       'scripts/rollback-systemd.sh',
       'scripts/backup-systemd.sh',

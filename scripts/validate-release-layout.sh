@@ -17,7 +17,7 @@ for archive in $archives; do
     esac
 
     for file in README.md deploy/README.md \
-        scripts/install-systemd.sh scripts/upgrade-systemd.sh scripts/rollback-systemd.sh \
+        scripts/install-systemd.sh scripts/production-acceptance.sh scripts/upgrade-systemd.sh scripts/rollback-systemd.sh \
         scripts/backup-systemd.sh scripts/backup-alert.sh scripts/check-backup-freshness.sh scripts/healthcheck.sh \
         deploy/systemd/api.env.example deploy/systemd/runner.env.example deploy/systemd/backup.env.example \
         deploy/systemd/vps-tools-api.service deploy/systemd/vps-tools-runner.service \
