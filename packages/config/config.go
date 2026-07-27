@@ -22,6 +22,13 @@ type BackendConfig struct {
 	JobDispatch            string
 	Scheduler              string
 	EventBus               string
+	NATSURL                string
+	NATSStream             string
+	NATSSubject            string
+	NATSDurable            string
+	NATSMaxDeliver         int
+	NATSAckWait            time.Duration
+	NATSDuplicateWindow    time.Duration
 	ArtifactKey            string
 	S3Endpoint             string
 	S3Bucket               string
@@ -65,6 +72,13 @@ func Load() BackendConfig {
 		JobDispatch:            envOrDefault("JOB_DISPATCH", "database"),
 		Scheduler:              envOrDefault("SCHEDULER", "embedded"),
 		EventBus:               envOrDefault("EVENT_BUS", "disabled"),
+		NATSURL:                strings.TrimSpace(os.Getenv("NATS_URL")),
+		NATSStream:             envOrDefault("NATS_STREAM", "SVRTOOLS_JOBS"),
+		NATSSubject:            envOrDefault("NATS_SUBJECT", "svrtools.jobs.available"),
+		NATSDurable:            envOrDefault("NATS_DURABLE", "svrtools-runners"),
+		NATSMaxDeliver:         intEnvDefault("NATS_MAX_DELIVER", 5),
+		NATSAckWait:            durationEnvDefault("NATS_ACK_WAIT", 30*time.Second),
+		NATSDuplicateWindow:    durationEnvDefault("NATS_DUPLICATE_WINDOW", 2*time.Minute),
 		ArtifactKey:            os.Getenv("ARTIFACT_ENCRYPTION_KEY"),
 		S3Endpoint:             os.Getenv("S3_ENDPOINT"),
 		S3Bucket:               os.Getenv("S3_BUCKET"),
@@ -114,11 +128,31 @@ func (c BackendConfig) Validate() error {
 			return fmt.Errorf("invalid S3 configuration: %w", err)
 		}
 	}
-	if c.JobDispatch == "jetstream" && os.Getenv("NATS_URL") == "" {
+	if c.JobDispatch == "jetstream" && c.NATSURL == "" {
 		return fmt.Errorf("NATS_URL is required when JOB_DISPATCH=jetstream")
 	}
-	if c.EventBus == "nats" && os.Getenv("NATS_URL") == "" {
+	if c.JobDispatch == "jetstream" {
+		natsEndpoint, err := url.Parse(c.NATSURL)
+		if err != nil || natsEndpoint.Host == "" || (natsEndpoint.Scheme != "nats" && natsEndpoint.Scheme != "tls" && natsEndpoint.Scheme != "ws" && natsEndpoint.Scheme != "wss") {
+			return fmt.Errorf("NATS_URL must be an absolute nats, tls, ws, or wss URL")
+		}
+	}
+	if c.EventBus == "nats" && c.NATSURL == "" {
 		return fmt.Errorf("NATS_URL is required when EVENT_BUS=nats")
+	}
+	if c.JobDispatch == "jetstream" {
+		if c.NATSStream == "" || c.NATSSubject == "" || c.NATSDurable == "" {
+			return fmt.Errorf("NATS_STREAM, NATS_SUBJECT, and NATS_DURABLE are required when JOB_DISPATCH=jetstream")
+		}
+		if c.NATSMaxDeliver < 1 || c.NATSMaxDeliver > 20 {
+			return fmt.Errorf("NATS_MAX_DELIVER must be between 1 and 20")
+		}
+		if c.NATSAckWait <= 0 {
+			return fmt.Errorf("NATS_ACK_WAIT must be positive")
+		}
+		if c.NATSDuplicateWindow <= 0 {
+			return fmt.Errorf("NATS_DUPLICATE_WINDOW must be positive")
+		}
 	}
 	if c.ArtifactStore == "local" && c.ArtifactsDir == "." {
 		return fmt.Errorf("ARTIFACTS_DIR must not be the current directory")
@@ -157,6 +191,10 @@ func (c BackendConfig) S3Config() artifacts.S3Config {
 	}
 }
 
+func (c BackendConfig) DispatchConfig() (string, string, string, string, int, time.Duration, time.Duration) {
+	return c.NATSURL, c.NATSStream, c.NATSSubject, c.NATSDurable, c.NATSMaxDeliver, c.NATSAckWait, c.NATSDuplicateWindow
+}
+
 func (c BackendConfig) Tier() string {
 	if c.DatabaseDriver == "sqlite" && c.ArtifactStore == "local" && c.JobDispatch == "database" && c.Scheduler == "embedded" && c.EventBus == "disabled" {
 		return "self-contained"
@@ -189,6 +227,30 @@ func intEnv(key string) int {
 		return 0
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return -1
+	}
+	return parsed
+}
+
+func intEnvDefault(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return -1
+	}
+	return parsed
+}
+
+func durationEnvDefault(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		return -1
 	}

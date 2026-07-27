@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -579,7 +580,7 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 	for i, srvID := range targetIDs {
 		if _, err = apiExec(r.Context(), tx,
 			`INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot)
-			VALUES (?,?,?,?,'pending',?)`,
+			VALUES (?,?,?,?,'pending',`+metadataRuntime().JSONParameter()+`)`,
 			"ext_"+shortID(), actor.OrganisationID, execID, srvID, jsonString(targetSnapshot[i])); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create execution target"})
 			return
@@ -614,6 +615,9 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 	if err = tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit execution"})
 		return
+	}
+	if err := publishPendingJobNotifications(r.Context(), db, execID); err != nil {
+		slog.Warn("runbook execution committed but JetStream notification publication was incomplete", "execution_id", execID, "error", err)
 	}
 	writeRawJSON(w, http.StatusCreated, responseBody)
 }
@@ -808,6 +812,11 @@ func handleApprove(w http.ResponseWriter, r *http.Request, approvalID string) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit approval"})
 		return
 	}
+	if execID != "" {
+		if err := publishPendingJobNotifications(r.Context(), db, execID); err != nil {
+			slog.Warn("approved execution committed but JetStream notification publication was incomplete", "execution_id", execID, "error", err)
+		}
+	}
 	resp := map[string]string{"status": "approved"}
 	if execID != "" {
 		resp["execution_id"] = execID
@@ -854,7 +863,7 @@ func createExecutionFromApprovalTx(ctx context.Context, tx *sql.Tx, orgID, reque
 		}
 		if _, err := apiExec(ctx, tx,
 			`INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot)
-			VALUES (?,?,?,?,'pending',?)`,
+			VALUES (?,?,?,?,'pending',`+metadataRuntime().JSONParameter()+`)`,
 			"ext_"+shortID(), orgID, execID, srvID, serverSnapshot); err != nil {
 			return "", err
 		}

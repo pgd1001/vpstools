@@ -22,6 +22,7 @@ import (
 	"github.com/pgd1001/svrtools/packages/artifacts"
 	"github.com/pgd1001/svrtools/packages/authz"
 	"github.com/pgd1001/svrtools/packages/config"
+	"github.com/pgd1001/svrtools/packages/dispatch"
 	"github.com/pgd1001/svrtools/packages/redact"
 )
 
@@ -36,6 +37,7 @@ var policy = authz.NewPolicy()
 var apiDB *sql.DB
 var apiArtifacts artifacts.Store
 var apiBackends config.BackendConfig
+var apiDispatcher dispatch.Publisher
 
 type handlerFunc func(w http.ResponseWriter, r *http.Request)
 
@@ -59,7 +61,7 @@ func main() {
 		logger.Error("database backend is configured but the current API handlers require the self-contained SQLite tier", "database_driver", apiBackends.DatabaseDriver)
 		os.Exit(1)
 	}
-	if apiBackends.JobDispatch != "database" || apiBackends.Scheduler != "embedded" || apiBackends.EventBus != "disabled" {
+	if apiBackends.Scheduler != "embedded" || apiBackends.EventBus != "disabled" {
 		logger.Error("an unsupported extended runtime backend was selected", "artifact_store", apiBackends.ArtifactStore, "job_dispatch", apiBackends.JobDispatch, "scheduler", apiBackends.Scheduler, "event_bus", apiBackends.EventBus)
 		os.Exit(1)
 	}
@@ -74,6 +76,18 @@ func main() {
 	if err != nil {
 		logger.Error("artifact store initialisation failed", "error", err)
 		os.Exit(1)
+	}
+	if apiBackends.JobDispatch == "jetstream" {
+		natsURL, stream, subject, durable, maxDeliver, ackWait, duplicateWindow := apiBackends.DispatchConfig()
+		apiDispatcher, err = dispatch.NewJetStreamPublisher(ctx, dispatch.Config{
+			URL: natsURL, Stream: stream, Subject: subject, Durable: durable,
+			MaxDeliver: maxDeliver, AckWait: ackWait, DuplicateWindow: duplicateWindow,
+		})
+		if err != nil {
+			logger.Error("JetStream dispatch initialisation failed", "error", err)
+			os.Exit(1)
+		}
+		defer apiDispatcher.Close()
 	}
 
 	if err := migrate(ctx, db); err != nil {
@@ -1717,7 +1731,7 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 	for i, srvID := range targetIDs {
 		if _, err = apiExec(r.Context(), tx,
 			`INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot)
-			VALUES (?, ?, ?, ?, 'pending', ?)`,
+			VALUES (?, ?, ?, ?, 'pending', `+metadataRuntime().JSONParameter()+`)`,
 			"ext_"+shortID(), actor.OrganisationID, execID, srvID, jsonString(targetSnapshot[i])); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create execution target"})
 			return
@@ -1754,6 +1768,9 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 	if err = tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to commit execution"})
 		return
+	}
+	if err := publishPendingJobNotifications(r.Context(), db, execID); err != nil {
+		slog.Warn("execution committed but JetStream notification publication was incomplete", "execution_id", execID, "error", err)
 	}
 
 	writeRawJSON(w, http.StatusCreated, responseBody)
@@ -2017,6 +2034,7 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "runner_id is required"})
 		return
 	}
+	targetFilter := r.URL.Query().Get("target_id")
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start job claim"})
@@ -2032,13 +2050,14 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 	err = runtime.QueryRowContext(ctx, tx, `SELECT et.id, e.id, et.status, COALESCE(NULLIF(e.command,''), e.command_preview), COALESCE(s.hostname, s.public_ip, ''), s.ssh_port, COALESCE(s.ssh_username,''), e.timeout_seconds
 		FROM execution_targets et JOIN executions e ON e.id = et.execution_id JOIN servers s ON s.id = et.server_id
 		WHERE e.status IN ('queued','running') AND e.organisation_id = ?
+		AND (? = '' OR et.id = ?)
 		AND ((et.status = 'pending' AND (et.next_attempt_at IS NULL OR et.next_attempt_at <= `+runtime.CurrentTime()+`))
 			OR (et.status = 'running' AND et.lease_expires_at IS NOT NULL AND et.lease_expires_at <= `+runtime.CurrentTime()+`))
 		AND et.attempt < et.max_attempts
 		AND EXISTS (SELECT 1 FROM runners rn JOIN runner_scopes rs ON rs.runner_id = rn.id
 			WHERE rn.id = ? AND rn.organisation_id = ? AND rn.status = 'active'
 			AND (rs.scope_type = 'all' OR (rs.scope_type = 'server' AND rs.scope_value = et.server_id)))
-		ORDER BY e.requested_at ASC LIMIT 1`, runnerOrg, runnerID, runnerOrg).Scan(&targetID, &execID, &sourceStatus, &command, &host, &sshPort, &sshUser, &timeout)
+		ORDER BY e.requested_at ASC LIMIT 1`, runnerOrg, targetFilter, targetFilter, runnerID, runnerOrg).Scan(&targetID, &execID, &sourceStatus, &command, &host, &sshPort, &sshUser, &timeout)
 	if err != nil {
 		if err := tx.Commit(); err != nil {
 			_ = err

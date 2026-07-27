@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/stdlib"
@@ -64,6 +65,35 @@ func TestOpenMetadataDatabaseRejectsInvalidPostgresURL(t *testing.T) {
 				t.Fatal("expected invalid PostgreSQL URL to fail")
 			}
 		})
+	}
+}
+
+func TestValidatePostgresSchemaColumnsAcceptsHandlerContract(t *testing.T) {
+	var columns []postgresSchemaColumn
+	for table, required := range postgresSchemaContract {
+		for _, column := range required {
+			columns = append(columns, postgresSchemaColumn{Table: table, Column: column})
+		}
+	}
+
+	if err := validatePostgresSchemaColumns(columns); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidatePostgresSchemaColumnsReportsAllMissingColumns(t *testing.T) {
+	err := validatePostgresSchemaColumns([]postgresSchemaColumn{
+		{Table: "users", Column: "id"},
+		{Table: "organisations", Column: "id"},
+	})
+	if err == nil {
+		t.Fatal("expected schema validation to fail")
+	}
+	message := err.Error()
+	for _, want := range []string{"organisations.name", "users.email", "servers.id"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("schema error %q does not contain %q", message, want)
+		}
 	}
 }
 

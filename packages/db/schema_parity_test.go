@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -53,6 +54,66 @@ func TestSQLiteAndPostgresStorageContract(t *testing.T) {
 			if !hasColumn([]byte(postgresSQL.String()), table, column) {
 				t.Errorf("PostgreSQL migrations are missing %s.%s", table, column)
 			}
+		}
+	}
+}
+
+func TestPostgresMigrationsAreOrderedAndComplete(t *testing.T) {
+	_, here, _, _ := runtime.Caller(0)
+	root := filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))
+	paths, err := filepath.Glob(filepath.Join(root, "migrations", "postgres", "*.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(paths)
+	if len(paths) == 0 {
+		t.Fatal("no PostgreSQL migrations found")
+	}
+
+	for index, path := range paths {
+		name := filepath.Base(path)
+		prefix := strings.SplitN(name, "_", 2)[0]
+		version, err := strconv.Atoi(prefix)
+		if err != nil {
+			t.Fatalf("migration %s has invalid numeric prefix: %v", name, err)
+		}
+		if version != index+1 {
+			t.Fatalf("migration %s has version %d, want %d", name, version, index+1)
+		}
+		contents := string(readTestFile(t, path))
+		if !strings.Contains(contents, "-- +goose Up") {
+			t.Errorf("migration %s has no Goose Up section", name)
+		}
+		if !strings.Contains(contents, "-- +goose Down") {
+			t.Errorf("migration %s has no Goose Down section", name)
+		}
+	}
+}
+
+func TestPostgresMigrationsContainAllRuntimeTables(t *testing.T) {
+	_, here, _, _ := runtime.Caller(0)
+	root := filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))
+	paths, err := filepath.Glob(filepath.Join(root, "migrations", "postgres", "*.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(paths)
+	var schema strings.Builder
+	for _, path := range paths {
+		schema.Write(extractGooseUp(readTestFile(t, path)))
+		schema.WriteByte('\n')
+	}
+
+	for _, table := range []string{
+		"organisations", "users", "memberships", "servers", "server_tags", "runners", "runner_scopes",
+		"runner_credentials", "api_tokens", "executions", "execution_targets", "execution_result_receipts",
+		"execution_idempotency", "runbook_idempotency", "audit_events", "runbooks", "runbook_versions",
+		"approval_requests", "execution_events", "artifact_records", "automation_schedules", "automation_controls",
+		"ai_requests", "ai_evidence",
+	} {
+		pattern := regexp.MustCompile(`(?i)CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+` + regexp.QuoteMeta(table) + `(?:\s|\()`)
+		if !pattern.MatchString(schema.String()) {
+			t.Errorf("PostgreSQL migrations do not create runtime table %s", table)
 		}
 	}
 }

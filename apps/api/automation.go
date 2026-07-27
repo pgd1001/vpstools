@@ -334,7 +334,7 @@ func executeScheduledRun(ctx context.Context, db *sql.DB, schedule automation.Sc
 		return err
 	}
 	for i, serverID := range targetIDs {
-		if _, err = apiExec(ctx, tx, `INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot) VALUES (?,?,?,?,'pending',?)`, "ext_"+shortID(), schedule.OrganisationID, execID, serverID, jsonString(snapshots[i])); err != nil {
+		if _, err = apiExec(ctx, tx, `INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot) VALUES (?,?,?,?,'pending',`+metadataRuntime().JSONParameter()+`)`, "ext_"+shortID(), schedule.OrganisationID, execID, serverID, jsonString(snapshots[i])); err != nil {
 			return err
 		}
 	}
@@ -344,7 +344,13 @@ func executeScheduledRun(ctx context.Context, db *sql.DB, schedule automation.Sc
 	if err = writeAuditEventTypeTx(ctx, tx, schedule.OrganisationID, automationActorID, "automation", "automation.execution.queued", "execution", execID, "queued", map[string]any{"schedule_id": schedule.ID, "runbook_id": runbookID, "target_count": len(targetIDs)}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if err := publishPendingJobNotifications(ctx, db, execID); err != nil {
+		return fmt.Errorf("execution committed but JetStream notification publication was incomplete: %w", err)
+	}
+	return nil
 }
 
 func formatScheduleTime(value time.Time) string { return value.UTC().Format("2006-01-02 15:04:05") }

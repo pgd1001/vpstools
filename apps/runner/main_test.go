@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,9 +12,37 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/pgd1001/svrtools/packages/dispatch"
 	"github.com/pgd1001/svrtools/packages/sshx"
 )
+
+type fakeDispatchDelivery struct {
+	notification dispatch.Notification
+	acked        bool
+	nacked       bool
+}
+
+func (d *fakeDispatchDelivery) Notification() dispatch.Notification { return d.notification }
+func (d *fakeDispatchDelivery) Ack(context.Context) error {
+	d.acked = true
+	return nil
+}
+func (d *fakeDispatchDelivery) Nak(context.Context, time.Duration) error {
+	d.nacked = true
+	return nil
+}
+
+type fakeDispatchConsumer struct {
+	delivery dispatch.Delivery
+	err      error
+}
+
+func (c *fakeDispatchConsumer) Next(context.Context) (dispatch.Delivery, error) {
+	return c.delivery, c.err
+}
+func (c *fakeDispatchConsumer) Close() error { return nil }
 
 func TestRunnerHealthMuxReportsRegistrationAndCounters(t *testing.T) {
 	state := &runnerHealth{}
@@ -119,5 +148,53 @@ func TestRegisterRunnerReturnsIdForSuccess(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&strings.Builder{}, nil))
 	if got := registerRunner(context.Background(), server.Client(), server.URL, "test", "host", "token", logger); got != "run_test" {
 		t.Fatalf("expected runner id, got %q", got)
+	}
+}
+
+func TestClaimNotificationClaimsTargetAndAcknowledgesBeforeExecution(t *testing.T) {
+	delivery := &fakeDispatchDelivery{notification: dispatch.Notification{
+		Version: dispatch.NotificationVersion, Kind: dispatch.NotificationKind,
+		TargetID: "target-1", ExecutionID: "execution-1",
+	}}
+	consumer := &fakeDispatchConsumer{delivery: delivery}
+	claimed, handled, err := claimNotification(context.Background(), consumer, func(targetID string) (*job, error) {
+		if targetID != "target-1" {
+			t.Fatalf("claim target = %q", targetID)
+		}
+		return &job{TargetID: targetID, ExecutionID: "execution-1", LeaseID: "lease-1"}, nil
+	})
+	if err != nil || !handled || claimed == nil {
+		t.Fatalf("unexpected result: job=%#v handled=%v err=%v", claimed, handled, err)
+	}
+	if !delivery.acked || delivery.nacked {
+		t.Fatalf("notification acknowledgement state: acked=%v nacked=%v", delivery.acked, delivery.nacked)
+	}
+}
+
+func TestClaimNotificationNacksWhenAPIClaimFails(t *testing.T) {
+	delivery := &fakeDispatchDelivery{notification: dispatch.Notification{
+		Version: dispatch.NotificationVersion, Kind: dispatch.NotificationKind,
+		TargetID: "target-1", ExecutionID: "execution-1",
+	}}
+	consumer := &fakeDispatchConsumer{delivery: delivery}
+	claimed, handled, err := claimNotification(context.Background(), consumer, func(string) (*job, error) {
+		return nil, errors.New("API unavailable")
+	})
+	if err == nil || claimed != nil || !handled {
+		t.Fatalf("expected failed claim, got job=%#v handled=%v err=%v", claimed, handled, err)
+	}
+	if delivery.acked || !delivery.nacked {
+		t.Fatalf("notification acknowledgement state: acked=%v nacked=%v", delivery.acked, delivery.nacked)
+	}
+}
+
+func TestClaimNotificationFallsBackWhenNoNotificationIsAvailable(t *testing.T) {
+	consumer := &fakeDispatchConsumer{err: dispatch.ErrNoMessage}
+	claimed, handled, err := claimNotification(context.Background(), consumer, func(string) (*job, error) {
+		t.Fatal("claim function must not run without a notification")
+		return nil, nil
+	})
+	if err != nil || handled || claimed != nil {
+		t.Fatalf("unexpected no-message result: job=%#v handled=%v err=%v", claimed, handled, err)
 	}
 }

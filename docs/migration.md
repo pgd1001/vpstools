@@ -1,6 +1,6 @@
 # Moving from self-contained to extended deployment
 
-The self-contained tier is the default because it is easy to install, back up, and understand. The application reserves a path for larger teams to move to PostgreSQL, S3-compatible storage, and JetStream without changing the CLI, web console, runbooks, or AI tools. S3 artefact storage is now an explicit runtime option. PostgreSQL, JetStream, and the migration commands are not shipped as supported runtime features in the current release.
+The self-contained tier is the default because it is easy to install, back up, and understand. The application reserves a path for larger teams to move to PostgreSQL, S3-compatible storage, and JetStream without changing the CLI, web console, runbooks, or AI tools. S3 artefact storage and a database-authoritative JetStream notification bridge are explicit runtime options. PostgreSQL metadata, external scheduling, NATS event publishing, and the full independent JetStream queue model are not shipped as supported runtime features in the current release.
 
 ## Target configuration
 
@@ -34,7 +34,7 @@ External settings must be complete. VPS Tools should refuse a partially configur
 2. Export or replicate metadata into PostgreSQL while preserving IDs, timestamps, statuses, approvals, and audit history.
 3. Copy local artefacts to S3-compatible storage, retaining stable artefact IDs and verifying checksums. The supported helper is `go run ./apps/api/cmd/artifact-migrate`.
 4. Start reconciliation in read-only comparison mode.
-5. Enable JetStream dispatch behind a feature flag and verify durable consumers, acknowledgements, redelivery limits, and idempotency.
+5. Enable the JetStream notification bridge behind a feature flag and verify durable consumers, acknowledgements, redelivery limits, and idempotency. The database lease remains the execution authority during this stage.
 6. Run new work through the extended backends while the previous stores remain available as a read-only fallback.
 7. Compare executions, results, artefacts, and audit events across both stores.
 8. Validate backup, replay, recovery, and duplicate-delivery behaviour.
@@ -52,7 +52,7 @@ Do not delete the local source stores as part of the first migration. Storage cl
 
 ## Current implementation boundary
 
-The self-contained SQLite, local artefact, database polling, and embedded scheduler path is the supported default. PostgreSQL, S3, and JetStream are configuration targets and architectural extension points. The artifact helper is intentionally limited to local-to-S3 transfer and read-back verification. It doesn't migrate database metadata, delete local files, reconcile objects missing from the local source, or perform cutover.
+The self-contained SQLite, local artefact, database polling, and embedded scheduler path is the supported default. PostgreSQL and external scheduling remain configuration targets. S3 and the JetStream notification bridge are available as controlled extensions. The artifact helper is intentionally limited to local-to-S3 transfer and read-back verification. It doesn't migrate database metadata, delete local files, reconcile objects missing from the local source, or perform cutover.
 
 ## Local-to-S3 artifact migration
 

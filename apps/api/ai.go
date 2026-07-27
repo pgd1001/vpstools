@@ -158,7 +158,7 @@ func persistAIRequest(ctx context.Context, db *sql.DB, id string, actor *authz.A
 		return err
 	}
 	defer tx.Rollback()
-	_, err = apiExec(ctx, tx, `INSERT INTO ai_requests (id, organisation_id, actor_user_id, status, request_json, response_text, model, provider_request_id, duration_ms, error_summary) VALUES (?,?,?,?,?,?,?,?,?,?)`, id, actor.OrganisationID, actor.UserID, status, string(requestJSON), response, model, providerRequestID, duration, errorSummary)
+	_, err = apiExec(ctx, tx, `INSERT INTO ai_requests (id, organisation_id, actor_user_id, status, request_json, response_text, model, provider_request_id, duration_ms, error_summary) VALUES (?,?,?,?,`+metadataRuntime().JSONParameter()+`,?,?,?,?,?)`, id, actor.OrganisationID, actor.UserID, status, string(requestJSON), response, model, providerRequestID, duration, errorSummary)
 	if err != nil {
 		return fmt.Errorf("insert AI request: %w", err)
 	}

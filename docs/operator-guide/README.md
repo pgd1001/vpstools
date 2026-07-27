@@ -190,6 +190,12 @@ Full details in `docs/runbooks/README.md`.
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | S3 credentials, required together when the endpoint requires authentication | empty |
 | `S3_ENCRYPTION_KEY` | Optional base64-encoded 32-byte client-side encryption key | empty |
 | `JOB_DISPATCH` | Job queue backend | `database` |
+| `NATS_URL` | NATS server URL when `JOB_DISPATCH=jetstream` | empty |
+| `NATS_STREAM` / `NATS_SUBJECT` | JetStream stream and notification subject | `SVRTOOLS_JOBS` / `svrtools.jobs.available` |
+| `NATS_DURABLE` | Shared durable pull consumer name | `svrtools-runners` |
+| `NATS_MAX_DELIVER` | Maximum notification deliveries | `5` |
+| `NATS_ACK_WAIT` | JetStream acknowledgement deadline | `30s` |
+| `NATS_DUPLICATE_WINDOW` | JetStream message-id de-duplication window | `2m` |
 | `SCHEDULER` | Scheduler mode | `embedded` |
 | `EVENT_BUS` | Event bus mode | `disabled` |
 | `APPROVAL_EXPIRY_SECONDS` | Installation-wide approval review window | `3600` |

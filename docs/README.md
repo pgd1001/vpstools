@@ -17,6 +17,7 @@ This is the documentation hub for VPS Tools, a controlled operations platform fo
 | Operate and secure the deployment | [Security and operations](security-and-operations.md) |
 | Diagnose problems | [Troubleshooting](troubleshooting.md) |
 | Prepare a production release | [Production release checklist](production-release.md) |
+| Configure the JetStream dispatch bridge | [JetStream dispatch bridge](dispatch-jetstream.md) |
 | Back up and recover a self-contained instance | [Backup and recovery runbook](backup-recovery.md) |
 | Record release-candidate evidence | [Release evidence template](release-evidence-template.md) |
 | Deploy on one Linux host | [Systemd deployment](../deploy/README.md) |

@@ -2,6 +2,8 @@
 
 The self-contained deployment backs up the SQLite database, the local encrypted artefact directory, and a checksum manifest. If the API generated `artifacts/.key`, the backup stores an authenticated encrypted envelope at `artifacts/.key.enc`, wrapped with the separately protected `BACKUP_ENCRYPTION_KEY`. The plaintext artefact key is never copied into a backup. If `ARTIFACT_ENCRYPTION_KEY` is configured, keep that original key in the external secret store and set `BACKUP_ENCRYPTION_KEY` only when a generated local key needs wrapping.
 
+Verification checks the manifest structure, rejects duplicate or unlisted files, validates every recorded size and SHA-256 checksum, and runs SQLite `integrity_check` and `foreign_key_check` against the backed-up database. Restore runs the same SQLite checks on its temporary database before replacing any destination. A backup that opens successfully but contains SQLite integrity or referential errors is therefore rejected before it is published as recoverable.
+
 ## Create and verify a backup
 
 ```sh
@@ -27,7 +29,7 @@ Restore into a disposable directory first. Never overwrite the live database dur
 ./bin/backup -mode verify -input /var/lib/vps-tools/backups/20260727T020000Z
 ```
 
-Start a temporary API against the restored paths, check `/api/v1/ready`, list executions, read a known artefact, and confirm audit history. Record the elapsed restore time and the backup timestamp in the release evidence. The repository test suite covers checksum failure, database restore, and artefact-key restoration, but a release still needs a host-level rehearsal.
+Start a temporary API against the restored paths, check `/api/v1/ready`, list executions, read a known artefact, and confirm audit history. Record the elapsed restore time and the backup timestamp in the release evidence. The repository test suite covers checksum failure, manifest validation, SQLite foreign-key validation, database restore, and artefact-key restoration, but a release still needs a host-level rehearsal.
 
 ## Recovery targets and off-host copies
 

@@ -16,6 +16,32 @@ jobs:
           go-version: "1.26.5"
       - run: go test ./... -race -count=1
 
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: svrtools
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d svrtools"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+      - name: Run PostgreSQL migrations and schema contract test
+        env:
+          POSTGRES_TEST_URL: postgres://postgres:postgres@127.0.0.1:5432/svrtools?sslmode=disable
+        run: go test ./apps/api -run TestPostgresRuntimeIntegration -count=1 -timeout 120s
+
   vet:
     runs-on: ubuntu-latest
     steps:
@@ -64,6 +90,8 @@ jobs:
       - name: Validate Linux deployment scripts
         run: |
           sh -n scripts/*.sh
+      - name: Validate deployment manifest references
+        run: sh scripts/validate-deployment-manifests.sh
       - name: Exercise production acceptance gate
         run: sh scripts/production-acceptance-test.sh
 
@@ -211,6 +239,8 @@ jobs:
         run: sh ./scripts/validate-release-layout.sh dist
       - name: Verify release evidence
         run: sh ./scripts/validate-release.sh dist
+      - name: Validate deployment manifest references
+        run: sh ./scripts/validate-deployment-manifests.sh
       - name: Validate release evidence template and fail-closed checks
         run: sh ./scripts/validate-release-evidence.sh docs/release-evidence-template.md --template && sh ./scripts/validate-release-evidence-test.sh
       - name: Run packaged Linux self-contained smoke

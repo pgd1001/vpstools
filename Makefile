@@ -1,4 +1,4 @@
-.PHONY: dev-up dev-down build test vet lint generate clean backup backup-run backup-verify backup-restore runbook-validate release-check release-evidence-test
+.PHONY: dev-up dev-down build test vet lint generate clean backup backup-run backup-verify backup-restore runbook-validate deployment-manifests release-check release-evidence-test
 
 BACKUP ?= ./backups/latest
 DB_PATH ?= ./svrtools.db
@@ -59,9 +59,13 @@ backup-restore:
 runbook-validate:
 	go test ./runbooks -count=1
 
+deployment-manifests:
+	sh ./scripts/validate-deployment-manifests.sh
+
 release-check:
 	goreleaser check
 	goreleaser release --snapshot --clean
+	sh ./scripts/validate-deployment-manifests.sh
 	$(RELEASE_LAYOUT_VALIDATE)
 	$(RELEASE_VALIDATE)
 	$(RELEASE_EVIDENCE_VALIDATE)

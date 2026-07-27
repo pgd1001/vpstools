@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -16,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pgd1001/svrtools/packages/config"
+	"github.com/pgd1001/svrtools/packages/dispatch"
 	"github.com/pgd1001/svrtools/packages/redact"
 	"github.com/pgd1001/svrtools/packages/sshx"
 )
@@ -37,6 +40,11 @@ func main() {
 	}
 
 	runnerName := envOrDefault("RUNNER_NAME", "default-runner")
+	backendConfig := config.Load()
+	if err := backendConfig.Validate(); err != nil {
+		logger.Error("runner backend configuration invalid", "error", err)
+		os.Exit(1)
+	}
 
 	targetHost := envOrDefault("SSH_TARGET_HOST", "localhost")
 	targetPort := envOrDefault("SSH_TARGET_PORT", "2222")
@@ -62,6 +70,22 @@ func main() {
 	}
 	health.registered.Store(true)
 
+	var dispatchConsumer dispatch.Consumer
+	if backendConfig.JobDispatch == "jetstream" {
+		natsURL, stream, subject, durable, maxDeliver, ackWait, duplicateWindow := backendConfig.DispatchConfig()
+		consumer, err := dispatch.NewJetStreamConsumer(ctx, dispatch.Config{
+			URL: natsURL, Stream: stream, Subject: subject, Durable: durable,
+			MaxDeliver: maxDeliver, AckWait: ackWait, DuplicateWindow: duplicateWindow,
+		})
+		if err != nil {
+			logger.Error("JetStream dispatch initialisation failed", "error", err)
+			os.Exit(1)
+		}
+		dispatchConsumer = consumer
+		defer dispatchConsumer.Close()
+		logger.Info("runner using JetStream notification bridge", "stream", stream, "subject", subject, "durable", durable, "max_deliver", maxDeliver)
+	}
+
 	lastHeartbeat := time.Now()
 	pollInterval := 2 * time.Second
 
@@ -78,16 +102,30 @@ func main() {
 			lastHeartbeat = time.Now()
 		}
 
-		job, err := claimJob(ctx, httpClient, apiURL, runnerID, runnerToken)
+		var claimedJob *job
+		var err error
+		var notificationHandled bool
+		if dispatchConsumer != nil {
+			claimedJob, notificationHandled, err = claimNotification(ctx, dispatchConsumer, func(targetID string) (*job, error) {
+				return claimJobForTarget(ctx, httpClient, apiURL, runnerID, runnerToken, targetID)
+			})
+			if err != nil {
+				logger.Warn("JetStream notification processing failed", "error", err)
+			}
+		}
+		if dispatchConsumer == nil || !notificationHandled {
+			claimedJob, err = claimJob(ctx, httpClient, apiURL, runnerID, runnerToken)
+		}
 		if err != nil {
 			time.Sleep(pollInterval)
 			continue
 		}
-		if job == nil {
+		if claimedJob == nil {
 			time.Sleep(pollInterval)
 			continue
 		}
 
+		job := claimedJob
 		logger.Info("claimed job", "execution_id", job.ExecutionID, "target_id", job.TargetID)
 		health.claimed.Add(1)
 		leaseCtx, stopLeaseRenewal := context.WithCancel(ctx)
@@ -344,7 +382,15 @@ func (e *resultSubmissionError) Error() string {
 }
 
 func claimJob(ctx context.Context, client *http.Client, apiURL, runnerID, token string) (*job, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL+"/api/v1/jobs/next?runner_id="+url.QueryEscape(runnerID), nil)
+	return claimJobForTarget(ctx, client, apiURL, runnerID, token, "")
+}
+
+func claimJobForTarget(ctx context.Context, client *http.Client, apiURL, runnerID, token, targetID string) (*job, error) {
+	claimURL := apiURL + "/api/v1/jobs/next?runner_id=" + url.QueryEscape(runnerID)
+	if targetID != "" {
+		claimURL += "&target_id=" + url.QueryEscape(targetID)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, claimURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -370,6 +416,37 @@ func claimJob(ctx context.Context, client *http.Client, apiURL, runnerID, token 
 		return nil, nil
 	}
 	return &j, nil
+}
+
+// claimNotification consumes a notification, asks the API to claim exactly
+// the referenced target, and acknowledges the notification before execution.
+// A duplicate notification therefore results in a harmless no_jobs response
+// once the API lease has already been claimed or completed.
+func claimNotification(ctx context.Context, consumer dispatch.Consumer, claim func(string) (*job, error)) (*job, bool, error) {
+	delivery, err := consumer.Next(ctx)
+	if errors.Is(err, dispatch.ErrNoMessage) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	notification := delivery.Notification()
+	claimed, claimErr := claim(notification.TargetID)
+	if claimErr != nil {
+		nakErr := delivery.Nak(ctx, time.Second)
+		if nakErr != nil {
+			return nil, true, fmt.Errorf("claim target %s: %v, then nack notification: %w", notification.TargetID, claimErr, nakErr)
+		}
+		return nil, true, claimErr
+	}
+	ackErr := delivery.Ack(ctx)
+	if ackErr != nil {
+		if claimed != nil {
+			return claimed, true, fmt.Errorf("ack notification for claimed target %s: %w", notification.TargetID, ackErr)
+		}
+		return nil, true, ackErr
+	}
+	return claimed, true, nil
 }
 
 func submitResult(ctx context.Context, client *http.Client, apiURL, runnerID, targetID, execID, leaseID, token string, result sshx.Result) error {

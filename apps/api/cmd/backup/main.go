@@ -179,6 +179,9 @@ func verifyBackup(dir string) error {
 	if err != nil {
 		return err
 	}
+	if err := validateManifest(m); err != nil {
+		return err
+	}
 	seen := map[string]bool{}
 	for _, f := range m.Files {
 		if err := validateRelativePath(f.Path); err != nil {
@@ -195,6 +198,9 @@ func verifyBackup(dir string) error {
 		if actual.Size != f.Size || actual.SHA256 != f.SHA256 {
 			return fmt.Errorf("integrity check failed for %s", f.Path)
 		}
+	}
+	if err := validateSQLiteDatabase(filepath.Join(dir, m.Database)); err != nil {
+		return fmt.Errorf("database integrity check failed: %w", err)
 	}
 	if m.ArtifactFiles != countArtifactRecords(m) {
 		return fmt.Errorf("manifest artifact count does not match file inventory")
@@ -281,6 +287,9 @@ func restoreBackup(dir, dbTarget, artifactsTarget string, force bool) error {
 			return fmt.Errorf("restore artifact key: %w", err)
 		}
 	}
+	if err := validateSQLiteDatabase(tmpDB); err != nil {
+		return fmt.Errorf("restored database validation: %w", err)
+	}
 	if force {
 		oldDB, err := moveAside(dbTarget)
 		if err != nil {
@@ -317,15 +326,6 @@ func restoreBackup(dir, dbTarget, artifactsTarget string, force bool) error {
 			_ = os.RemoveAll(dbTarget)
 			return err
 		}
-	}
-	checkDB, err := sql.Open("sqlite", dbTarget+"?_pragma=foreign_keys(on)")
-	if err != nil {
-		return fmt.Errorf("restored database validation: %w", err)
-	}
-	err = checkDB.Ping()
-	_ = checkDB.Close()
-	if err != nil {
-		return fmt.Errorf("restored database validation: %w", err)
 	}
 	fmt.Printf("backup restored from %s\n", dir)
 	return nil
@@ -475,6 +475,85 @@ func readManifest(dir string) (manifest, error) {
 		return m, errors.New("unsupported or incomplete backup manifest")
 	}
 	return m, nil
+}
+
+func validateManifest(m manifest) error {
+	if m.CreatedAt == "" {
+		return errors.New("backup manifest is missing created_at")
+	}
+	if _, err := time.Parse(time.RFC3339, m.CreatedAt); err != nil {
+		return fmt.Errorf("backup manifest has invalid created_at: %w", err)
+	}
+	if m.ArtifactFiles < 0 {
+		return errors.New("backup manifest has a negative artifact count")
+	}
+	if m.EncryptionKey != "" && m.EncryptionKey != encryptedArtifactKeyPath {
+		return fmt.Errorf("backup manifest has unsupported encryption key path %q", m.EncryptionKey)
+	}
+	if m.EncryptionKey == encryptedArtifactKeyPath && m.KeyRecovery == "" {
+		return errors.New("backup manifest is missing key recovery guidance")
+	}
+	databaseRecords := 0
+	artifactRecords := 0
+	for _, f := range m.Files {
+		if f.Path == m.Database {
+			databaseRecords++
+		} else if strings.HasPrefix(f.Path, m.ArtifactsDir+"/") {
+			artifactRecords++
+		}
+		if f.Size < 0 || len(f.SHA256) != sha256.Size*2 {
+			return fmt.Errorf("manifest has invalid file record for %q", f.Path)
+		}
+		if _, err := hex.DecodeString(f.SHA256); err != nil {
+			return fmt.Errorf("manifest has invalid SHA-256 for %q", f.Path)
+		}
+	}
+	if databaseRecords != 1 {
+		return fmt.Errorf("manifest must contain exactly one database record, found %d", databaseRecords)
+	}
+	if artifactRecords != m.ArtifactFiles {
+		return fmt.Errorf("manifest artifact count does not match file inventory")
+	}
+	if m.EncryptionKey != "" && !containsManifestPath(m.Files, m.EncryptionKey) {
+		return errors.New("manifest encryption key record is missing from file inventory")
+	}
+	return nil
+}
+
+func containsManifestPath(files []file, wanted string) bool {
+	for _, f := range files {
+		if f.Path == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func validateSQLiteDatabase(path string) error {
+	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(on)")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		return err
+	}
+	var integrity string
+	if err := db.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil {
+		return err
+	}
+	if !strings.EqualFold(integrity, "ok") {
+		return fmt.Errorf("integrity_check returned %q", integrity)
+	}
+	rows, err := db.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return errors.New("foreign_key_check reported violations")
+	}
+	return rows.Err()
 }
 func validateRelativePath(p string) error {
 	normalized := strings.ReplaceAll(p, "\\", "/")

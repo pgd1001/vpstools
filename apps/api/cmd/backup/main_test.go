@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,5 +129,52 @@ func TestValidateRelativePathRejectsTraversal(t *testing.T) {
 		if err := validateRelativePath(path); err == nil {
 			t.Errorf("validateRelativePath(%q) accepted traversal", path)
 		}
+	}
+}
+
+func TestVerifyRejectsForeignKeyViolations(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "source.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA foreign_keys=OFF; CREATE TABLE parent (id INTEGER PRIMARY KEY); CREATE TABLE child (parent_id INTEGER REFERENCES parent(id)); INSERT INTO child VALUES (99)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(root, "backup")
+	if err := createBackup(dbPath, filepath.Join(root, "artifacts"), backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyBackup(backup); err == nil || !strings.Contains(err.Error(), "foreign_key_check") {
+		t.Fatalf("expected foreign-key validation failure, got %v", err)
+	}
+}
+
+func TestVerifyRejectsIncompleteManifest(t *testing.T) {
+	root := t.TempDir()
+	m := manifest{
+		Version:      manifestVersion,
+		CreatedAt:    "2026-07-27T12:00:00Z",
+		Database:     "svrtools.db",
+		ArtifactsDir: "artifacts",
+		Files: []file{{
+			Path:   "artifacts/output.bin",
+			Size:   1,
+			SHA256: strings.Repeat("0", 64),
+		}},
+	}
+	contents, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "manifest.json"), contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyBackup(root); err == nil || !strings.Contains(err.Error(), "exactly one database") {
+		t.Fatalf("expected incomplete manifest failure, got %v", err)
 	}
 }

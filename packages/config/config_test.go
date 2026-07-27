@@ -4,6 +4,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaultConfigurationIsSelfContained(t *testing.T) {
@@ -99,5 +100,28 @@ func TestAIConfigurationRequiresProviderEndpointAndModel(t *testing.T) {
 	t.Setenv("AI_ENDPOINT", "file:///tmp/model")
 	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "AI_ENDPOINT") {
 		t.Fatalf("expected invalid endpoint error, got %v", err)
+	}
+}
+
+func TestJetStreamDispatchLoadsAndValidatesBoundedConsumerSettings(t *testing.T) {
+	t.Setenv("JOB_DISPATCH", "jetstream")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("NATS_STREAM", "SVRTOOLS_JOBS")
+	t.Setenv("NATS_SUBJECT", "svrtools.jobs.available")
+	t.Setenv("NATS_DURABLE", "runner-fleet")
+	t.Setenv("NATS_MAX_DELIVER", "7")
+	t.Setenv("NATS_ACK_WAIT", "20s")
+	t.Setenv("NATS_DUPLICATE_WINDOW", "3m")
+	c := Load()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.NATSMaxDeliver != 7 || c.NATSAckWait != 20*time.Second || c.NATSDuplicateWindow != 3*time.Minute {
+		t.Fatalf("unexpected JetStream settings: %+v", c)
+	}
+
+	t.Setenv("NATS_MAX_DELIVER", "21")
+	if err := Load().Validate(); err == nil {
+		t.Fatal("expected an unsafe redelivery bound to fail")
 	}
 }
