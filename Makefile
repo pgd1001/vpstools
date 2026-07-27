@@ -57,10 +57,10 @@ backup-restore:
 	go run ./apps/api/cmd/backup -mode restore -input "$(BACKUP)" -db "$(DB_PATH)" -artifacts "$(ARTIFACTS_DIR)"
 
 extended-backup:
-	sh ./scripts/extended-backup.sh
+	bash ./scripts/extended-backup.sh
 
 extended-restore:
-	sh ./scripts/extended-restore.sh
+	bash ./scripts/extended-restore.sh
 
 runbook-validate:
 	go test ./runbooks -count=1

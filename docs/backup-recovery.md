@@ -71,11 +71,11 @@ manifest and run the packaged extended helper:
 DATABASE_URL='postgres://...' \
 ARTIFACT_MANIFEST=/var/lib/vps-tools/backups/artifacts.json \
 EXTENDED_BACKUP_DIR=/var/lib/vps-tools/backups/extended \
-./scripts/extended-backup.sh
+bash ./scripts/extended-backup.sh
 
 CONFIRM_RESTORE=YES DATABASE_URL='postgres://...' \
 EXTENDED_BACKUP=/var/lib/vps-tools/backups/extended/svrtools-20260727T020000Z \
-./scripts/extended-restore.sh
+bash ./scripts/extended-restore.sh
 ```
 
 The extended record contains the PostgreSQL dump, checksums, the S3 manifest,
