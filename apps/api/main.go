@@ -94,6 +94,12 @@ func main() {
 		logger.Error("seed failed", "error", err)
 		os.Exit(1)
 	}
+	if apiBackends.DatabaseDriver == "postgres" && apiBackends.PostgresRLS {
+		if err := configurePostgresRLS(ctx, db); err != nil {
+			logger.Error("PostgreSQL row-level security configuration failed", "error", err)
+			os.Exit(1)
+		}
+	}
 	if apiBackends.AIProvider == "openai-compatible" {
 		apiAIProvider = ai.RedactingProvider{Inner: ai.HTTPProvider{Endpoint: apiBackends.AIEndpoint, APIKey: apiBackends.AIAPIKey, Model: apiBackends.AIModel, Timeout: apiBackends.AITimeout, MaxResponse: aiResponseLimit(), HTTPClient: nil}, Redact: redact.Stdout}
 	}
@@ -541,6 +547,12 @@ func withAuth(db *sql.DB, next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 			ctx := authz.WithActor(r.Context(), actor)
+			ctx, cleanup, err := bindTenantConnection(ctx, db, actor.OrganisationID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tenant database context unavailable"})
+				return
+			}
+			defer cleanup()
 			ctx = context.WithValue(ctx, dbKey, db)
 			r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 			next(w, r.WithContext(ctx))
@@ -555,6 +567,12 @@ func withAuth(db *sql.DB, next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 			ctx := authz.WithActor(r.Context(), actor)
+			ctx, cleanup, err := bindTenantConnection(ctx, db, actor.OrganisationID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tenant database context unavailable"})
+				return
+			}
+			defer cleanup()
 			ctx = context.WithValue(ctx, dbKey, db)
 			r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 			next(w, r.WithContext(ctx))
@@ -578,6 +596,12 @@ func withAuth(db *sql.DB, next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		ctx := authz.WithActor(r.Context(), actor)
+		ctx, cleanup, err := bindTenantConnection(ctx, db, actor.OrganisationID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tenant database context unavailable"})
+			return
+		}
+		defer cleanup()
 		ctx = context.WithValue(ctx, dbKey, db)
 		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 		next(w, r.WithContext(ctx))
@@ -992,7 +1016,7 @@ func handleUpdateServer(w http.ResponseWriter, r *http.Request, serverID string)
 		return
 	}
 	db := dbFrom(r)
-	tx, err := db.BeginTx(r.Context(), nil)
+	tx, err := beginAPITx(r.Context(), db)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to start update"})
 		return
@@ -1707,7 +1731,7 @@ func handleCreateExecution(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to snapshot selected targets"})
 		return
 	}
-	tx, err := db.BeginTx(r.Context(), nil)
+	tx, err := beginAPITx(r.Context(), db)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start execution transaction"})
 		return
@@ -2031,7 +2055,7 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		return
 	}
 	targetFilter := r.URL.Query().Get("target_id")
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := beginAPITx(ctx, db)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start job claim"})
 		return
@@ -2142,7 +2166,7 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 	}{req.ExecutionID, req.TargetID, req.RunnerID, req.LeaseID, req.ExitCode, req.Stdout, req.Stderr, req.Error, req.DurationMs})
 	hash := fmt.Sprintf("%x", sha256.Sum256(payloadBytes))
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := beginAPITx(ctx, db)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start result transaction"})
 		return

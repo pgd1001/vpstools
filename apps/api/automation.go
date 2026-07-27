@@ -325,7 +325,7 @@ func executeScheduledRun(ctx context.Context, db *sql.DB, schedule automation.Sc
 		timeout = 300
 	}
 	execID := "exe_" + shortID()
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := beginAPITx(ctx, db)
 	if err != nil {
 		return err
 	}

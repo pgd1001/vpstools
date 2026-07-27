@@ -194,6 +194,7 @@ Larger installations can select PostgreSQL, S3-compatible storage, and NATS thro
 ```text
 DATABASE_DRIVER=postgres
 DATABASE_URL=postgres://...
+POSTGRES_RLS=true
 ARTIFACT_STORE=s3
 S3_ENDPOINT=https://...
 JOB_DISPATCH=jetstream

@@ -17,6 +17,7 @@ import (
 type BackendConfig struct {
 	DatabaseDriver         string
 	DatabaseURL            string
+	PostgresRLS            bool
 	ArtifactStore          string
 	ArtifactsDir           string
 	JobDispatch            string
@@ -67,6 +68,7 @@ func Load() BackendConfig {
 	return BackendConfig{
 		DatabaseDriver:         envOrDefault("DATABASE_DRIVER", "sqlite"),
 		DatabaseURL:            databaseURL,
+		PostgresRLS:            strings.EqualFold(strings.TrimSpace(os.Getenv("POSTGRES_RLS")), "true"),
 		ArtifactStore:          envOrDefault("ARTIFACT_STORE", "local"),
 		ArtifactsDir:           filepath.Clean(artifactsDir),
 		JobDispatch:            envOrDefault("JOB_DISPATCH", "database"),
@@ -122,6 +124,9 @@ func (c BackendConfig) Validate() error {
 	}
 	if c.DatabaseDriver == "postgres" && os.Getenv("DATABASE_URL") == "" {
 		return fmt.Errorf("DATABASE_URL is required when DATABASE_DRIVER=postgres")
+	}
+	if c.PostgresRLS && c.DatabaseDriver != "postgres" {
+		return fmt.Errorf("POSTGRES_RLS=true requires DATABASE_DRIVER=postgres")
 	}
 	if c.ArtifactStore == "s3" {
 		if _, err := artifacts.NewS3Store(c.S3Config()); err != nil {

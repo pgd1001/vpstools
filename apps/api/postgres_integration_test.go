@@ -52,6 +52,27 @@ func TestPostgresRuntimeIntegration(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("seeded organisation count = %d, want 1", count)
 	}
+	apiBackends.PostgresRLS = true
+	if err := configurePostgresRLS(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var policyCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_policies WHERE schemaname = current_schema() AND policyname LIKE 'vps_tenant_%'`).Scan(&policyCount); err != nil {
+		t.Fatal(err)
+	}
+	if policyCount != 19 {
+		t.Fatalf("tenant RLS policy count = %d, want 19", policyCount)
+	}
+	if _, err := db.ExecContext(ctx, `SELECT set_config('vps.organisation_id', 'org_demo', false)`); err != nil {
+		t.Fatal(err)
+	}
+	var currentOrganisation string
+	if err := db.QueryRowContext(ctx, `SELECT vps_current_organisation()`).Scan(&currentOrganisation); err != nil {
+		t.Fatal(err)
+	}
+	if currentOrganisation != "org_demo" {
+		t.Fatalf("current organisation = %q, want org_demo", currentOrganisation)
+	}
 }
 
 func postgresIntegrationMigrationPath(t *testing.T) string {

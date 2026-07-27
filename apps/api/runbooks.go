@@ -89,7 +89,7 @@ func handleCreateRunbook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db := dbFrom(r)
-	tx, err := db.BeginTx(r.Context(), nil)
+	tx, err := beginAPITx(r.Context(), db)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start runbook transaction"})
 		return
@@ -315,7 +315,7 @@ func handleUpdateRunbook(w http.ResponseWriter, r *http.Request, name string) {
 		writeJSON(w, 400, map[string]string{"error": "allowed_roles must be a JSON array of known roles"})
 		return
 	}
-	tx, err := db.BeginTx(r.Context(), nil)
+	tx, err := beginAPITx(r.Context(), db)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to start update"})
 		return
@@ -508,7 +508,7 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 				return 300
 			}(),
 		})
-		tx, txErr := db.BeginTx(r.Context(), nil)
+		tx, txErr := beginAPITx(r.Context(), db)
 		if txErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start approval transaction"})
 			return
@@ -563,7 +563,7 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 	if timeout <= 0 {
 		timeout = 300
 	}
-	tx, err := db.BeginTx(r.Context(), nil)
+	tx, err := beginAPITx(r.Context(), db)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start execution transaction"})
 		return
@@ -770,7 +770,7 @@ func handleApprove(w http.ResponseWriter, r *http.Request, approvalID string) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "approval has expired"})
 		return
 	}
-	tx, err := db.BeginTx(r.Context(), nil)
+	tx, err := beginAPITx(r.Context(), db)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start approval transaction"})
 		return

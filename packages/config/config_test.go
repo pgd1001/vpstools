@@ -34,6 +34,19 @@ func TestExtendedConfigurationRequiresConnectionSettings(t *testing.T) {
 	}
 }
 
+func TestPostgresRLSRequiresPostgresDriver(t *testing.T) {
+	t.Setenv("POSTGRES_RLS", "true")
+	t.Setenv("DATABASE_DRIVER", "sqlite")
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "POSTGRES_RLS") {
+		t.Fatalf("expected RLS driver validation error, got %v", err)
+	}
+	t.Setenv("DATABASE_DRIVER", "postgres")
+	t.Setenv("DATABASE_URL", "postgres://user:secret@localhost:5432/db?sslmode=disable")
+	if err := Load().Validate(); err != nil {
+		t.Fatalf("valid PostgreSQL RLS configuration rejected: %v", err)
+	}
+}
+
 func TestS3ConfigurationRequiresCompleteStoreSettings(t *testing.T) {
 	server := httptest.NewServer(nil)
 	defer server.Close()

@@ -153,7 +153,7 @@ func executionAIEvidence(ctx context.Context, db *sql.DB, orgID, executionID str
 func persistAIRequest(ctx context.Context, db *sql.DB, id string, actor *authz.Actor, request aiAnalysisRequest, status, response, model, providerRequestID string, duration int64, errorSummary string) error {
 	requestJSON, _ := json.Marshal(aiAnalysisRequest{Question: redact.Stdout(request.Question), ExecutionID: request.ExecutionID})
 	response = redact.Stdout(response)
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := beginAPITx(ctx, db)
 	if err != nil {
 		return err
 	}

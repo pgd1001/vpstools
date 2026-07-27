@@ -114,3 +114,39 @@ func seedPostgres(ctx context.Context, db *sql.DB) error {
 	}
 	return nil
 }
+
+// configurePostgresRLS enables the optional defence-in-depth tenant boundary.
+// Authentication tables stay outside this policy because token and OIDC
+// resolution must happen before an organisation is known. Business tables
+// still retain explicit organisation predicates in application queries.
+func configurePostgresRLS(ctx context.Context, db *sql.DB) error {
+	if apiBackends.DatabaseDriver != "postgres" || !apiBackends.PostgresRLS {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `
+		CREATE OR REPLACE FUNCTION vps_current_organisation() RETURNS text
+		LANGUAGE sql STABLE AS $$ SELECT NULLIF(current_setting('vps.organisation_id', true), '') $$;
+	`); err != nil {
+		return fmt.Errorf("create PostgreSQL tenant function: %w", err)
+	}
+	tables := []string{
+		"servers", "server_tags", "runners", "runner_scopes", "executions", "execution_targets",
+		"execution_result_receipts", "execution_idempotency", "runbook_idempotency", "audit_events",
+		"runbooks", "runbook_versions", "approval_requests", "execution_events", "artifact_records",
+		"automation_schedules", "automation_controls", "ai_requests", "ai_evidence",
+	}
+	for _, table := range tables {
+		policy := "vps_tenant_" + table
+		statement := fmt.Sprintf(`
+			ALTER TABLE %s ENABLE ROW LEVEL SECURITY;
+			DROP POLICY IF EXISTS %s ON %s;
+			CREATE POLICY %s ON %s
+				USING (organisation_id = vps_current_organisation())
+				WITH CHECK (organisation_id = vps_current_organisation());
+		`, table, policy, table, policy, table)
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("configure PostgreSQL RLS for %s: %w", table, err)
+		}
+	}
+	return nil
+}
