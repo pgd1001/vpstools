@@ -27,6 +27,17 @@ Privileged operators can create one with `vps auth create-token --name operator-
 vps whoami
 ```
 
+## Production preflight
+
+Run the doctor command before a change or after an installation. It checks API reachability, database and encrypted artefact readiness, and the authenticated operator identity. It returns exit code 1 if any check fails.
+
+```text
+vps doctor
+vps doctor --json
+```
+
+Use `--json` in deployment scripts and health gates. A failed identity check normally means that `VPS_API_TOKEN` is missing, expired, or not permitted for the selected organisation.
+
 ## Server inventory
 
 ```text

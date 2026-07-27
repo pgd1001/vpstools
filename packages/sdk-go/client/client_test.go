@@ -46,6 +46,37 @@ func TestApprovalClientEscapesIdentifiersAndFilters(t *testing.T) {
 	}
 }
 
+func TestHealthAndReadyUseTypedEndpoints(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/health":
+			_, _ = w.Write([]byte(`{"status":"ok","database":"ok","version":"0.4.0","deployment_tier":"self-contained"}`))
+		case "/api/v1/ready":
+			_, _ = w.Write([]byte(`{"status":"ready","database":"ok","artifacts":"ok"}`))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	health, err := c.Health()
+	if err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	if health.Status != "ok" || health.DeploymentTier != "self-contained" {
+		t.Fatalf("unexpected health response: %+v", health)
+	}
+	ready, err := c.Ready()
+	if err != nil {
+		t.Fatalf("ready: %v", err)
+	}
+	if ready.Status != "ready" || ready.Artifacts != "ok" {
+		t.Fatalf("unexpected ready response: %+v", ready)
+	}
+}
+
 func TestCreateExecutionWithIdempotencyKeySetsHeader(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Idempotency-Key") != "change-01" {

@@ -36,6 +36,8 @@ The result is a shared workflow for the CLI, TUI, web console, API, SDK, and AI 
 
 The default installation needs Go only. PostgreSQL, S3, NATS, and Docker are not required.
 
+After starting the API, run `vps doctor` to verify API reachability, SQLite and encrypted artefact readiness, and the authenticated operator identity. Use `vps doctor --json` in deployment or release scripts.
+
 ```powershell
 go build -o bin/vps.exe ./apps/cli
 go build -o bin/api.exe ./apps/api

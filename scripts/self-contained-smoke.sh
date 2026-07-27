@@ -60,6 +60,7 @@ export VPS_API_TOKEN="$api_token"
 export VPS_USER=
 identity=$(curl -fsS "$VPS_API_URL/api/v1/whoami" -H "Authorization: Bearer $VPS_API_TOKEN")
 printf '%s\n' "$identity" | grep -q 'user_senior'
+"$cli_bin" doctor --api-url "$VPS_API_URL" >/dev/null
 
 pause=$(curl -fsS -X POST "$VPS_API_URL/api/v1/automation/pause" \
     -H "Authorization: Bearer $VPS_API_TOKEN" -H 'Content-Type: application/json' \

@@ -99,6 +99,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default ~/.config/vps-tools/config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&apiURL, "api-url", "", "Control plane API URL (or set VPS_API_URL env)")
 	rootCmd.AddCommand(whoamiCmd)
+	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(runnerCmd)
 	rootCmd.AddCommand(execCmd)

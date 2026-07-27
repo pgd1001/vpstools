@@ -50,6 +50,8 @@ try {
   $env:VPS_API_TOKEN = $apiTokenResponse.token
   $tokenIdentity = Invoke-RestMethod -Uri "$env:VPS_API_URL/api/v1/whoami" -Headers @{ Authorization = "Bearer $env:VPS_API_TOKEN" }
   if ($tokenIdentity.user_id -ne 'user_senior') { throw 'Bearer token identity validation failed' }
+  & $CliBinary doctor --api-url $env:VPS_API_URL | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'CLI doctor validation failed' }
 
   $metrics = Invoke-WebRequest -Uri "$env:VPS_API_URL/metrics" -Headers @{ 'X-VPS-User' = 'user_senior' } -UseBasicParsing
   if ($metrics.StatusCode -ne 200 -or $metrics.Content -notmatch 'svrtools_api_requests_total') { throw 'Metrics endpoint validation failed' }

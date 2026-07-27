@@ -47,6 +47,38 @@ type WhoAmIResponse struct {
 	Role           string `json:"role"`
 }
 
+type HealthResponse struct {
+	Status         string `json:"status"`
+	Database       string `json:"database"`
+	Version        string `json:"version,omitempty"`
+	DeploymentTier string `json:"deployment_tier,omitempty"`
+	DatabaseDriver string `json:"database_driver,omitempty"`
+	ArtifactStore  string `json:"artifact_store,omitempty"`
+	JobDispatch    string `json:"job_dispatch,omitempty"`
+}
+
+type ReadyResponse struct {
+	Status    string `json:"status"`
+	Database  string `json:"database"`
+	Artifacts string `json:"artifacts"`
+}
+
+func (c *Client) Health() (*HealthResponse, error) {
+	var resp HealthResponse
+	if err := c.get("/api/v1/health", &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) Ready() (*ReadyResponse, error) {
+	var resp ReadyResponse
+	if err := c.get("/api/v1/ready", &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 func (c *Client) WhoAmI() (*WhoAmIResponse, error) {
 	var resp WhoAmIResponse
 	if err := c.get("/api/v1/whoami", &resp); err != nil {
