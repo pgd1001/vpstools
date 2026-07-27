@@ -354,7 +354,7 @@ func handleArchiveRunbook(w http.ResponseWriter, r *http.Request, name string) {
 		writeDenial(w, r, actor, "runbook.archived", "runbook", name, authz.Deny("runbook_requires_senior", "Archiving runbooks requires senior engineer or above."))
 		return
 	}
-	res, err := dbFrom(r).ExecContext(r.Context(), "UPDATE runbooks SET status='archived' WHERE (id=? OR name=?) AND organisation_id=? AND status != 'archived'", name, name, actor.OrganisationID)
+	res, err := apiExec(r.Context(), dbFrom(r), "UPDATE runbooks SET status='archived' WHERE (id=? OR name=?) AND organisation_id=? AND status != 'archived'", name, name, actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to archive runbook"})
 		return

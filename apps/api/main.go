@@ -1839,7 +1839,7 @@ func handleSearchAudit(w http.ResponseWriter, r *http.Request) {
 	query += " ORDER BY occurred_at DESC LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := dbFrom(r).QueryContext(r.Context(), query, args...)
+	rows, err := apiQuery(r.Context(), dbFrom(r), query, args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "query failed"})
 		return

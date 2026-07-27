@@ -161,7 +161,7 @@ func latestAuditHash(ctx context.Context, exec auditExec, orgID string) (string,
 }
 
 func backfillAuditHashChain(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx, `SELECT id, organisation_id, COALESCE(actor_user_id,''), actor_type, action, COALESCE(target_type,''), COALESCE(target_id,''), result, metadata, occurred_at, COALESCE(previous_hash,''), COALESCE(event_hash,'') FROM audit_events ORDER BY organisation_id, occurred_at, id`)
+	rows, err := metadataRuntime().QueryContext(ctx, db, `SELECT id, organisation_id, COALESCE(actor_user_id,''), actor_type, action, COALESCE(target_type,''), COALESCE(target_id,''), result, metadata, occurred_at, COALESCE(previous_hash,''), COALESCE(event_hash,'') FROM audit_events ORDER BY organisation_id, occurred_at, id`)
 	if err != nil {
 		return err
 	}
@@ -191,7 +191,7 @@ func backfillAuditHashChain(ctx context.Context, db *sql.DB) error {
 		if item.hash == "" {
 			item.input.PreviousHash = previousByOrg[item.input.OrganisationID]
 			item.hash = auditEventHash(item.input)
-			if _, err := db.ExecContext(ctx, "UPDATE audit_events SET previous_hash = ?, event_hash = ? WHERE id = ? AND organisation_id = ?", item.input.PreviousHash, item.hash, item.input.ID, item.input.OrganisationID); err != nil {
+			if _, err := metadataRuntime().ExecContext(ctx, db, "UPDATE audit_events SET previous_hash = ?, event_hash = ? WHERE id = ? AND organisation_id = ?", item.input.PreviousHash, item.hash, item.input.ID, item.input.OrganisationID); err != nil {
 				return err
 			}
 		}
@@ -201,7 +201,7 @@ func backfillAuditHashChain(ctx context.Context, db *sql.DB) error {
 }
 
 func verifyAuditHashChain(ctx context.Context, db *sql.DB, orgID string) (int, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, organisation_id, COALESCE(actor_user_id,''), actor_type, action, COALESCE(target_type,''), COALESCE(target_id,''), result, metadata, occurred_at, COALESCE(previous_hash,''), COALESCE(event_hash,'') FROM audit_events WHERE organisation_id = ? ORDER BY occurred_at, id`, orgID)
+	rows, err := metadataRuntime().QueryContext(ctx, db, `SELECT id, organisation_id, COALESCE(actor_user_id,''), actor_type, action, COALESCE(target_type,''), COALESCE(target_id,''), result, metadata, occurred_at, COALESCE(previous_hash,''), COALESCE(event_hash,'') FROM audit_events WHERE organisation_id = ? ORDER BY occurred_at, id`, orgID)
 	if err != nil {
 		return 0, err
 	}
