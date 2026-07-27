@@ -64,6 +64,8 @@ jobs:
       - name: Validate Linux deployment scripts
         run: |
           sh -n scripts/*.sh
+      - name: Exercise production acceptance gate
+        run: sh scripts/production-acceptance-test.sh
 
   self-contained-windows:
     runs-on: windows-latest
