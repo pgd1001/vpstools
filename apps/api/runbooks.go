@@ -98,7 +98,7 @@ func handleCreateRunbook(w http.ResponseWriter, r *http.Request) {
 	yamlBytes, _ := json.Marshal(rb)
 	defJSON, _ := json.Marshal(rb)
 
-	if _, err = tx.ExecContext(r.Context(),
+	if _, err = apiExec(r.Context(), tx,
 		`INSERT INTO runbooks (id, organisation_id, name, title, description, status, created_by_user_id)
 		VALUES (?,?,?,?,?,'draft',?)`,
 		rbID, actor.OrganisationID, rb.Metadata.Name, rb.Metadata.Title, rb.Metadata.Description, actor.UserID); err != nil {
@@ -115,7 +115,7 @@ func handleCreateRunbook(w http.ResponseWriter, r *http.Request) {
 		allowedRoles = req.AllowedRoles
 	}
 
-	if _, err = tx.ExecContext(r.Context(),
+	if _, err = apiExec(r.Context(), tx,
 		`INSERT INTO runbook_versions (id, organisation_id, runbook_id, version, status, risk_level, allowed_roles, definition_yaml, definition_json, command_preview, command_hash, target_constraints, parameter_schema, approval_rules, created_by_user_id)
 		VALUES (?,?,?,?,'draft',?,?,?,?,?,?,?,?,?,?)`,
 		rvID, actor.OrganisationID, rbID, rb.Metadata.Version, string(rb.Metadata.Risk),
@@ -125,7 +125,7 @@ func handleCreateRunbook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err = tx.ExecContext(r.Context(), "UPDATE runbooks SET current_version_id = ? WHERE id = ?", rvID, rbID); err != nil {
+	if _, err = apiExec(r.Context(), tx, "UPDATE runbooks SET current_version_id = ? WHERE id = ?", rvID, rbID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to activate runbook version"})
 		return
 	}
@@ -156,7 +156,7 @@ func handleListRunbooks(w http.ResponseWriter, r *http.Request) {
 	}
 	query += ` ORDER BY r.name ASC`
 
-	rows, err := db.QueryContext(r.Context(), query, args...)
+	rows, err := apiQuery(r.Context(), db, query, args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "query failed"})
 		return
@@ -205,7 +205,7 @@ func handleGetRunbook(w http.ResponseWriter, r *http.Request, name string) {
 		CreatedAt    string `json:"created_at"`
 	}
 
-	err := db.QueryRowContext(r.Context(),
+	err := apiQueryRow(r.Context(), db,
 		`SELECT r.id, r.name, r.title, COALESCE(r.description,''), r.status,
 		COALESCE(rv.version,1), COALESCE(rv.risk_level,'medium'), COALESCE(rv.command_preview,''),
 		COALESCE(rv.definition_json,'{}'), COALESCE(rv.allowed_roles,'["senior_engineer","admin","owner"]'), r.created_at
@@ -232,7 +232,7 @@ func handlePublishRunbook(w http.ResponseWriter, r *http.Request, name string) {
 	db := dbFrom(r)
 	var rbID, rvID string
 	var version int
-	err := db.QueryRowContext(r.Context(),
+	err := apiQueryRow(r.Context(), db,
 		`SELECT r.id, rv.id, rv.version FROM runbooks r
 		JOIN runbook_versions rv ON rv.id = r.current_version_id
 		WHERE (r.id = ? OR r.name = ?) AND r.organisation_id = ?
@@ -243,8 +243,14 @@ func handlePublishRunbook(w http.ResponseWriter, r *http.Request, name string) {
 		return
 	}
 
-	db.ExecContext(r.Context(), "UPDATE runbooks SET status = 'published' WHERE id = ?", rbID)
-	db.ExecContext(r.Context(), "UPDATE runbook_versions SET status = 'published', published_by_user_id = ?, published_at = datetime('now') WHERE id = ?", actor.UserID, rvID)
+	if _, err := apiExec(r.Context(), db, "UPDATE runbooks SET status = 'published' WHERE id = ?", rbID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to publish runbook"})
+		return
+	}
+	if _, err := apiExec(r.Context(), db, "UPDATE runbook_versions SET status = 'published', published_by_user_id = ?, published_at = "+apiCurrentTime()+" WHERE id = ?", actor.UserID, rvID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to publish runbook version"})
+		return
+	}
 
 	writeAuditEvent(r.Context(), db, actor.OrganisationID, actor.UserID, "runbook.published", "runbook", rbID, "success", nil)
 	writeJSON(w, 200, map[string]string{"status": "published"})
@@ -268,7 +274,7 @@ func handleUpdateRunbook(w http.ResponseWriter, r *http.Request, name string) {
 	db := dbFrom(r)
 	var rbID, currentName string
 	var currentVersion int
-	if err := db.QueryRowContext(r.Context(), `SELECT r.id,r.name,COALESCE(rv.version,0) FROM runbooks r LEFT JOIN runbook_versions rv ON rv.id=r.current_version_id WHERE (r.id=? OR r.name=?) AND r.organisation_id=? AND r.status != 'archived'`, name, name, actor.OrganisationID).Scan(&rbID, &currentName, &currentVersion); err != nil {
+	if err := apiQueryRow(r.Context(), db, `SELECT r.id,r.name,COALESCE(rv.version,0) FROM runbooks r LEFT JOIN runbook_versions rv ON rv.id=r.current_version_id WHERE (r.id=? OR r.name=?) AND r.organisation_id=? AND r.status != 'archived'`, name, name, actor.OrganisationID).Scan(&rbID, &currentName, &currentVersion); err != nil {
 		writeJSON(w, 404, map[string]string{"error": "runbook not found"})
 		return
 	}
@@ -326,11 +332,11 @@ func handleUpdateRunbook(w http.ResponseWriter, r *http.Request, name string) {
 	if req.Description == "" {
 		req.Description = rb.Metadata.Description
 	}
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO runbook_versions (id,organisation_id,runbook_id,version,status,risk_level,allowed_roles,definition_yaml,definition_json,command_preview,command_hash,target_constraints,parameter_schema,approval_rules,created_by_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, rvID, actor.OrganisationID, rbID, rb.Metadata.Version, "draft", string(rb.Metadata.Risk), allowed, string(def), string(def), rb.Spec.Execution.Command, hashCmd(rb.Spec.Execution.Command), jsonString(rb.Spec.Targets), "{}", jsonString(rb.Spec.Approval), actor.UserID); err != nil {
+	if _, err = apiExec(r.Context(), tx, `INSERT INTO runbook_versions (id,organisation_id,runbook_id,version,status,risk_level,allowed_roles,definition_yaml,definition_json,command_preview,command_hash,target_constraints,parameter_schema,approval_rules,created_by_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, rvID, actor.OrganisationID, rbID, rb.Metadata.Version, "draft", string(rb.Metadata.Risk), allowed, string(def), string(def), rb.Spec.Execution.Command, hashCmd(rb.Spec.Execution.Command), jsonString(rb.Spec.Targets), "{}", jsonString(rb.Spec.Approval), actor.UserID); err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to create runbook version"})
 		return
 	}
-	if _, err = tx.ExecContext(r.Context(), "UPDATE runbooks SET title=?,description=?,status='draft',current_version_id=? WHERE id=? AND organisation_id=?", req.Title, req.Description, rvID, rbID, actor.OrganisationID); err != nil {
+	if _, err = apiExec(r.Context(), tx, "UPDATE runbooks SET title=?,description=?,status='draft',current_version_id=? WHERE id=? AND organisation_id=?", req.Title, req.Description, rvID, rbID, actor.OrganisationID); err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to update runbook"})
 		return
 	}
@@ -400,7 +406,7 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 	var rbID, rvID, command, definitionJSON string
 	var risk, allowedRoles string
 	var targetJSON string
-	err := db.QueryRowContext(r.Context(),
+	err := apiQueryRow(r.Context(), db,
 		`SELECT r.id, rv.id, rv.command_preview, rv.risk_level, rv.target_constraints, COALESCE(rv.allowed_roles,'["senior_engineer","admin","owner"]'), rv.definition_json
 		FROM runbooks r
 		JOIN runbook_versions rv ON rv.id = r.current_version_id
@@ -508,7 +514,7 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 		}
 		defer tx.Rollback()
 		expiresAt := time.Now().UTC().Add(time.Duration(approvalExpirySeconds()) * time.Second).Format("2006-01-02 15:04:05")
-		if _, txErr = tx.ExecContext(r.Context(),
+		if _, txErr = apiExec(r.Context(), tx,
 			`INSERT INTO approval_requests (id, organisation_id, requester_user_id, action_type, status, risk_level, reason, target_type, target_id, target_snapshot, request_payload, expires_at)
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 			approvalID, actor.OrganisationID, actor.UserID, "runbook", "pending", risk, req.Reason, "server", req.Target, jsonString(targetSnapshot), execPayload, expiresAt); txErr != nil {
@@ -524,7 +530,7 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 			"message": "This runbook requires approval. Use 'vps approvals approve " + approvalID + "' to proceed.",
 		})
 		if idempotencyKey != "" {
-			if _, txErr = tx.ExecContext(r.Context(),
+			if _, txErr = apiExec(r.Context(), tx,
 				`INSERT INTO runbook_idempotency (organisation_id, user_id, idempotency_key, payload_hash, resource_type, resource_id, response_status, response_body) VALUES (?,?,?,?,?,?,?,?)`,
 				actor.OrganisationID, actor.UserID, idempotencyKey, payloadHash, "approval", approvalID, http.StatusAccepted, responseBody); txErr != nil {
 				_ = tx.Rollback()
@@ -562,7 +568,7 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 		return
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(r.Context(),
+	if _, err = apiExec(r.Context(), tx,
 		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, execution_type, status, environment, risk_level, reason, command, command_preview, command_hash, timeout_seconds)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		execID, actor.OrganisationID, actor.UserID, actor.Role, "runbook", "queued", env, risk, req.Reason, command, redact.Stdout(command), hashCmd(command), timeout); err != nil {
@@ -571,7 +577,7 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 	}
 
 	for i, srvID := range targetIDs {
-		if _, err = tx.ExecContext(r.Context(),
+		if _, err = apiExec(r.Context(), tx,
 			`INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot)
 			VALUES (?,?,?,?,'pending',?)`,
 			"ext_"+shortID(), actor.OrganisationID, execID, srvID, jsonString(targetSnapshot[i])); err != nil {
@@ -594,7 +600,7 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 		"target_count": len(targetIDs),
 	})
 	if idempotencyKey != "" {
-		if _, err = tx.ExecContext(r.Context(),
+		if _, err = apiExec(r.Context(), tx,
 			`INSERT INTO runbook_idempotency (organisation_id, user_id, idempotency_key, payload_hash, resource_type, resource_id, response_status, response_body) VALUES (?,?,?,?,?,?,?,?)`,
 			actor.OrganisationID, actor.UserID, idempotencyKey, payloadHash, "execution", execID, http.StatusCreated, responseBody); err != nil {
 			_ = tx.Rollback()
@@ -615,7 +621,7 @@ func handleRunRunbook(w http.ResponseWriter, r *http.Request, name string) {
 func replayRunbookIdempotency(ctx context.Context, db *sql.DB, orgID, userID, key, payloadHash string, w http.ResponseWriter) (bool, error) {
 	var storedHash, responseBody string
 	var responseStatus int
-	err := db.QueryRowContext(ctx,
+	err := apiQueryRow(ctx, db,
 		`SELECT payload_hash, response_status, response_body FROM runbook_idempotency WHERE organisation_id = ? AND user_id = ? AND idempotency_key = ?`,
 		orgID, userID, key).Scan(&storedHash, &responseStatus, &responseBody)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -656,7 +662,7 @@ func handleListApprovals(w http.ResponseWriter, r *http.Request) {
 	}
 	query += " ORDER BY a.created_at DESC LIMIT 50"
 
-	rows, err := db.QueryContext(r.Context(), query, args...)
+	rows, err := apiQuery(r.Context(), db, query, args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "query failed"})
 		return
@@ -695,7 +701,7 @@ func handleGetApproval(w http.ResponseWriter, r *http.Request, approvalID string
 	db := dbFrom(r)
 	var approval map[string]any
 	var id, requesterID, requesterName, actionType, status, risk, reason, targetType, targetID, targetSnapshot, payload, expiresAt, createdAt, decidedAt, decisionNote string
-	err := db.QueryRowContext(r.Context(), `SELECT a.id, a.requester_user_id, COALESCE(u.display_name,a.requester_user_id), a.action_type, a.status, a.risk_level, a.reason, a.target_type, COALESCE(a.target_id,''), a.target_snapshot, a.request_payload, a.expires_at, a.created_at, COALESCE(a.decided_at,''), COALESCE(a.decision_note,'')
+	err := apiQueryRow(r.Context(), db, `SELECT a.id, a.requester_user_id, COALESCE(u.display_name,a.requester_user_id), a.action_type, a.status, a.risk_level, a.reason, a.target_type, COALESCE(a.target_id,''), a.target_snapshot, a.request_payload, a.expires_at, a.created_at, COALESCE(a.decided_at,''), COALESCE(a.decision_note,'')
 		FROM approval_requests a LEFT JOIN users u ON u.id = a.requester_user_id
 		WHERE a.id = ? AND a.organisation_id = ?`, approvalID, actor.OrganisationID).Scan(&id, &requesterID, &requesterName, &actionType, &status, &risk, &reason, &targetType, &targetID, &targetSnapshot, &payload, &expiresAt, &createdAt, &decidedAt, &decisionNote)
 	if err != nil {
@@ -742,7 +748,7 @@ func handleApprove(w http.ResponseWriter, r *http.Request, approvalID string) {
 
 	var payload string
 	var requesterID, requesterRole, riskLevel, reason, expiresAt string
-	err := db.QueryRowContext(r.Context(),
+	err := apiQueryRow(r.Context(), db,
 		`SELECT a.requester_user_id, m.role, a.risk_level, a.reason, a.request_payload, a.expires_at
 		 FROM approval_requests a
 		 JOIN memberships m ON m.user_id = a.requester_user_id AND m.organisation_id = a.organisation_id AND m.status = 'active'
@@ -756,28 +762,35 @@ func handleApprove(w http.ResponseWriter, r *http.Request, approvalID string) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "requesters cannot approve their own requests"})
 		return
 	}
-	var expired int
-	db.QueryRowContext(r.Context(), "SELECT CASE WHEN expires_at <= datetime('now') THEN 1 ELSE 0 END FROM approval_requests WHERE id = ?", approvalID).Scan(&expired)
-	if expired == 1 || expiresAt == "" {
+	if expiresAt == "" {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "approval has expired"})
 		return
 	}
-
 	tx, err := db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start approval transaction"})
 		return
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(r.Context(),
-		"UPDATE approval_requests SET status = 'approved', approver_user_id = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ? AND organisation_id = ? AND status = 'pending'",
+	now := apiCurrentTime()
+	result, err := apiExec(r.Context(), tx,
+		"UPDATE approval_requests SET status = 'approved', approver_user_id = ?, decided_at = "+now+", decision_note = ? WHERE id = ? AND organisation_id = ? AND status = 'pending' AND expires_at > "+now,
 		actor.UserID, sqlNullString(note), approvalID, actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to approve"})
 		return
 	}
-	n, _ := result.RowsAffected()
+	n, rowsErr := result.RowsAffected()
+	if rowsErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to inspect approval update"})
+		return
+	}
 	if n == 0 {
+		var expired int
+		if err := apiQueryRow(r.Context(), db, "SELECT CASE WHEN status = 'pending' AND expires_at <= "+apiCurrentTime()+" THEN 1 ELSE 0 END FROM approval_requests WHERE id = ? AND organisation_id = ?", approvalID, actor.OrganisationID).Scan(&expired); err == nil && expired == 1 {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "approval has expired"})
+			return
+		}
 		writeJSON(w, 404, map[string]string{"error": "approval not found or already decided"})
 		return
 	}
@@ -827,7 +840,7 @@ func createExecutionFromApprovalTx(ctx context.Context, tx *sql.Tx, orgID, reque
 	}
 
 	execID := "exe_" + shortID()
-	if _, err := tx.ExecContext(ctx,
+	if _, err := apiExec(ctx, tx,
 		`INSERT INTO executions (id, organisation_id, actor_user_id, actor_role_at_time, delegated_by_user_id, approval_id, execution_type, status, environment, risk_level, reason, command, command_preview, command_hash, timeout_seconds)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		execID, orgID, requesterID, requesterRole, approverID, approvalID, "runbook", "queued", env, risk, reason, intent.Command, redact.Stdout(intent.Command), hashCmd(intent.Command), intent.Timeout); err != nil {
@@ -839,7 +852,7 @@ func createExecutionFromApprovalTx(ctx context.Context, tx *sql.Tx, orgID, reque
 		if i < len(intent.TargetSnapshot) {
 			serverSnapshot = jsonString(intent.TargetSnapshot[i])
 		}
-		if _, err := tx.ExecContext(ctx,
+		if _, err := apiExec(ctx, tx,
 			`INSERT INTO execution_targets (id, organisation_id, execution_id, server_id, status, server_snapshot)
 			VALUES (?,?,?,?,'pending',?)`,
 			"ext_"+shortID(), orgID, execID, srvID, serverSnapshot); err != nil {
@@ -878,7 +891,7 @@ func handleDeny(w http.ResponseWriter, r *http.Request, approvalID string) {
 
 	db := dbFrom(r)
 	var expiresAt string
-	if err := db.QueryRowContext(r.Context(), "SELECT expires_at FROM approval_requests WHERE id = ? AND organisation_id = ? AND status = 'pending'", approvalID, actor.OrganisationID).Scan(&expiresAt); err != nil {
+	if err := apiQueryRow(r.Context(), db, "SELECT expires_at FROM approval_requests WHERE id = ? AND organisation_id = ? AND status = 'pending'", approvalID, actor.OrganisationID).Scan(&expiresAt); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "approval not found or already decided"})
 		return
 	}
@@ -886,20 +899,25 @@ func handleDeny(w http.ResponseWriter, r *http.Request, approvalID string) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "approval has expired"})
 		return
 	}
-	var expired int
-	if err := db.QueryRowContext(r.Context(), "SELECT CASE WHEN expires_at <= datetime('now') THEN 1 ELSE 0 END FROM approval_requests WHERE id = ? AND organisation_id = ?", approvalID, actor.OrganisationID).Scan(&expired); err == nil && expired == 1 {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "approval has expired"})
-		return
-	}
-	result, err := db.ExecContext(r.Context(),
-		"UPDATE approval_requests SET status = 'denied', approver_user_id = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ? AND organisation_id = ? AND status = 'pending'",
+	now := apiCurrentTime()
+	result, err := apiExec(r.Context(), db,
+		"UPDATE approval_requests SET status = 'denied', approver_user_id = ?, decided_at = "+now+", decision_note = ? WHERE id = ? AND organisation_id = ? AND status = 'pending' AND expires_at > "+now,
 		actor.UserID, sqlNullString(note), approvalID, actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to deny"})
 		return
 	}
-	n, _ := result.RowsAffected()
+	n, rowsErr := result.RowsAffected()
+	if rowsErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to inspect denial update"})
+		return
+	}
 	if n == 0 {
+		var expired int
+		if err := apiQueryRow(r.Context(), db, "SELECT CASE WHEN status = 'pending' AND expires_at <= "+apiCurrentTime()+" THEN 1 ELSE 0 END FROM approval_requests WHERE id = ? AND organisation_id = ?", approvalID, actor.OrganisationID).Scan(&expired); err == nil && expired == 1 {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "approval has expired"})
+			return
+		}
 		writeJSON(w, 404, map[string]string{"error": "approval not found"})
 		return
 	}
@@ -959,7 +977,7 @@ func validAllowedRoles(raw string) bool {
 func runbookTargetsAllowed(ctx context.Context, db *sql.DB, orgID string, rb runbooks.Runbook, targetIDs []string) bool {
 	for _, serverID := range targetIDs {
 		var name string
-		if err := db.QueryRowContext(ctx, "SELECT name FROM servers WHERE id = ? AND organisation_id = ?", serverID, orgID).Scan(&name); err != nil {
+		if err := apiQueryRow(ctx, db, "SELECT name FROM servers WHERE id = ? AND organisation_id = ?", serverID, orgID).Scan(&name); err != nil {
 			return false
 		}
 		if len(rb.Spec.Targets.AllowedServers) > 0 {
@@ -975,7 +993,7 @@ func runbookTargetsAllowed(ctx context.Context, db *sql.DB, orgID string, rb run
 		}
 		for key, value := range rb.Spec.Targets.AllowedTags {
 			var found int
-			if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM server_tags WHERE organisation_id = ? AND server_id = ? AND key = ? AND value = ?", orgID, serverID, key, value).Scan(&found); err != nil || found == 0 {
+			if err := apiQueryRow(ctx, db, "SELECT COUNT(*) FROM server_tags WHERE organisation_id = ? AND server_id = ? AND key = ? AND value = ?", orgID, serverID, key, value).Scan(&found); err != nil || found == 0 {
 				return false
 			}
 		}
