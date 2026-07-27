@@ -1,6 +1,6 @@
 # Moving from self-contained to extended deployment
 
-The self-contained tier is the default because it is easy to install, back up, and understand. Larger teams can move to PostgreSQL, S3-compatible storage, and JetStream without changing the CLI, web console, runbooks, or AI tools.
+The self-contained tier is the default because it is easy to install, back up, and understand. The application reserves a path for larger teams to move to PostgreSQL, S3-compatible storage, and JetStream without changing the CLI, web console, runbooks, or AI tools. The external runtime adapters and migration commands are not shipped in the current release.
 
 ## Target configuration
 

@@ -36,6 +36,8 @@
 
 ## Infrastructure
 
+- **The extended tier is not runtime-enabled yet.** PostgreSQL, S3-compatible storage, JetStream, external scheduling, and NATS event settings are validated as configuration targets, but the current API intentionally refuses to start with them selected. The live implementation remains the self-contained SQLite, local artefact, database polling, and embedded scheduler tier. Do not treat a configuration file containing external URLs as evidence that those adapters are supported.
+
 - **SQLite is the default deployment database.** PostgreSQL is an optional extension for higher concurrency and horizontal scaling. SQLite remains single-writer and does not provide HA.
 - **Backup is local-first.** `make backup` creates a SQLite backup, encrypted artefact copy, and checksum manifest. `backup-verify` and `backup-restore` support local recovery, and the systemd deployment can run a daily retained backup with a journal/webhook failure hook. A separately mounted replication destination is supported, but signed manifests, object-store replication, and measured production RPO/RTO remain future work.
 - **Single binary API.** No horizontal scaling. The API is a single process.

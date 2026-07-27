@@ -144,7 +144,7 @@ spec:
 
 The self-contained tier is the supported default and requires no external services. It uses SQLite WAL mode, encrypted local artefacts, database polling, and the embedded scheduler.
 
-The configuration loader recognises PostgreSQL, S3-compatible storage, JetStream, external scheduling, and NATS event settings. It validates required connection variables and reports the selected tier at API startup. The current request handlers and artefact path implement the self-contained tier. External adapters, migration tooling, and horizontally scaled workers remain tracked limitations rather than silently falling back to local services.
+The configuration loader recognises PostgreSQL, S3-compatible storage, JetStream, external scheduling, and NATS event settings. It validates required connection variables and reports the selected tier at API startup. The current request handlers and artefact path implement the self-contained tier. The external values are configuration targets only in this release. Startup refuses them after validation, and external adapters, migration tooling, and horizontally scaled workers remain tracked limitations rather than silently falling back to local services.
 
 ### Automation and AI boundaries
 

@@ -2,7 +2,7 @@
 
 VPS Tools is a controlled operations platform for infrastructure teams. Senior engineers define and publish runbooks. Junior engineers complete permitted tasks through guided forms, the CLI, or the TUI. Approvals, execution state, audit events, automation, and evidence stay connected to the same runbook version.
 
-It gives teams a practical operating model for routine infrastructure work. The default installation is a single self-contained service with SQLite, encrypted local artefacts, a database-backed queue, and an embedded scheduler. Larger deployments can move to PostgreSQL, S3-compatible storage, and NATS without changing the user-facing workflow.
+It gives teams a practical operating model for routine infrastructure work. The default installation is a single self-contained service with SQLite, encrypted local artefacts, a database-backed queue, and an embedded scheduler. The configuration model reserves a migration path to PostgreSQL, S3-compatible storage, and NATS, but those external adapters are not enabled in this release.
 
 ![VPS Tools CLI workflow preview](docs/assets/cli-workflow-preview.png)
 
@@ -77,7 +77,7 @@ EVENT_BUS=disabled
 
 SQLite runs in WAL mode with a single-writer-safe connection limit. Artefacts are encrypted locally, written atomically, and referenced by stable IDs. Use `make backup` to include database metadata, artefact files, and the manifest.
 
-Larger deployments can select the extended configuration shape below. Incomplete external settings fail at startup rather than silently falling back.
+The configuration shape below documents the planned extended tier. Incomplete external settings fail at startup rather than silently falling back, and complete external settings still fail closed until the corresponding runtime adapters and migration tests are shipped.
 
 ```text
 DATABASE_DRIVER=postgres
