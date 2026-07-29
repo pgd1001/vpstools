@@ -142,26 +142,25 @@ jobs:
           ) > "$validated_manifest"
           test -s "$validated_manifest"
 
-      - name: Publish draft release
+      - name: Publish draft release from validated output
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           # GoReleaser OSS has no publish-only continuation for a prepared
-          # release. It therefore rebuilds here. Keep the release as a draft,
-          # compare the complete output with the validated build, and fail
-          # before attestation if the rebuild is not byte-for-byte identical.
-          goreleaser release --clean
-
-          published_manifest="$RUNNER_TEMP/published-release-manifest.txt"
-          (
-            cd dist
-            find . -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum
-          ) > "$published_manifest"
-          if ! cmp -s "$RUNNER_TEMP/validated-release-manifest.txt" "$published_manifest"; then
-            echo "published GoReleaser output differs from the validated release candidate" >&2
-            diff -u "$RUNNER_TEMP/validated-release-manifest.txt" "$published_manifest" >&2 || true
-            exit 1
-          fi
+          # release. Publish the exact dist/ directory that passed validation
+          # instead of rebuilding it and comparing two non-identical metadata
+          # sets. This keeps the attested checksums tied to the tested output.
+          release_assets=()
+          while IFS= read -r -d '' asset; do
+            release_assets+=("$asset")
+          done < <(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sbom.json' -o -name 'checksums.txt' \) -print0 | sort -z)
+          test "${#release_assets[@]}" -gt 0
+          gh release create "$RELEASE_TAG" \
+            --draft \
+            --title "VPS Tools $RELEASE_TAG" \
+            --generate-notes \
+            "${release_assets[@]}"
 
       - name: Verify published release output
         run: |
