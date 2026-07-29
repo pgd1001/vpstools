@@ -14,7 +14,7 @@ var (
 	apiClient *client.Client
 	apiURL    string
 	cfgFile   string
-	version   = "dev"
+	version   = "0.1.0-beta.1"
 	commit    = "unknown"
 	date      = "unknown"
 )

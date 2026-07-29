@@ -26,7 +26,7 @@ import (
 	"github.com/pgd1001/svrtools/packages/redact"
 )
 
-var version = "dev"
+var version = "0.1.0-beta.1"
 
 type tag struct {
 	Key   string `json:"key"`

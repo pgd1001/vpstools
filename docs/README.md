@@ -2,6 +2,8 @@
 
 This is the documentation hub for VPS Tools, a controlled operations platform for infrastructure teams.
 
+The current repository baseline is `0.1.0-beta.1`. See the [changelog](../CHANGELOG.md) for the history behind the beta and [versioning and release tracking](versioning.md) for the process used to update it.
+
 ## Start here
 
 | Need | Read |
@@ -23,6 +25,7 @@ This is the documentation hub for VPS Tools, a controlled operations platform fo
 | Deploy on one Linux host | [Systemd deployment](../deploy/README.md) |
 | Build or extend the application | [Developer guide](developer-guide/README.md) |
 | Understand current gaps | [Known limitations](KNOWN_LIMITATIONS.md) |
+| Check the release baseline | [Versioning and release tracking](versioning.md) |
 
 ## Product map
 

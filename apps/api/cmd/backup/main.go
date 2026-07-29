@@ -27,7 +27,7 @@ const manifestVersion = 1
 
 const encryptedArtifactKeyPath = "artifacts/.key.enc"
 
-var version = "dev"
+var version = "0.1.0-beta.1"
 
 type manifest struct {
 	Version       int    `json:"version"`

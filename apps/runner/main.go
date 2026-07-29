@@ -23,7 +23,7 @@ import (
 	"github.com/pgd1001/svrtools/packages/sshx"
 )
 
-var version = "dev"
+var version = "0.1.0-beta.1"
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

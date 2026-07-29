@@ -1,5 +1,7 @@
 # VPS Tools
 
+**Current version: `0.1.0-beta.1`** · [Changelog](CHANGELOG.md) · [Versioning and release tracking](docs/versioning.md)
+
 VPS Tools is a controlled operations platform for infrastructure teams. Senior engineers define and publish runbooks. Junior engineers complete permitted tasks through guided forms, the CLI, or the TUI. Approvals, execution state, audit events, automation, and evidence stay connected to the same runbook version.
 
 It gives teams a practical operating model for routine infrastructure work. The default installation is a single self-contained service with SQLite, encrypted local artefacts, a database-backed queue, and an embedded scheduler. S3-compatible artefact storage is also available as an explicit extension. PostgreSQL metadata and the database-authoritative JetStream notification bridge are available for larger deployments. External scheduling and NATS event publishing remain separate enterprise milestones.
@@ -143,6 +145,12 @@ The current implementation includes the CLI to API to runner vertical slice, inv
 
 The extended PostgreSQL and JetStream adapters, verified S3 migration path, combined PostgreSQL and S3 recovery helpers, and bounded read-only AI analysis are available as explicit features. External scheduling, fully independent queue execution, and unattended high-risk approval remain outside the current release boundary. See [known limitations](docs/KNOWN_LIMITATIONS.md) and the [product improvement plan](docs/PRODUCT_IMPROVEMENT_PLAN.md) for the current boundary.
 
+## Supported release baseline
+
+`0.1.0-beta.1` is the first named beta baseline. The supported default is the self-contained tier, which needs Go and uses SQLite, encrypted local artefacts, database-backed dispatch, and the embedded scheduler. PostgreSQL metadata, S3-compatible artefacts, and the database-authoritative JetStream notification bridge are available as controlled extensions. Review the [known limitations](docs/KNOWN_LIMITATIONS.md) and [production release checklist](docs/production-release.md) before using an extended deployment for consequential work.
+
+The version is available from `vps version` and the API health response. Product versions are separate from the integer revision in each runbook's `metadata.version` field. See [versioning and release tracking](docs/versioning.md) for the update and tagging process.
+
 ## Development checks
 
 ```bash
@@ -157,6 +165,8 @@ The repository also contains a Remotion project for the CLI motion samples. See 
 ## Documentation
 
 - [Documentation hub](docs/README.md)
+- [Changelog](CHANGELOG.md)
+- [Versioning and release tracking](docs/versioning.md)
 - [Getting started](docs/getting-started.md)
 - [End-to-end workflow](docs/workflow.md)
 - [CLI reference](docs/cli-reference.md)
