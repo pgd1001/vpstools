@@ -5,6 +5,8 @@
     "studio": "remotion studio src/index.tsx",
     "render": "remotion render src/index.tsx CliWorkflow out/vps-tools-cli-workflow.mp4",
     "render-install": "remotion render src/index.tsx SelfContainedInstall out/vps-tools-self-contained-install.mp4",
+    "render-claude": "remotion render src/index.tsx ClaudeCliWorkflow out/vps-tools-claude-cli.mp4",
+    "render-codex": "remotion render src/index.tsx CodexWorkflow out/vps-tools-chatgpt-codex.mp4",
     "check": "tsc --noEmit"
   },
   "dependencies": {
