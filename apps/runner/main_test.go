@@ -86,8 +86,12 @@ func TestRegisterRunnerRejectsNonSuccessResponses(t *testing.T) {
 	defer server.Close()
 
 	logger := slog.New(slog.NewTextHandler(&strings.Builder{}, nil))
-	if got := registerRunner(context.Background(), server.Client(), server.URL, "test", "host", "token", logger); got != "" {
+	got, boundToken := registerRunner(context.Background(), server.Client(), server.URL, "test", "host", "token", logger)
+	if got != "" {
 		t.Fatalf("expected rejected registration to return no runner id, got %q", got)
+	}
+	if boundToken != "" {
+		t.Fatalf("expected rejected registration to return no credential, got %q", boundToken)
 	}
 }
 
@@ -141,13 +145,19 @@ func TestRegisterRunnerReturnsIdForSuccess(t *testing.T) {
 			t.Fatalf("runner token header missing")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"runner_id":"run_test","status":"active"}`))
+		_, _ = w.Write([]byte(`{"runner_id":"run_test","status":"active","runner_token":"bound_test_token"}`))
 	}))
 	defer server.Close()
 
 	logger := slog.New(slog.NewTextHandler(&strings.Builder{}, nil))
-	if got := registerRunner(context.Background(), server.Client(), server.URL, "test", "host", "token", logger); got != "run_test" {
+	got, boundToken := registerRunner(context.Background(), server.Client(), server.URL, "test", "host", "token", logger)
+	if got != "run_test" {
 		t.Fatalf("expected runner id, got %q", got)
+	}
+	// The runner must adopt the identity-bound credential registration issues,
+	// because the job endpoints reject the bootstrap credential.
+	if boundToken != "bound_test_token" {
+		t.Fatalf("expected the bound credential, got %q", boundToken)
 	}
 }
 

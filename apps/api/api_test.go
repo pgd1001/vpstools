@@ -12,17 +12,40 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pgd1001/svrtools/packages/jobsign"
 	"github.com/pgd1001/svrtools/packages/redact"
 	_ "modernc.org/sqlite"
 )
 
+// testJobSigningKey is the signing key used by the API test harness. Job
+// dispatch is signed in every configuration, so tests need a real signer.
+const testJobSigningKey = "api-test-job-signing-key-at-least-32ch"
+
+func mustTestSigner(t *testing.T) *jobsign.Signer {
+	t.Helper()
+	signer, err := jobsign.NewSigner(testJobSigningKey)
+	if err != nil {
+		t.Fatalf("test job signer: %v", err)
+	}
+	return signer
+}
+
 func testAPI(t *testing.T) (*sql.DB, *http.ServeMux, func()) {
 	t.Helper()
 	t.Setenv("VPS_DEV_AUTH", "true")
+	// Dev auth only applies in an explicitly non-production environment.
+	t.Setenv("VPS_ENV", "test")
+	t.Setenv("APP_ENV", "")
+	t.Setenv("ENVIRONMENT", "")
+	apiJobSigner = mustTestSigner(t)
 	db, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
 		t.Fatalf("db open: %v", err)
 	}
+	// Unauthenticated routes (runner registration, heartbeat) resolve their
+	// database through the package global rather than request context.
+	apiDB = db
+	t.Cleanup(func() { apiDB = nil })
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	ctx := context.Background()
@@ -34,7 +57,10 @@ func testAPI(t *testing.T) (*sql.DB, *http.ServeMux, func()) {
 		db.Close()
 		t.Fatalf("seed: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO runner_credentials (id, organisation_id, token_hash, expires_at) VALUES ('rct_test','org_demo',?,datetime('now','+1 hour'))`, hashToken("test-runner-token")); err != nil {
+	// Bind the test runner credential to rnr_local. Job endpoints require an
+	// identity-bound credential, matching what registration issues in
+	// production.
+	if _, err := db.Exec(`INSERT INTO runner_credentials (id, organisation_id, runner_id, token_hash, expires_at) VALUES ('rct_test','org_demo','rnr_local',?,datetime('now','+1 hour'))`, hashToken("test-runner-token")); err != nil {
 		db.Close()
 		t.Fatalf("runner credential: %v", err)
 	}
@@ -322,9 +348,12 @@ func doRequest(t *testing.T, mux *http.ServeMux, method, path, body, user string
 	} else {
 		req = httptest.NewRequest(method, path, nil)
 	}
-	if user != "" {
-		req.Header.Set("X-VPS-User", user)
+	// The API never infers an identity, so the test helper supplies the
+	// default actor explicitly rather than relying on server-side behaviour.
+	if user == "" {
+		user = "user_senior"
 	}
+	req.Header.Set("X-VPS-User", user)
 	if strings.HasPrefix(path, "/api/v1/jobs/") {
 		req.Header.Set("X-VPS-Runner-Token", "test-runner-token")
 	}

@@ -23,6 +23,7 @@ import (
 	"github.com/pgd1001/svrtools/packages/authz"
 	"github.com/pgd1001/svrtools/packages/config"
 	"github.com/pgd1001/svrtools/packages/dispatch"
+	"github.com/pgd1001/svrtools/packages/jobsign"
 	"github.com/pgd1001/svrtools/packages/redact"
 )
 
@@ -38,6 +39,11 @@ var apiDB *sql.DB
 var apiArtifacts artifacts.Store
 var apiBackends config.BackendConfig
 var apiDispatcher dispatch.Publisher
+
+// apiJobSigner authenticates every job handed to a runner. The runner refuses
+// jobs it cannot verify, so this is what keeps the control plane the only
+// component that can decide what runs on a server.
+var apiJobSigner *jobsign.Signer
 
 type handlerFunc func(w http.ResponseWriter, r *http.Request)
 
@@ -57,6 +63,12 @@ func main() {
 		logger.Error("backend configuration invalid", "error", err)
 		os.Exit(1)
 	}
+	signer, err := jobsign.NewSigner(apiBackends.JobSigningKey)
+	if err != nil {
+		logger.Error("job signing key invalid", "error", err)
+		os.Exit(1)
+	}
+	apiJobSigner = signer
 	if apiBackends.Scheduler != "embedded" || apiBackends.EventBus != "disabled" {
 		logger.Error("an unsupported scheduler or event backend was selected", "artifact_store", apiBackends.ArtifactStore, "job_dispatch", apiBackends.JobDispatch, "scheduler", apiBackends.Scheduler, "event_bus", apiBackends.EventBus)
 		os.Exit(1)
@@ -578,15 +590,16 @@ func withAuth(db *sql.DB, next http.HandlerFunc) http.HandlerFunc {
 			next(w, r.WithContext(ctx))
 			return
 		}
-		if !devAuthEnabled() || productionModeEnabled() {
+		if !devAuthEnabled() {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 			return
 		}
 		userID := r.Header.Get("X-VPS-User")
-		if userID == "" {
-			userID = "user_senior"
-		}
-		if userID == "" {
+		// Never infer an identity. A request with no user header is
+		// unauthenticated, even in development; defaulting to a senior
+		// engineer would mean the deny-by-default rule has an exception that
+		// grants the most privileged role.
+		if strings.TrimSpace(userID) == "" {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 			return
 		}
@@ -608,18 +621,21 @@ func withAuth(db *sql.DB, next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// devAuthEnabled reports whether the header-based development identity is
+// available. It requires both an explicit opt-in and an explicitly
+// non-production environment, so neither a leaked flag nor a forgotten
+// environment variable is sufficient on its own.
 func devAuthEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("VPS_DEV_AUTH")), "true")
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("VPS_DEV_AUTH")), "true") {
+		return false
+	}
+	return !productionModeEnabled()
 }
 
+// productionModeEnabled treats every environment that is not explicitly
+// non-production as production. See config.ProductionMode for the reasoning.
 func productionModeEnabled() bool {
-	for _, key := range []string{"VPS_ENV", "APP_ENV", "ENVIRONMENT"} {
-		value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-		if value == "production" || value == "prod" {
-			return true
-		}
-	}
-	return false
+	return config.ProductionMode()
 }
 
 func secureStringEqual(got, want string) bool {
@@ -688,9 +704,9 @@ func authenticateRunnerRegistration(db *sql.DB, r *http.Request) (string, error)
 
 func authenticateRunnerCredential(db *sql.DB, r *http.Request) (string, string, error) {
 	token := runnerToken(r)
-	if token == "" && devAuthEnabled() && !productionModeEnabled() {
-		return "org_demo", "", nil
-	}
+	// There is no tokenless path. A runner credential is the only thing that
+	// establishes which organisation's servers a runner may touch, so an
+	// anonymous request cannot be resolved to a tenant under any configuration.
 	if token == "" {
 		return "", "", fmt.Errorf("runner registration credential required")
 	}
@@ -715,16 +731,26 @@ func authenticateRunnerCredential(db *sql.DB, r *http.Request) (string, string, 
 	return orgID, runnerID, nil
 }
 
-func authenticateRunner(db *sql.DB, r *http.Request) (string, error) {
-	return authenticateRunnerForID(db, r, r.URL.Query().Get("runner_id"))
-}
-
-func authenticateRunnerForID(db *sql.DB, r *http.Request, requestedRunnerID string) (string, error) {
+// authenticateBoundRunner authorises a request that acts as a specific runner:
+// claiming work, renewing a lease, submitting a result, or heartbeating.
+//
+// These endpoints require a credential bound to that runner. An organisation
+// wide registration credential is only good for the initial registration
+// handshake; if it were accepted here, any holder could claim work scoped to
+// any other runner in the organisation and runner_scopes would enforce
+// nothing.
+func authenticateBoundRunner(db *sql.DB, r *http.Request, requestedRunnerID string) (string, error) {
 	orgID, credentialRunnerID, err := authenticateRunnerCredential(db, r)
 	if err != nil {
 		return "", err
 	}
-	if credentialRunnerID != "" && requestedRunnerID != "" && credentialRunnerID != requestedRunnerID {
+	if credentialRunnerID == "" {
+		return "", fmt.Errorf("this endpoint requires a runner-bound credential; register the runner first")
+	}
+	if requestedRunnerID == "" {
+		return "", fmt.Errorf("runner_id is required")
+	}
+	if credentialRunnerID != requestedRunnerID {
 		return "", fmt.Errorf("runner credential is bound to a different runner")
 	}
 	return orgID, nil
@@ -1375,16 +1401,26 @@ func handleRegisterRunner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Registration is the handshake that turns an organisation-wide bootstrap
+	// credential into an identity-bound one. Everything the runner does after
+	// this point (claiming work, renewing leases, submitting results) requires
+	// the bound credential, so one runner cannot act as another.
+	boundToken, err := createRunnerCredential(r.Context(), db, orgID, "", runnerID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to issue runner credential"})
+		return
+	}
+
 	writeAuditEvent(r.Context(), db, orgID, "", "runner.registered", "runner", runnerID, "success", map[string]any{"name": req.Name})
-	writeJSON(w, 201, map[string]any{"runner_id": runnerID, "organisation_id": orgID, "status": "active"})
+	writeJSON(w, 201, map[string]any{
+		"runner_id":       runnerID,
+		"organisation_id": orgID,
+		"status":          "active",
+		"runner_token":    boundToken,
+	})
 }
 
 func handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
-	orgID, err := authenticateRunner(dbFromRequest(r), r)
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
-		return
-	}
 	var req struct {
 		RunnerID string `json:"runner_id"`
 		Hostname string `json:"hostname"`
@@ -1395,7 +1431,8 @@ func handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 		return
 	}
-	if _, err := authenticateRunnerForID(dbFromRequest(r), r, req.RunnerID); err != nil {
+	orgID, err := authenticateBoundRunner(dbFromRequest(r), r, req.RunnerID)
+	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1441,6 +1478,15 @@ func handleCreateRegistrationToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// registrationCredentialTTL bounds an unbound bootstrap credential. It is
+// short because it only has to survive long enough for a runner to complete
+// the registration handshake.
+const registrationCredentialTTL = time.Hour
+
+// boundCredentialTTL bounds a runner-bound credential. It is long because the
+// runner uses it for its whole working life, and it re-registers to rotate.
+const boundCredentialTTL = 30 * 24 * time.Hour
+
 func createRunnerCredential(ctx context.Context, db *sql.DB, orgID, actorID, runnerID string) (string, error) {
 	if runnerID != "" {
 		var status string
@@ -1458,11 +1504,15 @@ func createRunnerCredential(ctx context.Context, db *sql.DB, orgID, actorID, run
 	if token == "" {
 		return "", fmt.Errorf("failed to generate registration token")
 	}
-	expiresAt := time.Now().UTC().Add(time.Hour)
+	ttl := registrationCredentialTTL
+	if runnerID != "" {
+		ttl = boundCredentialTTL
+	}
+	expiresAt := time.Now().UTC().Add(ttl)
 	if _, err := apiExec(ctx, db, "INSERT INTO runner_credentials (id, organisation_id, runner_id, token_hash, expires_at) VALUES (?,?,?,?,?)", "rct_"+shortID(), orgID, sqlNullString(runnerID), hashToken(token), expiresAt); err != nil {
 		return "", fmt.Errorf("failed to create registration token")
 	}
-	writeAuditEvent(ctx, db, orgID, actorID, "runner.credential.rotated", "runner", runnerID, "success", map[string]any{"expires_in": 3600})
+	writeAuditEvent(ctx, db, orgID, actorID, "runner.credential.rotated", "runner", runnerID, "success", map[string]any{"expires_in": int(ttl.Seconds())})
 	return token, nil
 }
 
@@ -2051,7 +2101,7 @@ func loadTags(ctx context.Context, db *sql.DB, orgID, serverID string) []tag {
 
 func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
 	runtime := metadataRuntime()
-	runnerOrg, err := authenticateRunner(db, r)
+	runnerOrg, err := authenticateBoundRunner(db, r, r.URL.Query().Get("runner_id"))
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
@@ -2123,22 +2173,56 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		return
 	}
 
+	// Authenticate the dispatched job. The runner performs no authorisation of
+	// its own, so the signature is what proves the control plane approved this
+	// exact command against this exact host for this lease.
+	claims := jobsign.Claims{
+		ExecutionID:   execID,
+		TargetID:      targetID,
+		LeaseID:       leaseID,
+		RunnerID:      runnerID,
+		Command:       command,
+		Host:          host,
+		Port:          sshPort,
+		User:          sshUser,
+		Timeout:       timeout,
+		ExpiresAtUnix: leaseExpires.Unix(),
+	}
+	signature, err := apiJobSigner.Sign(claims)
+	if err != nil {
+		// The work is already claimed, but dispatching an unsigned job would
+		// break the trust boundary. Fail the request and let the lease expire
+		// back into the queue.
+		slog.Error("job claim signing failed", "execution_id", execID, "target_id", targetID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to sign job"})
+		return
+	}
 	writeJSON(w, 200, map[string]any{
-		"target_id":    targetID,
-		"execution_id": execID,
-		"command":      command,
-		"host":         host,
-		"port":         sshPort,
-		"user":         sshUser,
-		"timeout":      timeout,
-		"lease_id":     leaseID,
+		"target_id":       targetID,
+		"execution_id":    execID,
+		"command":         command,
+		"host":            host,
+		"port":            sshPort,
+		"user":            sshUser,
+		"timeout":         timeout,
+		"lease_id":        leaseID,
+		"runner_id":       runnerID,
+		"expires_at_unix": leaseExpires.Unix(),
+		"signature":       signature,
 	})
 }
 
 func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *http.Request) {
-	orgID, err := authenticateRunner(db, r)
+	// Resolve the credential before the body is read so the tenant connection
+	// can be bound. The runner named in the body is checked against this same
+	// credential below, once it has been decoded.
+	orgID, credentialRunnerID, err := authenticateRunnerCredential(db, r)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+	if credentialRunnerID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "this endpoint requires a runner-bound credential; register the runner first"})
 		return
 	}
 	ctx, cleanup, err := bindTenantConnection(ctx, db, orgID)
@@ -2164,7 +2248,7 @@ func handleSubmitResult(ctx context.Context, db *sql.DB, w http.ResponseWriter, 
 		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 		return
 	}
-	if _, err := authenticateRunnerForID(db, r, req.RunnerID); err != nil {
+	if _, err := authenticateBoundRunner(db, r, req.RunnerID); err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
@@ -2360,7 +2444,7 @@ func handleRenewLease(ctx context.Context, db *sql.DB, w http.ResponseWriter, r 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid lease renewal body"})
 		return
 	}
-	orgID, err := authenticateRunnerForID(db, r, req.RunnerID)
+	orgID, err := authenticateBoundRunner(db, r, req.RunnerID)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return

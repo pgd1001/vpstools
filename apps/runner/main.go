@@ -19,6 +19,7 @@ import (
 
 	"github.com/pgd1001/svrtools/packages/config"
 	"github.com/pgd1001/svrtools/packages/dispatch"
+	"github.com/pgd1001/svrtools/packages/jobsign"
 	"github.com/pgd1001/svrtools/packages/redact"
 	"github.com/pgd1001/svrtools/packages/sshx"
 )
@@ -45,6 +46,14 @@ func main() {
 		logger.Error("runner backend configuration invalid", "error", err)
 		os.Exit(1)
 	}
+	// The runner makes no access decisions of its own. Its entire defence
+	// against executing an unauthorised command is this signature check, so a
+	// missing or invalid key is fatal at startup rather than a degraded mode.
+	jobVerifier, err := jobsign.NewSigner(backendConfig.JobSigningKey)
+	if err != nil {
+		logger.Error("runner cannot start without a valid JOB_SIGNING_KEY", "error", err)
+		os.Exit(1)
+	}
 
 	targetHost := envOrDefault("SSH_TARGET_HOST", "localhost")
 	targetPort := envOrDefault("SSH_TARGET_PORT", "2222")
@@ -63,10 +72,16 @@ func main() {
 
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	hostname, _ := os.Hostname()
-	runnerID := registerRunner(ctx, httpClient, apiURL, runnerName, hostname, runnerToken, logger)
+	runnerID, boundToken := registerRunner(ctx, httpClient, apiURL, runnerName, hostname, runnerToken, logger)
 	if runnerID == "" {
 		logger.Error("runner cannot start without successful registration")
 		os.Exit(1)
+	}
+	// Registration exchanges the bootstrap credential for one bound to this
+	// runner's identity. Every later call uses the bound credential, which is
+	// what stops one runner from claiming another runner's scoped work.
+	if boundToken != "" {
+		runnerToken = boundToken
 	}
 	health.registered.Store(true)
 
@@ -126,6 +141,22 @@ func main() {
 		}
 
 		job := claimedJob
+		// Verify before anything else touches the job. An unverifiable job is
+		// reported back as a failure rather than executed, so the control plane
+		// sees the rejection instead of the work silently disappearing.
+		if err := jobVerifier.Verify(job.claims(), job.Signature, time.Now()); err != nil {
+			logger.Error("refusing job that failed signature verification",
+				"execution_id", job.ExecutionID, "target_id", job.TargetID, "error", err)
+			health.rejected.Add(1)
+			rejection := sshx.Result{
+				Error:    "runner refused the job: " + err.Error(),
+				ExitCode: -1,
+			}
+			if err := submitResultWithRetry(ctx, httpClient, apiURL, runnerID, job.TargetID, job.ExecutionID, job.LeaseID, runnerToken, rejection); err != nil {
+				logger.Error("failed to report rejected job", "execution_id", job.ExecutionID, "error", err)
+			}
+			continue
+		}
 		logger.Info("claimed job", "execution_id", job.ExecutionID, "target_id", job.TargetID)
 		health.claimed.Add(1)
 		leaseCtx, stopLeaseRenewal := context.WithCancel(ctx)
@@ -181,6 +212,10 @@ type runnerHealth struct {
 	registered         atomic.Bool
 	claimed            atomic.Uint64
 	completed          atomic.Uint64
+	// rejected counts jobs refused because their signature did not verify.
+	// A non-zero value means something is dispatching jobs this runner does
+	// not trust, which is worth alerting on.
+	rejected           atomic.Uint64
 	lastCompletionUnix atomic.Int64
 }
 
@@ -215,13 +250,14 @@ func runnerHealthMux(state *runnerHealth) *http.ServeMux {
 			writeRunnerHealthJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "starting"})
 			return
 		}
-		writeRunnerHealthJSON(w, http.StatusOK, map[string]any{"status": "healthy", "jobs_claimed": state.claimed.Load(), "jobs_completed": state.completed.Load(), "last_completion_unix": state.lastCompletionUnix.Load()})
+		writeRunnerHealthJSON(w, http.StatusOK, map[string]any{"status": "healthy", "jobs_claimed": state.claimed.Load(), "jobs_completed": state.completed.Load(), "jobs_rejected": state.rejected.Load(), "last_completion_unix": state.lastCompletionUnix.Load()})
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		fmt.Fprintf(w, "# HELP svrtools_runner_registered Runner has registered with the control plane.\n# TYPE svrtools_runner_registered gauge\nsvrtools_runner_registered %d\n", boolMetric(state.registered.Load()))
 		fmt.Fprintf(w, "# HELP svrtools_runner_jobs_claimed_total Jobs claimed by this runner.\n# TYPE svrtools_runner_jobs_claimed_total counter\nsvrtools_runner_jobs_claimed_total %d\n", state.claimed.Load())
 		fmt.Fprintf(w, "# HELP svrtools_runner_jobs_completed_total Jobs completed by this runner.\n# TYPE svrtools_runner_jobs_completed_total counter\nsvrtools_runner_jobs_completed_total %d\n", state.completed.Load())
+		fmt.Fprintf(w, "# HELP svrtools_runner_jobs_rejected_total Jobs refused because their signature did not verify.\n# TYPE svrtools_runner_jobs_rejected_total counter\nsvrtools_runner_jobs_rejected_total %d\n", state.rejected.Load())
 	})
 	return mux
 }
@@ -284,7 +320,10 @@ func renewLease(ctx context.Context, client *http.Client, apiURL, runnerID strin
 	return nil
 }
 
-func registerRunner(ctx context.Context, client *http.Client, apiURL, name, hostname, token string, logger *slog.Logger) string {
+// registerRunner performs the registration handshake and returns the assigned
+// runner ID along with the identity-bound credential the control plane issued
+// for subsequent calls.
+func registerRunner(ctx context.Context, client *http.Client, apiURL, name, hostname, token string, logger *slog.Logger) (string, string) {
 	body := map[string]any{
 		"name":        name,
 		"hostname":    hostname,
@@ -300,20 +339,22 @@ func registerRunner(ctx context.Context, client *http.Client, apiURL, name, host
 	resp, err := client.Do(req)
 	if err != nil {
 		logger.Warn("runner registration failed", "error", err)
-		return ""
+		return "", ""
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		logger.Warn("runner registration rejected", "status", resp.StatusCode)
-		return ""
+		return "", ""
 	}
 	var regResp struct {
 		RunnerID string `json:"runner_id"`
 		Status   string `json:"status"`
+		// RunnerToken is the identity-bound credential for this runner.
+		RunnerToken string `json:"runner_token"`
 	}
 	json.NewDecoder(resp.Body).Decode(&regResp)
 	logger.Info("runner registered with API", "runner_id", regResp.RunnerID)
-	return regResp.RunnerID
+	return regResp.RunnerID, regResp.RunnerToken
 }
 
 func sendHeartbeat(ctx context.Context, client *http.Client, apiURL, runnerID, hostname, token string, logger *slog.Logger) {
@@ -371,6 +412,26 @@ type job struct {
 	User        string `json:"user"`
 	Timeout     int    `json:"timeout"`
 	LeaseID     string `json:"lease_id"`
+	RunnerID    string `json:"runner_id"`
+	ExpiresAt   int64  `json:"expires_at_unix"`
+	Signature   string `json:"signature"`
+}
+
+// claims reconstructs the signed view of the job. Only fields listed here are
+// authenticated, and only these fields may influence execution.
+func (j *job) claims() jobsign.Claims {
+	return jobsign.Claims{
+		ExecutionID:   j.ExecutionID,
+		TargetID:      j.TargetID,
+		LeaseID:       j.LeaseID,
+		RunnerID:      j.RunnerID,
+		Command:       j.Command,
+		Host:          j.Host,
+		Port:          j.Port,
+		User:          j.User,
+		Timeout:       j.Timeout,
+		ExpiresAtUnix: j.ExpiresAt,
+	}
 }
 
 type resultSubmissionError struct {

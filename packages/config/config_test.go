@@ -8,6 +8,7 @@ import (
 )
 
 func TestDefaultConfigurationIsSelfContained(t *testing.T) {
+	setSigningKey(t)
 	t.Setenv("DATABASE_DRIVER", "")
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("DB_PATH", "")
@@ -27,6 +28,7 @@ func TestDefaultConfigurationIsSelfContained(t *testing.T) {
 }
 
 func TestExtendedConfigurationRequiresConnectionSettings(t *testing.T) {
+	setSigningKey(t)
 	t.Setenv("DATABASE_DRIVER", "postgres")
 	t.Setenv("DATABASE_URL", "")
 	if err := Load().Validate(); err == nil {
@@ -35,6 +37,7 @@ func TestExtendedConfigurationRequiresConnectionSettings(t *testing.T) {
 }
 
 func TestPostgresRLSRequiresPostgresDriver(t *testing.T) {
+	setSigningKey(t)
 	t.Setenv("POSTGRES_RLS", "true")
 	t.Setenv("DATABASE_DRIVER", "sqlite")
 	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "POSTGRES_RLS") {
@@ -48,6 +51,7 @@ func TestPostgresRLSRequiresPostgresDriver(t *testing.T) {
 }
 
 func TestS3ConfigurationRequiresCompleteStoreSettings(t *testing.T) {
+	setSigningKey(t)
 	server := httptest.NewServer(nil)
 	defer server.Close()
 	for key, value := range map[string]string{
@@ -76,6 +80,7 @@ func TestMalformedS3ConfigurationFailsClearly(t *testing.T) {
 }
 
 func TestApprovalExpiryCanBeConfiguredWithinSafeBounds(t *testing.T) {
+	setSigningKey(t)
 	t.Setenv("APPROVAL_EXPIRY_SECONDS", "7200")
 	c := Load()
 	if err := c.Validate(); err != nil {
@@ -96,6 +101,7 @@ func TestApprovalExpiryCanBeConfiguredWithinSafeBounds(t *testing.T) {
 }
 
 func TestAIConfigurationRequiresProviderEndpointAndModel(t *testing.T) {
+	setSigningKey(t)
 	t.Setenv("AI_PROVIDER", "openai-compatible")
 	t.Setenv("AI_ENDPOINT", "")
 	t.Setenv("AI_MODEL", "")
@@ -117,6 +123,7 @@ func TestAIConfigurationRequiresProviderEndpointAndModel(t *testing.T) {
 }
 
 func TestJetStreamDispatchLoadsAndValidatesBoundedConsumerSettings(t *testing.T) {
+	setSigningKey(t)
 	t.Setenv("JOB_DISPATCH", "jetstream")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("NATS_STREAM", "SVRTOOLS_JOBS")
@@ -138,3 +145,49 @@ func TestJetStreamDispatchLoadsAndValidatesBoundedConsumerSettings(t *testing.T)
 		t.Fatal("expected an unsafe redelivery bound to fail")
 	}
 }
+
+// setSigningKey supplies the mandatory job signing key so each test exercises
+// the setting it actually cares about rather than the signing-key gate.
+func setSigningKey(t *testing.T) {
+	t.Helper()
+	t.Setenv("JOB_SIGNING_KEY", "config-test-signing-key-at-least-32ch")
+}
+
+// Job signing is the runner's only defence against an unauthorised command, so
+// a missing or weak key must fail configuration validation in every tier
+// rather than degrading to unsigned dispatch.
+func TestJobSigningKeyIsRequiredAndMustBeStrong(t *testing.T) {
+	t.Setenv("JOB_SIGNING_KEY", "")
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "JOB_SIGNING_KEY") {
+		t.Fatalf("missing signing key error = %v, want a JOB_SIGNING_KEY failure", err)
+	}
+	t.Setenv("JOB_SIGNING_KEY", "too-short")
+	if err := Load().Validate(); err == nil || !strings.Contains(err.Error(), "JOB_SIGNING_KEY") {
+		t.Fatalf("short signing key error = %v, want a JOB_SIGNING_KEY failure", err)
+	}
+	setSigningKey(t)
+	if err := Load().Validate(); err != nil {
+		t.Fatalf("valid signing key rejected: %v", err)
+	}
+}
+
+// An environment that is not explicitly non-production must be treated as
+// production, so a forgotten or misspelled variable cannot enable development
+// conveniences in a real deployment.
+func TestProductionModeFailsClosed(t *testing.T) {
+	for _, value := range []string{"", "production", "prod", "prod-eu", "staging", "typo"} {
+		t.Setenv("VPS_ENV", value)
+		t.Setenv("APP_ENV", "")
+		t.Setenv("ENVIRONMENT", "")
+		if !ProductionMode() {
+			t.Fatalf("VPS_ENV=%q was treated as non-production", value)
+		}
+	}
+	for _, value := range []string{"dev", "development", "local", "test", "ci"} {
+		t.Setenv("VPS_ENV", value)
+		if ProductionMode() {
+			t.Fatalf("VPS_ENV=%q was treated as production", value)
+		}
+	}
+}
+

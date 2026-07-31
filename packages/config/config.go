@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/pgd1001/svrtools/packages/artifacts"
+	"github.com/pgd1001/svrtools/packages/jobsign"
 )
 
 // BackendConfig describes the deployment tier selected by environment variables.
@@ -52,6 +53,10 @@ type BackendConfig struct {
 	AITimeout              time.Duration
 	AIMaxPromptBytes       int
 	AIMaxResponseBytes     int64
+	// JobSigningKey authenticates dispatched jobs end to end. The runner
+	// refuses any job it cannot verify, so this is the key that keeps the
+	// runner from executing commands the control plane did not authorise.
+	JobSigningKey string
 }
 
 func Load() BackendConfig {
@@ -103,6 +108,7 @@ func Load() BackendConfig {
 		AITimeout:              durationEnv("AI_TIMEOUT"),
 		AIMaxPromptBytes:       intEnv("AI_MAX_PROMPT_BYTES"),
 		AIMaxResponseBytes:     int64(intEnv("AI_MAX_RESPONSE_BYTES")),
+		JobSigningKey:          strings.TrimSpace(os.Getenv("JOB_SIGNING_KEY")),
 	}
 }
 
@@ -183,7 +189,42 @@ func (c BackendConfig) Validate() error {
 	if c.AITimeout < 0 || c.AIMaxPromptBytes < 0 || c.AIMaxResponseBytes < 0 {
 		return fmt.Errorf("AI limits must not be negative")
 	}
+	// Job signing is not optional. The runner is not allowed to make access
+	// decisions, so its only defence against an unauthorised job is a
+	// signature it can verify. Allowing an unsigned mode "just for local
+	// development" would mean the security property is never actually
+	// exercised, so both tiers require a key.
+	if c.JobSigningKey == "" {
+		return fmt.Errorf("JOB_SIGNING_KEY is required so runners can verify that the control plane authorised each job")
+	}
+	if len(c.JobSigningKey) < jobsign.MinKeyLength {
+		return fmt.Errorf("JOB_SIGNING_KEY must be at least %d characters", jobsign.MinKeyLength)
+	}
 	return nil
+}
+
+// ProductionMode reports whether the process is configured as a production
+// deployment. It is deliberately conservative: anything that is not explicitly
+// a non-production environment name counts as production, so an unset or
+// misspelled environment fails closed rather than silently enabling
+// development conveniences.
+func ProductionMode() bool {
+	for _, key := range []string{"VPS_ENV", "APP_ENV", "ENVIRONMENT"} {
+		value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+		if value == "" {
+			continue
+		}
+		switch value {
+		case "dev", "development", "local", "test", "testing", "ci":
+			return false
+		default:
+			// staging, prod, prod-eu, production, or anything unrecognised.
+			return true
+		}
+	}
+	// No environment declared at all. Treat as production so a forgotten
+	// variable cannot open a development bypass.
+	return true
 }
 
 func (c BackendConfig) S3Config() artifacts.S3Config {
