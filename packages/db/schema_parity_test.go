@@ -11,52 +11,10 @@ import (
 	"testing"
 )
 
-// TestSQLiteAndPostgresStorageContract is deliberately text based. It checks
-// the shared storage contract without requiring PostgreSQL, Docker, or a
-// network. It does not claim that the API handlers support PostgreSQL. The
-// startup guard remains the authority for that runtime decision.
-func TestSQLiteAndPostgresStorageContract(t *testing.T) {
-	_, here, _, _ := runtime.Caller(0)
-	root := filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))
-	runtimeSQL := readTestFile(t, filepath.Join(root, "apps", "api", "migrate.go"))
-
-	paths, err := filepath.Glob(filepath.Join(root, "migrations", "postgres", "*.sql"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sort.Strings(paths)
-	var postgresSQL strings.Builder
-	for _, path := range paths {
-		postgresSQL.Write(extractGooseUp(readTestFile(t, path)))
-		postgresSQL.WriteByte('\n')
-	}
-
-	// These are fields deliberately shared by the SQLite runtime and the
-	// PostgreSQL schema. This is a storage check, not a PostgreSQL support list.
-	contract := map[string][]string{
-		"runner_credentials":        {"runner_id", "token_hash", "expires_at", "revoked_at"},
-		"api_tokens":                {"user_id", "token_prefix", "token_hash", "expires_at", "revoked_at", "last_used_at"},
-		"executions":                {"command", "actor_user_id", "requested_at", "metadata"},
-		"execution_result_receipts": {"payload_hash", "response_code", "response_body", "lease_id", "runner_id"},
-		"execution_idempotency":     {"user_id", "idempotency_key", "payload_hash", "response_body"},
-		"runbook_idempotency":       {"user_id", "idempotency_key", "payload_hash", "response_status", "response_body"},
-		"automation_schedules":      {"created_by_user_id", "runbook_name", "params", "interval_seconds", "next_run_at", "enabled", "last_run_at", "last_error"},
-		"automation_controls":       {"paused", "paused_at", "paused_by_user_id", "reason", "updated_at"},
-		"audit_events":              {"actor_user_id", "metadata", "previous_hash", "event_hash", "occurred_at"},
-		"ai_requests":               {"actor_user_id", "status", "request_json", "response_text", "model", "provider_request_id", "duration_ms", "error_summary", "created_at"},
-		"ai_evidence":               {"request_id", "organisation_id", "ordinal", "kind", "title", "content", "source_uri", "created_at"},
-	}
-	for table, columns := range contract {
-		for _, column := range columns {
-			if !hasColumn(runtimeSQL, table, column) {
-				t.Errorf("SQLite runtime is missing %s.%s", table, column)
-			}
-			if !hasColumn([]byte(postgresSQL.String()), table, column) {
-				t.Errorf("PostgreSQL migrations are missing %s.%s", table, column)
-			}
-		}
-	}
-}
+// The hand-maintained storage-contract check that lived here only verified
+// columns someone remembered to add to a list, so drift in any unlisted
+// column passed silently. TestSchemaParityIsComplete in schema_drift_test.go
+// now derives both schemas and compares them in full.
 
 func TestPostgresMigrationsAreOrderedAndComplete(t *testing.T) {
 	_, here, _, _ := runtime.Caller(0)
