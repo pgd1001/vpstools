@@ -24,20 +24,24 @@ var serverAddCmd = &cobra.Command{
 		privateIP, _ := cmd.Flags().GetString("private-ip")
 		sshPort, _ := cmd.Flags().GetInt("ssh-port")
 		sshUser, _ := cmd.Flags().GetString("ssh-user")
+		sshCredentialRef, _ := cmd.Flags().GetString("ssh-credential-ref")
+		sshHostKeyFingerprint, _ := cmd.Flags().GetString("ssh-host-key-fingerprint")
 		environment, _ := cmd.Flags().GetString("environment")
 		provider, _ := cmd.Flags().GetString("provider")
 		tagsJSON, _ := cmd.Flags().GetString("tags")
 		output, _ := cmd.Flags().GetString("output")
 
 		req := client.AddServerRequest{
-			Name:        args[0],
-			Hostname:    hostname,
-			PublicIP:    publicIP,
-			PrivateIP:   privateIP,
-			SSHPort:     sshPort,
-			SSHUsername: sshUser,
-			Environment: environment,
-			Provider:    provider,
+			Name:                  args[0],
+			Hostname:              hostname,
+			PublicIP:              publicIP,
+			PrivateIP:             privateIP,
+			SSHPort:               sshPort,
+			SSHUsername:           sshUser,
+			SSHCredentialRef:      sshCredentialRef,
+			SSHHostKeyFingerprint: sshHostKeyFingerprint,
+			Environment:           environment,
+			Provider:              provider,
 		}
 
 		if tagsJSON != "" {
@@ -56,6 +60,12 @@ var serverAddCmd = &cobra.Command{
 			return
 		}
 		fmt.Printf("Server added: %s (%s)\n", resp.ServerID, resp.Status)
+		// Say so plainly rather than letting the operator discover it when the
+		// first execution refuses to connect.
+		if sshHostKeyFingerprint == "" || sshCredentialRef == "" {
+			fmt.Println("Note: this server cannot be executed against until both an SSH credential reference and a host key fingerprint are recorded.")
+			fmt.Println("      Obtain the fingerprint with: ssh-keyscan -p <port> <host> | ssh-keygen -lf -")
+		}
 	},
 }
 
@@ -190,6 +200,8 @@ func init() {
 	serverAddCmd.Flags().String("private-ip", "", "Private IP address")
 	serverAddCmd.Flags().Int("ssh-port", 22, "SSH port")
 	serverAddCmd.Flags().String("ssh-user", "root", "SSH username")
+	serverAddCmd.Flags().String("ssh-credential-ref", "", "Name of the SSH credential this server uses, as stored in each runner's credential directory")
+	serverAddCmd.Flags().String("ssh-host-key-fingerprint", "", "Pinned SSH host key, for example SHA256:... (obtain with: ssh-keyscan -p <port> <host> | ssh-keygen -lf -)")
 	serverAddCmd.Flags().String("environment", "development", "Environment (development, staging, production)")
 	serverAddCmd.Flags().String("provider", "", "Hosting provider")
 	serverAddCmd.Flags().String("tags", "", "Tags as JSON array [{\"key\":\"x\",\"value\":\"y\"}]")

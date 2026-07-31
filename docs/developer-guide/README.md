@@ -139,7 +139,8 @@ spec:
 ### Runner
 - `API_URL` env var (defaults to `http://localhost:8080`)
 - `SIMULATE=true` to skip SSH and fake execution
-- `SSH_TARGET_HOST`, `SSH_TARGET_PORT`, `SSH_USER`, `SSH_PASSWORD` for real SSH
+- `SSH_TARGET_HOST`, `SSH_TARGET_PORT`, `SSH_USER` are fallbacks used only when a job does not carry its own connection details
+- `SSH_CREDENTIALS_DIR` is the per-server credential directory, one file per credential reference. Required when `SIMULATE` is off. Private keys stay here and are never sent to the API; the control plane stores only a reference and the pinned host key fingerprint
 
 ### Deployment backends
 

@@ -38,6 +38,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		id TEXT PRIMARY KEY, organisation_id TEXT NOT NULL REFERENCES organisations(id),
 		name TEXT NOT NULL, hostname TEXT, public_ip TEXT, private_ip TEXT,
 		ssh_port INTEGER NOT NULL DEFAULT 22, ssh_username TEXT,
+		ssh_credential_ref TEXT, ssh_host_key_fingerprint TEXT,
 		environment TEXT NOT NULL DEFAULT 'development', provider TEXT,
 		os_name TEXT, os_version TEXT, kernel_version TEXT, architecture TEXT,
 		status TEXT NOT NULL DEFAULT 'pending',
@@ -322,6 +323,12 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	_ = addColumnIgnoreErr(ctx, db, "execution_targets", "next_attempt_at", "TEXT")
 	_ = addColumnIgnoreErr(ctx, db, "runbook_versions", "allowed_roles", "TEXT NOT NULL DEFAULT '[\"senior_engineer\",\"admin\",\"owner\"]'")
 	_ = addColumnIgnoreErr(ctx, db, "runner_credentials", "runner_id", "TEXT REFERENCES runners(id) ON DELETE CASCADE")
+	// Per-server SSH identity. Existing rows are left NULL deliberately: a
+	// server registered before this change has no recorded host key, and the
+	// runner must refuse it rather than assume the old shared credential was
+	// correct.
+	_ = addColumnIgnoreErr(ctx, db, "servers", "ssh_credential_ref", "TEXT")
+	_ = addColumnIgnoreErr(ctx, db, "servers", "ssh_host_key_fingerprint", "TEXT")
 	_ = addColumnIgnoreErr(ctx, db, "audit_events", "previous_hash", "TEXT NOT NULL DEFAULT ''")
 	_ = addColumnIgnoreErr(ctx, db, "audit_events", "event_hash", "TEXT NOT NULL DEFAULT ''")
 	if err := backfillAuditHashChain(ctx, db); err != nil {

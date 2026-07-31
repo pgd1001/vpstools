@@ -2,6 +2,8 @@ package jobsign
 
 import (
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -10,16 +12,18 @@ const testKey = "test-signing-key-that-is-long-enough-32"
 
 func sampleClaims() Claims {
 	return Claims{
-		ExecutionID:   "exe_1",
-		TargetID:      "ext_1",
-		LeaseID:       "lease_1",
-		RunnerID:      "rnr_1",
-		Command:       "uptime",
-		Host:          "app.example.com",
-		Port:          22,
-		User:          "svrtools",
-		Timeout:       300,
-		ExpiresAtUnix: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC).Unix(),
+		ExecutionID:        "exe_1",
+		TargetID:           "ext_1",
+		LeaseID:            "lease_1",
+		RunnerID:           "rnr_1",
+		Command:            "uptime",
+		Host:               "app.example.com",
+		Port:               22,
+		User:               "svrtools",
+		Timeout:            300,
+		CredentialRef:      "web-prod",
+		HostKeyFingerprint: "SHA256:" + strings.Repeat("A", 43),
+		ExpiresAtUnix:      time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC).Unix(),
 	}
 }
 
@@ -80,7 +84,21 @@ func TestEveryExecutionFieldIsCovered(t *testing.T) {
 		"port":         func(c *Claims) { c.Port = 2222 },
 		"user":         func(c *Claims) { c.User = "root" },
 		"timeout":      func(c *Claims) { c.Timeout = 9999 },
-		"expires_at":   func(c *Claims) { c.ExpiresAtUnix = base.ExpiresAtUnix + 3600 },
+		// A swapped credential reference would make the runner authenticate as
+		// a different, possibly more privileged, identity on the target.
+		"credential_ref": func(c *Claims) { c.CredentialRef = "db-prod" },
+		// A cleared or swapped fingerprint would let a privileged command be
+		// sent to a machine the control plane never approved.
+		"host_key_fingerprint":         func(c *Claims) { c.HostKeyFingerprint = "SHA256:" + strings.Repeat("B", 43) },
+		"host_key_fingerprint_cleared": func(c *Claims) { c.HostKeyFingerprint = "" },
+		"expires_at":                   func(c *Claims) { c.ExpiresAtUnix = base.ExpiresAtUnix + 3600 },
+	}
+	// Guard against a future field being added to Claims without a mutation
+	// here. An unexercised field would look covered while actually being
+	// unauthenticated in practice.
+	const mutationsPerExtraCase = 1 // host_key_fingerprint_cleared is a second case for one field
+	if want := reflect.TypeOf(Claims{}).NumField() + mutationsPerExtraCase; len(mutations) != want {
+		t.Fatalf("Claims has %d fields but %d mutations are defined; add a mutation for every new field", reflect.TypeOf(Claims{}).NumField(), len(mutations))
 	}
 	for field, mutate := range mutations {
 		t.Run(field, func(t *testing.T) {

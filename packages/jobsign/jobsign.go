@@ -51,6 +51,15 @@ type Claims struct {
 	Port        int    `json:"port"`
 	User        string `json:"user"`
 	Timeout     int    `json:"timeout"`
+	// CredentialRef names which credential the runner should use. It is
+	// authenticated because an attacker who could change it would be able to
+	// make the runner present a different, possibly more privileged, identity
+	// to the target host.
+	CredentialRef string `json:"credential_ref"`
+	// HostKeyFingerprint pins the identity of the target host. It is
+	// authenticated because an attacker able to clear or replace it could
+	// point a privileged command at a machine they control.
+	HostKeyFingerprint string `json:"host_key_fingerprint"`
 	// ExpiresAtUnix bounds replay. It is normally the lease expiry, so a
 	// captured job cannot be replayed after the control plane has reassigned
 	// the work.

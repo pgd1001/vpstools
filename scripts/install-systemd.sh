@@ -41,7 +41,13 @@ for unit in "$project_dir"/deploy/systemd/*.service "$project_dir"/deploy/system
 for env in api runner backup; do
     if [ ! -e "/etc/vps-tools/$env.env" ]; then install -m 0600 "$project_dir/deploy/systemd/$env.env.example" "/etc/vps-tools/$env.env"; fi
 done
-if [ ! -e /etc/vps-tools/known_hosts ]; then install -m 0600 /dev/null /etc/vps-tools/known_hosts; fi
+# Per-server SSH credentials live here, one file per credential reference. The
+# directory is created empty and locked down; an operator populates it with the
+# keys for the servers this runner is scoped to. It replaces the single shared
+# known_hosts file, since host identity is now pinned per server by the control
+# plane.
+if [ ! -d /etc/vps-tools/ssh-credentials ]; then install -d -m 0700 /etc/vps-tools/ssh-credentials; fi
+chown vps-tools:vps-tools /etc/vps-tools/ssh-credentials
 chown -R vps-tools:vps-tools /var/lib/vps-tools
 systemctl daemon-reload
 systemctl enable vps-tools-backup-freshness.timer

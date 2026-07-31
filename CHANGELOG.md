@@ -8,7 +8,8 @@ Changes after `0.1.0-beta.1` will be recorded here first. Once a change is ready
 
 ### Changed
 
-- **Breaking: `JOB_SIGNING_KEY` is now required.** The API signs every dispatched job over the command, host, port, user, timeout, and lease, and the runner refuses any job it cannot verify. The API and every runner must share the same key of at least 32 characters. Existing deployments must set it before upgrading; both processes exit at startup without it.
+- **Breaking: SSH credentials are now per server and held only by the runner.** A single fleet-wide `SSH_PASSWORD` previously authenticated every target and one shared `SSH_KNOWN_HOSTS` file governed host trust, so one compromised credential exposed the whole inventory and no host could be rotated independently. Each server now records an SSH credential reference and the SHA256 fingerprint of its host key. The runner resolves the reference against its own `SSH_CREDENTIALS_DIR` and pins the host key on every connection, refusing to connect to a server missing either value rather than connecting unverified. Private key material never reaches the control plane, so an API database compromise no longer yields fleet access. Existing deployments must create the credential directory, place one file per credential in it, and record a fingerprint for every server with `ssh-keyscan -p <port> <host> | ssh-keygen -lf -` before real execution resumes. `SSH_PASSWORD` and `SSH_KNOWN_HOSTS` are no longer read.
+- **Breaking: `JOB_SIGNING_KEY` is now required.** The API signs every dispatched job over the command, host, port, user, timeout, credential reference, host key fingerprint, and lease, and the runner refuses any job it cannot verify. The API and every runner must share the same key of at least 32 characters. Existing deployments must set it before upgrading; both processes exit at startup without it.
 - **Breaking: the runner job endpoints require a runner-bound credential.** Registration now exchanges the bootstrap credential for one bound to the runner identity, and claim, renew, result, and heartbeat accept only the bound form. An organisation-wide credential could previously claim work scoped to any runner in the organisation, which made runner scopes unenforceable.
 - **Breaking: the API no longer infers an identity.** A request with no credential is unauthenticated rather than resolved to a senior engineer, and a runner request with no credential no longer resolves to the demo organisation. Development header identity additionally requires an explicitly non-production environment; any unrecognised or unset environment name is now treated as production.
 
@@ -20,6 +21,8 @@ Changes after `0.1.0-beta.1` will be recorded here first. Once a change is ready
 
 ### Added
 
+- `vps server add --ssh-credential-ref` and `--ssh-host-key-fingerprint`, with the same fields on the server API, Go SDK, and server detail responses. The CLI warns at registration when either is missing, since the server cannot be executed against until both are recorded.
+- `packages/sshcreds`, the runner-local keystore that resolves a credential reference to key material. References are validated before use, so a reference from the API cannot escape the keystore directory.
 - `svrtools_runner_jobs_rejected_total`, which counts jobs a runner refused because the signature did not verify. It is non-zero only when something is dispatching jobs the runner does not trust.
 - Schema parity is now derived from both dialects and compared in full, so a column added to SQLite or PostgreSQL and forgotten in the other fails the build.
 

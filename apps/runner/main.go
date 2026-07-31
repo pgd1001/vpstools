@@ -21,6 +21,7 @@ import (
 	"github.com/pgd1001/svrtools/packages/dispatch"
 	"github.com/pgd1001/svrtools/packages/jobsign"
 	"github.com/pgd1001/svrtools/packages/redact"
+	"github.com/pgd1001/svrtools/packages/sshcreds"
 	"github.com/pgd1001/svrtools/packages/sshx"
 )
 
@@ -58,15 +59,21 @@ func main() {
 	targetHost := envOrDefault("SSH_TARGET_HOST", "localhost")
 	targetPort := envOrDefault("SSH_TARGET_PORT", "2222")
 	sshUser := envOrDefault("SSH_USER", "svrtools")
-	sshPassword := os.Getenv("SSH_PASSWORD")
 	runnerToken := os.Getenv("VPS_RUNNER_TOKEN")
-	knownHosts := os.Getenv("SSH_KNOWN_HOSTS")
+	// Credentials are per-server and resolved from this runner's own keystore.
+	// There is deliberately no fleet-wide password: the control plane records
+	// which credential a server uses, and only the runner holds the material.
+	keystore := sshcreds.NewKeystore(os.Getenv("SSH_CREDENTIALS_DIR"))
 
 	simulate := os.Getenv("SIMULATE") == "true" || os.Getenv("SIMULATE") == "1"
 
 	if simulate {
 		logger.Info("runner started in SIMULATE mode (no real SSH)")
 	} else {
+		if !keystore.Configured() {
+			logger.Error("SSH_CREDENTIALS_DIR is required when SIMULATE is disabled")
+			os.Exit(1)
+		}
 		logger.Info("runner started", "api_url", apiURL, "ssh_host", targetHost, "ssh_port", targetPort)
 	}
 
@@ -184,15 +191,7 @@ func main() {
 				cancel()
 				jobCtx, cancel = context.WithTimeout(ctx, 5*time.Minute)
 			}
-			var executor *sshx.Executor
-			if knownHosts == "" {
-				result = sshx.Result{Error: "SSH_KNOWN_HOSTS is required when SIMULATE is disabled", ExitCode: -1}
-			} else if secureExecutor, err := sshx.NewExecutorWithKnownHosts(fmt.Sprintf("%s:%d", host, port), user, sshPassword, knownHosts); err != nil {
-				result = sshx.Result{Error: err.Error(), ExitCode: -1}
-			} else {
-				executor = secureExecutor
-				result = executor.Run(jobCtx, job.Command)
-			}
+			result = runTarget(jobCtx, keystore, job, host, port, user)
 			cancel()
 		}
 		stopLeaseRenewal()
@@ -404,34 +403,72 @@ func simulateRun(command string) sshx.Result {
 }
 
 type job struct {
-	TargetID    string `json:"target_id"`
-	ExecutionID string `json:"execution_id"`
-	Command     string `json:"command"`
-	Host        string `json:"host"`
-	Port        int    `json:"port"`
-	User        string `json:"user"`
-	Timeout     int    `json:"timeout"`
-	LeaseID     string `json:"lease_id"`
-	RunnerID    string `json:"runner_id"`
-	ExpiresAt   int64  `json:"expires_at_unix"`
-	Signature   string `json:"signature"`
+	TargetID           string `json:"target_id"`
+	ExecutionID        string `json:"execution_id"`
+	Command            string `json:"command"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	User               string `json:"user"`
+	CredentialRef      string `json:"credential_ref"`
+	HostKeyFingerprint string `json:"host_key_fingerprint"`
+	Timeout            int    `json:"timeout"`
+	LeaseID            string `json:"lease_id"`
+	RunnerID           string `json:"runner_id"`
+	ExpiresAt          int64  `json:"expires_at_unix"`
+	Signature          string `json:"signature"`
 }
 
 // claims reconstructs the signed view of the job. Only fields listed here are
 // authenticated, and only these fields may influence execution.
 func (j *job) claims() jobsign.Claims {
 	return jobsign.Claims{
-		ExecutionID:   j.ExecutionID,
-		TargetID:      j.TargetID,
-		LeaseID:       j.LeaseID,
-		RunnerID:      j.RunnerID,
-		Command:       j.Command,
-		Host:          j.Host,
-		Port:          j.Port,
-		User:          j.User,
-		Timeout:       j.Timeout,
-		ExpiresAtUnix: j.ExpiresAt,
+		ExecutionID:        j.ExecutionID,
+		TargetID:           j.TargetID,
+		LeaseID:            j.LeaseID,
+		RunnerID:           j.RunnerID,
+		Command:            j.Command,
+		Host:               j.Host,
+		Port:               j.Port,
+		User:               j.User,
+		Timeout:            j.Timeout,
+		CredentialRef:      j.CredentialRef,
+		HostKeyFingerprint: j.HostKeyFingerprint,
+		ExpiresAtUnix:      j.ExpiresAt,
 	}
+}
+
+// runTarget resolves the credential for one job and executes it.
+//
+// Every failure path returns a Result rather than an error so the outcome is
+// always reported back to the control plane. Refusing to run is a legitimate
+// result here: a server with no pinned host key or no provisioned credential
+// fails closed instead of falling back to a shared identity, which is what the
+// previous fleet-wide SSH_PASSWORD did.
+func runTarget(ctx context.Context, keystore *sshcreds.Keystore, j *job, host string, port int, user string) sshx.Result {
+	if j.HostKeyFingerprint == "" {
+		return sshx.Result{
+			Error:    "refusing to connect: no ssh host key fingerprint is recorded for this server; record one with 'vps server update --ssh-host-key-fingerprint'",
+			ExitCode: -1,
+		}
+	}
+	if j.CredentialRef == "" {
+		return sshx.Result{
+			Error:    "refusing to connect: no ssh credential reference is recorded for this server",
+			ExitCode: -1,
+		}
+	}
+	credential, err := keystore.Resolve(j.CredentialRef)
+	if err != nil {
+		return sshx.Result{
+			Error:    fmt.Sprintf("ssh credential unavailable on this runner: %v", err),
+			ExitCode: -1,
+		}
+	}
+	executor, err := sshx.NewExecutor(fmt.Sprintf("%s:%d", host, port), user, credential, j.HostKeyFingerprint)
+	if err != nil {
+		return sshx.Result{Error: err.Error(), ExitCode: -1}
+	}
+	return executor.Run(ctx, j.Command)
 }
 
 type resultSubmissionError struct {

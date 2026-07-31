@@ -15,7 +15,7 @@ The installer keeps immutable releases in `/opt/vps-tools/releases/<version>` an
 /var/lib/vps-tools/backups/
 /etc/vps-tools/api.env
 /etc/vps-tools/runner.env
-/etc/vps-tools/known_hosts
+/etc/vps-tools/ssh-credentials/   (mode 0700, one file per SSH credential reference)
 ```
 
 ## Install
@@ -37,7 +37,19 @@ sudo /usr/local/libexec/vps-tools/healthcheck.sh
 
 The installer enables `vps-tools-backup-freshness.timer`. Start it after reviewing `backup.env`. It runs the freshness check 15 minutes after boot and every six hours afterwards. A failed check starts `vps-tools-backup-alert.service`, so failures are recorded in the journal and can be sent to the configured webhook.
 
-The example API configuration uses the self-contained SQLite tier and stores the database and local artifacts under `/var/lib/vps-tools`. Set the real authentication settings before exposing the API beyond localhost. The installer creates an empty `/etc/vps-tools/known_hosts` file, which must be populated with trusted target keys before enabling real SSH execution. Set `VPS_RUNNER_TOKEN`, `SSH_KNOWN_HOSTS`, and the SSH settings before using the runner against real targets. `SIMULATE=true` is for local testing only.
+The example API configuration uses the self-contained SQLite tier and stores the database and local artifacts under `/var/lib/vps-tools`. Set the real authentication settings before exposing the API beyond localhost. Set `VPS_RUNNER_TOKEN`, `SSH_CREDENTIALS_DIR`, and the SSH settings before using the runner against real targets. `SIMULATE=true` is for local testing only.
+
+SSH identity is per server, not per fleet. Each server records which credential it uses and the fingerprint of its host key, and the runner refuses to connect to a server missing either. Place one file per credential in `SSH_CREDENTIALS_DIR` (mode 0700, owned by the runner user), and record the fingerprint when registering the server:
+
+```bash
+ssh-keyscan -p 22 app.example.com | ssh-keygen -lf -
+vps server add app-prod --hostname app.example.com \
+  --ssh-user deploy \
+  --ssh-credential-ref app-prod \
+  --ssh-host-key-fingerprint SHA256:...
+```
+
+Private key material never reaches the control plane: the API stores only the reference, so a compromise of the API database does not yield the ability to log in to the fleet.
 
 The API service runs an HTTP health check after startup. The timer checks the API endpoint, the runner's loopback-only `/health` endpoint, and that both systemd services are active every minute. Prometheus can scrape `/metrics` from the API and the runner's loopback-only `/metrics`, preferably through a loopback-only or authenticated monitoring path. The runner health endpoint reports registration and completed-job counters, while its API heartbeat remains the control-plane liveness signal.
 

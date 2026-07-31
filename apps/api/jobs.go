@@ -59,8 +59,9 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		}
 	}
 	var targetID, execID, command, host, sshUser, sourceStatus string
+	var credentialRef, hostKeyFingerprint string
 	var sshPort, timeout int
-	err = runtime.QueryRowContext(ctx, tx, `SELECT et.id, e.id, et.status, COALESCE(NULLIF(e.command,''), e.command_preview), COALESCE(s.hostname, s.public_ip, ''), s.ssh_port, COALESCE(s.ssh_username,''), e.timeout_seconds
+	err = runtime.QueryRowContext(ctx, tx, `SELECT et.id, e.id, et.status, COALESCE(NULLIF(e.command,''), e.command_preview), COALESCE(s.hostname, s.public_ip, ''), s.ssh_port, COALESCE(s.ssh_username,''), COALESCE(s.ssh_credential_ref,''), COALESCE(s.ssh_host_key_fingerprint,''), e.timeout_seconds
 		FROM execution_targets et JOIN executions e ON e.id = et.execution_id JOIN servers s ON s.id = et.server_id
 		WHERE e.status IN ('queued','running') AND e.organisation_id = ?
 		AND (? = '' OR et.id = ?)
@@ -70,7 +71,7 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		AND EXISTS (SELECT 1 FROM runners rn JOIN runner_scopes rs ON rs.runner_id = rn.id
 			WHERE rn.id = ? AND rn.organisation_id = ? AND rn.status = 'active'
 			AND (rs.scope_type = 'all' OR (rs.scope_type = 'server' AND rs.scope_value = et.server_id)))
-		ORDER BY e.requested_at ASC LIMIT 1`, runnerOrg, targetFilter, targetFilter, runnerID, runnerOrg).Scan(&targetID, &execID, &sourceStatus, &command, &host, &sshPort, &sshUser, &timeout)
+		ORDER BY e.requested_at ASC LIMIT 1`, runnerOrg, targetFilter, targetFilter, runnerID, runnerOrg).Scan(&targetID, &execID, &sourceStatus, &command, &host, &sshPort, &sshUser, &credentialRef, &hostKeyFingerprint, &timeout)
 	if err != nil {
 		if err := tx.Commit(); err != nil {
 			_ = err
@@ -106,16 +107,18 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 	// its own, so the signature is what proves the control plane approved this
 	// exact command against this exact host for this lease.
 	claims := jobsign.Claims{
-		ExecutionID:   execID,
-		TargetID:      targetID,
-		LeaseID:       leaseID,
-		RunnerID:      runnerID,
-		Command:       command,
-		Host:          host,
-		Port:          sshPort,
-		User:          sshUser,
-		Timeout:       timeout,
-		ExpiresAtUnix: leaseExpires.Unix(),
+		ExecutionID:        execID,
+		TargetID:           targetID,
+		LeaseID:            leaseID,
+		RunnerID:           runnerID,
+		Command:            command,
+		Host:               host,
+		Port:               sshPort,
+		User:               sshUser,
+		Timeout:            timeout,
+		CredentialRef:      credentialRef,
+		HostKeyFingerprint: hostKeyFingerprint,
+		ExpiresAtUnix:      leaseExpires.Unix(),
 	}
 	signature, err := apiJobSigner.Sign(claims)
 	if err != nil {
@@ -127,17 +130,19 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"target_id":       targetID,
-		"execution_id":    execID,
-		"command":         command,
-		"host":            host,
-		"port":            sshPort,
-		"user":            sshUser,
-		"timeout":         timeout,
-		"lease_id":        leaseID,
-		"runner_id":       runnerID,
-		"expires_at_unix": leaseExpires.Unix(),
-		"signature":       signature,
+		"target_id":            targetID,
+		"execution_id":         execID,
+		"command":              command,
+		"host":                 host,
+		"port":                 sshPort,
+		"user":                 sshUser,
+		"credential_ref":       credentialRef,
+		"host_key_fingerprint": hostKeyFingerprint,
+		"timeout":              timeout,
+		"lease_id":             leaseID,
+		"runner_id":            runnerID,
+		"expires_at_unix":      leaseExpires.Unix(),
+		"signature":            signature,
 	})
 }
 

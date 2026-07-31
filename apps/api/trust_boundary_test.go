@@ -43,17 +43,19 @@ func TestClaimedJobIsSignedAndVerifies(t *testing.T) {
 		t.Fatalf("claim failed: %d %s", w.Code, w.Body.String())
 	}
 	var dispatched struct {
-		ExecutionID string `json:"execution_id"`
-		TargetID    string `json:"target_id"`
-		LeaseID     string `json:"lease_id"`
-		RunnerID    string `json:"runner_id"`
-		Command     string `json:"command"`
-		Host        string `json:"host"`
-		Port        int    `json:"port"`
-		User        string `json:"user"`
-		Timeout     int    `json:"timeout"`
-		ExpiresAt   int64  `json:"expires_at_unix"`
-		Signature   string `json:"signature"`
+		ExecutionID        string `json:"execution_id"`
+		TargetID           string `json:"target_id"`
+		LeaseID            string `json:"lease_id"`
+		RunnerID           string `json:"runner_id"`
+		Command            string `json:"command"`
+		Host               string `json:"host"`
+		Port               int    `json:"port"`
+		User               string `json:"user"`
+		CredentialRef      string `json:"credential_ref"`
+		HostKeyFingerprint string `json:"host_key_fingerprint"`
+		Timeout            int    `json:"timeout"`
+		ExpiresAt          int64  `json:"expires_at_unix"`
+		Signature          string `json:"signature"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &dispatched); err != nil {
 		t.Fatalf("decode dispatched job: %v", err)
@@ -65,7 +67,9 @@ func TestClaimedJobIsSignedAndVerifies(t *testing.T) {
 		ExecutionID: dispatched.ExecutionID, TargetID: dispatched.TargetID,
 		LeaseID: dispatched.LeaseID, RunnerID: dispatched.RunnerID,
 		Command: dispatched.Command, Host: dispatched.Host, Port: dispatched.Port,
-		User: dispatched.User, Timeout: dispatched.Timeout, ExpiresAtUnix: dispatched.ExpiresAt,
+		User: dispatched.User, Timeout: dispatched.Timeout,
+		CredentialRef: dispatched.CredentialRef, HostKeyFingerprint: dispatched.HostKeyFingerprint,
+		ExpiresAtUnix: dispatched.ExpiresAt,
 	}
 	if err := mustTestSigner(t).Verify(claims, dispatched.Signature, time.Now()); err != nil {
 		t.Fatalf("dispatched job did not verify: %v", err)

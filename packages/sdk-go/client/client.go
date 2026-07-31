@@ -130,17 +130,24 @@ type Server struct {
 	PrivateIP   string      `json:"private_ip"`
 	SSHPort     int         `json:"ssh_port"`
 	SSHUsername string      `json:"ssh_username"`
-	Environment string      `json:"environment"`
-	Provider    string      `json:"provider"`
-	OSName      string      `json:"os_name"`
-	OSVersion   string      `json:"os_version"`
-	Kernel      string      `json:"kernel_version"`
-	Arch        string      `json:"architecture"`
-	Status      string      `json:"status"`
-	LastSeenAt  string      `json:"last_seen_at"`
-	LastCheckAt string      `json:"last_check_at"`
-	CreatedAt   string      `json:"created_at"`
-	Tags        []ServerTag `json:"tags"`
+	// SSHCredentialRef names the credential the runner should use for this
+	// server. It is a reference only; the key material never leaves the
+	// runner's own keystore.
+	SSHCredentialRef string `json:"ssh_credential_ref"`
+	// SSHHostKeyFingerprint pins the server's SSH host key. A server without
+	// one cannot be executed against.
+	SSHHostKeyFingerprint string      `json:"ssh_host_key_fingerprint"`
+	Environment           string      `json:"environment"`
+	Provider              string      `json:"provider"`
+	OSName                string      `json:"os_name"`
+	OSVersion             string      `json:"os_version"`
+	Kernel                string      `json:"kernel_version"`
+	Arch                  string      `json:"architecture"`
+	Status                string      `json:"status"`
+	LastSeenAt            string      `json:"last_seen_at"`
+	LastCheckAt           string      `json:"last_check_at"`
+	CreatedAt             string      `json:"created_at"`
+	Tags                  []ServerTag `json:"tags"`
 }
 
 type ListServersResponse struct {
@@ -169,15 +176,17 @@ func (c *Client) ListServers(environment, tagKey, tagValue string) (*ListServers
 }
 
 type AddServerRequest struct {
-	Name        string `json:"name"`
-	Hostname    string `json:"hostname"`
-	PublicIP    string `json:"public_ip"`
-	PrivateIP   string `json:"private_ip"`
-	SSHPort     int    `json:"ssh_port"`
-	SSHUsername string `json:"ssh_username"`
-	Environment string `json:"environment"`
-	Provider    string `json:"provider"`
-	Tags        []struct {
+	Name                  string `json:"name"`
+	Hostname              string `json:"hostname"`
+	PublicIP              string `json:"public_ip"`
+	PrivateIP             string `json:"private_ip"`
+	SSHPort               int    `json:"ssh_port"`
+	SSHUsername           string `json:"ssh_username"`
+	SSHCredentialRef      string `json:"ssh_credential_ref"`
+	SSHHostKeyFingerprint string `json:"ssh_host_key_fingerprint"`
+	Environment           string `json:"environment"`
+	Provider              string `json:"provider"`
+	Tags                  []struct {
 		Key   string `json:"key"`
 		Value string `json:"value"`
 	} `json:"tags"`

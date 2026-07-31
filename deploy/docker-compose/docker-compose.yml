@@ -15,6 +15,10 @@ services:
       context: ./ssh-target
     ports:
       - "2222:22"
+    # These configure the throwaway target container's own account. The runner
+    # no longer reads a fleet-wide SSH_PASSWORD: it resolves a per-server
+    # credential from SSH_CREDENTIALS_DIR and pins the host key recorded when
+    # the server was registered.
     environment:
       SSH_USER: svrtools
       SSH_PASSWORD: svrtools
