@@ -72,6 +72,16 @@ sudo systemctl status vps-tools-api.service vps-tools-runner.service
 
 The script creates and verifies a pre-upgrade backup when the installed backup helper is available, stages the new binaries, stops the services, switches the `current` symlink atomically, starts the API, waits for `/api/v1/ready`, and starts the runner. If the API readiness check or either start fails, it restores the previous symlink and starts the previous release. Configuration and `/var/lib/vps-tools` are left in place. Schema compatibility still needs to be maintained for binary rollback.
 
+### Upgrading onto per-server SSH identity
+
+This release replaces the fleet-wide `SSH_PASSWORD` and shared `SSH_KNOWN_HOSTS` file with a per-server credential reference and pinned host key. Execution against real targets stops until each server has both recorded, and it fails closed with a clear message rather than connecting unverified. Plan the following before upgrading a host that runs real SSH:
+
+1. Create `/etc/vps-tools/ssh-credentials` (mode `0700`, owned by `vps-tools`) and place one PEM private key per credential reference in it. The installer creates the directory on a fresh install.
+2. Set `SSH_CREDENTIALS_DIR` in `/etc/vps-tools/runner.env` and remove `SSH_PASSWORD` and `SSH_KNOWN_HOSTS`, which are no longer read.
+3. For every server, record the credential reference and the host key fingerprint from `ssh-keyscan -p <port> <host> | ssh-keygen -lf -`.
+
+The web console server list marks any server still missing either value, so the remaining work is visible without querying the database. Existing servers keep both columns empty on purpose: the upgrade cannot know which key each host should present, and assuming one would reintroduce exactly the unverified connection this change removes.
+
 ## Rollback
 
 List installed releases, select the previous version, and run:

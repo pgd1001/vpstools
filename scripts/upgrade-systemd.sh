@@ -21,6 +21,17 @@ install -m 0755 "$release_dir/vps" "$tmp/vps"
 mv "$tmp" "$target"
 trap - EXIT HUP INT TERM
 
+# A host upgraded from a release that predates per-server SSH identity has no
+# credential directory, because only the installer created it. Create it here
+# too so the runner's configured SSH_CREDENTIALS_DIR exists and an operator has
+# somewhere to place keys. It is left empty: the upgrade cannot know which key
+# belongs to which host, and the runner refuses a server whose credential does
+# not resolve rather than connecting unverified.
+if [ ! -d /etc/vps-tools/ssh-credentials ]; then
+    install -d -m 0700 /etc/vps-tools/ssh-credentials
+    chown vps-tools:vps-tools /etc/vps-tools/ssh-credentials 2>/dev/null || true
+fi
+
 old_target=$(readlink -f /opt/vps-tools/current 2>/dev/null || true)
 case "$old_target" in
     "") ;;
