@@ -16,7 +16,15 @@ func handleSearchAudit(w http.ResponseWriter, r *http.Request) {
 	if l := r.URL.Query().Get("limit"); l != "" {
 		limit = l
 	}
-	query := "SELECT id, organisation_id, actor_user_id, action, target_type, target_id, result, metadata, occurred_at FROM audit_events WHERE organisation_id = ?"
+	// actor_user_id, target_type, and target_id are nullable. Events written by
+	// the system rather than a person (runner job results, scheduled runs) have
+	// no actor, so they must be coalesced rather than scanned into a string.
+	// Without this they fail to scan and are silently dropped from the results,
+	// which would hide exactly the automated actions the audit trail exists to
+	// record.
+	query := `SELECT id, organisation_id, COALESCE(actor_user_id,''), action,
+		COALESCE(target_type,''), COALESCE(target_id,''), result, metadata, occurred_at
+		FROM audit_events WHERE organisation_id = ?`
 	args := []any{actor.OrganisationID}
 	if actorFilter != "" {
 		query += " AND actor_user_id = ?"
@@ -36,7 +44,11 @@ func handleSearchAudit(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, orgID, actorID, action, targetType, targetID, result, metadata, createdAt string
 		if err := rows.Scan(&id, &orgID, &actorID, &action, &targetType, &targetID, &result, &metadata, &createdAt); err != nil {
-			continue
+			// A row that cannot be decoded is a real problem for an audit
+			// trail: silently skipping it makes the response look complete
+			// when it is not.
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read audit events"})
+			return
 		}
 		events = append(events, map[string]any{
 			"id":              id,
