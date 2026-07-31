@@ -57,11 +57,14 @@ migrations/
 ```
 apps/
   cli/          # Cobra CLI (main.go, root.go, whoami.go, server.go, exec.go, audit.go)
-  api/          # net/http API + SQLite (main.go, helpers.go, migrate/seed stubs)
+  api/          # net/http API + SQLite. main.go is startup only; routes.go holds
+                #   the route table and handlers live in auth.go, servers.go,
+                #   runners.go, executions.go, jobs.go, audit.go, runbooks.go
   runner/       # SSH executor with SIMULATE fallback
 packages/
   sdk-go/client/  # HTTP client for CLI→API communication
   sshx/           # Go crypto/ssh command execution (error handling tested)
+  jobsign/        # HMAC signing of dispatched jobs (the runner trust boundary)
   audit/          # Audit event Go struct
   runbooks/       # Runbook YAML schema types
   proto/          # Protobuf definitions (not yet code-generated — Phase 1)
@@ -102,15 +105,32 @@ make generate                            # buf generate + sqlc generate
 
 ### Run the full vertical slice
 
-```bash
+```powershell
+# Shared configuration. JOB_SIGNING_KEY is mandatory: the API signs every
+# dispatched job and the runner refuses any job it cannot verify. It must be at
+# least 32 characters and identical for both processes.
+$env:JOB_SIGNING_KEY = "local-dev-signing-key-at-least-32-chars"
+# Development identity headers only work in an explicitly non-production
+# environment. Anything else (including unset) is treated as production.
+$env:VPS_ENV = "development"
+$env:VPS_DEV_AUTH = "true"
+
 # Terminal 1: Start API (auto-migrates + seeds on first run)
 .\bin\api.exe
 
-# Terminal 2: Queue an execution
+# Terminal 2: Queue an execution. The API never infers an identity, so the
+# actor must be supplied.
+$env:VPS_USER = "user_senior"
 .\bin\vps.exe exec server:demo -- uptime
 
-# Terminal 3: Run the runner (simulate mode — no SSH needed)
+# Terminal 2: Mint a runner bootstrap credential. There is no tokenless path.
+.\bin\vps.exe runner registration-token
+
+# Terminal 3: Run the runner (simulate mode - no SSH needed). Registration
+# exchanges this bootstrap credential for one bound to the runner's identity,
+# which is what the job endpoints require.
 $env:SIMULATE = "true"
+$env:VPS_RUNNER_TOKEN = "<token from the previous step>"
 .\bin\runner.exe
 
 # Terminal 2: Check audit trail
