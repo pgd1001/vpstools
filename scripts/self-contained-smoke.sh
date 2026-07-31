@@ -35,6 +35,9 @@ export ARTIFACTS_DIR="$VPS_ARTIFACTS_DIR"
 export API_PORT="$port"
 export VPS_ENV=development
 export VPS_DEV_AUTH=true
+# The API signs every dispatched job and the runner refuses any job it cannot
+# verify, so both processes need the same key.
+export JOB_SIGNING_KEY=self-contained-smoke-signing-key-32ch
 export VPS_API_URL="http://127.0.0.1:$port"
 export VPS_USER=user_senior
 export VPS_API_TOKEN=

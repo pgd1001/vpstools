@@ -51,6 +51,12 @@ check_contains "$postgres_restore" 'CONFIRM_RESTORE' 'PostgreSQL restore helper 
 check_contains "$extended_backup" 'ARTIFACT_MANIFEST' 'Extended backup helper does not require an S3 artifact manifest'
 check_contains "$extended_restore" 'CONFIRM_RESTORE' 'Extended restore helper lacks explicit confirmation'
 
+# The API and the runner must agree on the job signing key. The API refuses to
+# start without it and the runner refuses every job it cannot verify, so a
+# deployment example that omits it produces a service that will not start.
+check_contains "$systemd_dir/api.env.example" '^JOB_SIGNING_KEY=' 'API environment example does not set JOB_SIGNING_KEY'
+check_contains "$systemd_dir/runner.env.example" '^JOB_SIGNING_KEY=' 'runner environment example does not set JOB_SIGNING_KEY'
+
 # Every installed systemd helper referenced by ExecStart must exist in the
 # source scripts directory and be included by the installer.
 for unit in "$systemd_dir"/*.service; do
