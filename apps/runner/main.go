@@ -209,9 +209,9 @@ func main() {
 }
 
 type runnerHealth struct {
-	registered         atomic.Bool
-	claimed            atomic.Uint64
-	completed          atomic.Uint64
+	registered atomic.Bool
+	claimed    atomic.Uint64
+	completed  atomic.Uint64
 	// rejected counts jobs refused because their signature did not verify.
 	// A non-zero value means something is dispatching jobs this runner does
 	// not trust, which is worth alerting on.
