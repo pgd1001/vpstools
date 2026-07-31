@@ -36,6 +36,10 @@ type tag struct {
 
 var policy = authz.NewPolicy()
 var apiDB *sql.DB
+
+// apiReadDB serves read-only queries. It is nil for backends that pool
+// connections themselves, in which case reads use the primary handle.
+var apiReadDB *sql.DB
 var apiArtifacts artifacts.Store
 var apiBackends config.BackendConfig
 var apiDispatcher dispatch.Publisher
@@ -80,6 +84,18 @@ func main() {
 	}
 	defer db.Close()
 	apiDB = db
+	// SQLite serialises writers but not WAL readers, so read traffic gets its
+	// own pool. Without this every list query queues behind the single writer
+	// and a handful of polling runners saturate the whole API.
+	readDB, err := openMetadataReadDatabase(ctx, apiBackends)
+	if err != nil {
+		logger.Error("read pool open failed", "error", err)
+		os.Exit(1)
+	}
+	if readDB != nil {
+		defer readDB.Close()
+		apiReadDB = readDB
+	}
 	apiArtifacts, err = newArtifactStore(apiBackends)
 	if err != nil {
 		logger.Error("artifact store initialisation failed", "error", err)
@@ -697,6 +713,22 @@ func dbFromRequest(r *http.Request) *sql.DB {
 	return apiDB
 }
 
+// readDBFrom returns the handle a read-only handler should use.
+//
+// When a request is pinned to a tenant connection (PostgreSQL row-level
+// security), that pinned connection carries the tenant GUC and must be used,
+// so the read pool is bypassed. Otherwise SQLite reads go to the wider read
+// pool instead of contending for the single writer.
+func readDBFrom(r *http.Request) *sql.DB {
+	if tenantConnection(r.Context()) != nil {
+		return dbFrom(r)
+	}
+	if apiReadDB != nil {
+		return apiReadDB
+	}
+	return dbFrom(r)
+}
+
 func authenticateRunnerRegistration(db *sql.DB, r *http.Request) (string, error) {
 	orgID, _, err := authenticateRunnerCredential(db, r)
 	return orgID, err
@@ -912,7 +944,7 @@ func handleListServers(w http.ResponseWriter, r *http.Request) {
 
 	query += " ORDER BY s.name ASC"
 
-	rows, err := apiQuery(r.Context(), dbFrom(r), query, args...)
+	rows, err := apiQuery(r.Context(), readDBFrom(r), query, args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "query failed"})
 		return
@@ -1128,7 +1160,7 @@ type serverDetail struct {
 
 func handleGetServer(w http.ResponseWriter, r *http.Request, serverID string) {
 	actor, _ := authz.RequireActor(r.Context())
-	db := dbFrom(r)
+	db := readDBFrom(r)
 	s := serverDetail{
 		Tags: loadTags(r.Context(), db, actor.OrganisationID, serverID),
 	}
@@ -1213,7 +1245,7 @@ func handleCheckServer(w http.ResponseWriter, r *http.Request, serverID string) 
 
 func handleListRunners(w http.ResponseWriter, r *http.Request) {
 	actor, _ := authz.RequireActor(r.Context())
-	rows, err := apiQuery(r.Context(), dbFrom(r),
+	rows, err := apiQuery(r.Context(), readDBFrom(r),
 		`SELECT id, name, runner_type, status, COALESCE(version,''), COALESCE(hostname,''),
 		COALESCE(platform,''), COALESCE(ip_address,''), COALESCE(last_seen_at,''),
 		COALESCE(registered_at,''), COALESCE(revoked_at,''), created_at
@@ -1590,7 +1622,7 @@ func handleListExecutions(w http.ResponseWriter, r *http.Request) {
 	query += " ORDER BY e.requested_at DESC LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := apiQuery(r.Context(), dbFrom(r), query, args...)
+	rows, err := apiQuery(r.Context(), readDBFrom(r), query, args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "query failed"})
 		return
@@ -1632,7 +1664,7 @@ func handleListExecutions(w http.ResponseWriter, r *http.Request) {
 
 func handleGetExecution(w http.ResponseWriter, r *http.Request, execID string) {
 	actor, _ := authz.RequireActor(r.Context())
-	db := dbFrom(r)
+	db := readDBFrom(r)
 	var e struct {
 		ID             string `json:"id"`
 		ActorUserID    string `json:"actor_user_id"`
@@ -1933,7 +1965,7 @@ func handleSearchAudit(w http.ResponseWriter, r *http.Request) {
 	query += " ORDER BY occurred_at DESC LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := apiQuery(r.Context(), dbFrom(r), query, args...)
+	rows, err := apiQuery(r.Context(), readDBFrom(r), query, args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "query failed"})
 		return
@@ -2125,9 +2157,15 @@ func handleClaimJob(ctx context.Context, db *sql.DB, w http.ResponseWriter, r *h
 		return
 	}
 	defer tx.Rollback()
-	if err := reconcileExpiredLeases(ctx, tx, runnerOrg); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to reconcile expired jobs"})
-		return
+	// Expired leases are reclaimed by the claim query below regardless, so
+	// reconciliation only has to run often enough to apply backoff and
+	// dead-lettering. Throttling it keeps a fleet of polling runners from
+	// turning every claim into a full scan.
+	if claimReconcileThrottle.due(runnerOrg, time.Now()) {
+		if err := reconcileExpiredLeases(ctx, tx, runnerOrg); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to reconcile expired jobs"})
+			return
+		}
 	}
 	var targetID, execID, command, host, sshUser, sourceStatus string
 	var sshPort, timeout int

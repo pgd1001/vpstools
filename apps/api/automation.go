@@ -203,8 +203,41 @@ func runEmbeddedScheduler(ctx context.Context, db *sql.DB, logger *slog.Logger) 
 			if err := runDueSchedulesOnce(ctx, db); err != nil {
 				logger.Error("embedded scheduler cycle failed", "error", err)
 			}
+			// Reconciliation is throttled on the claim path so runner polls
+			// stay cheap. Running it here guarantees abandoned work is
+			// dead-lettered even when no runner is polling at all.
+			if err := reconcileAllOrganisationLeases(ctx, db); err != nil {
+				logger.Error("lease reconciliation cycle failed", "error", err)
+			}
 		}
 	}
+}
+
+// reconcileAllOrganisationLeases applies retry backoff and dead-lettering for
+// every organisation that currently has leased work.
+func reconcileAllOrganisationLeases(ctx context.Context, db *sql.DB) error {
+	rows, err := apiQuery(ctx, db, `SELECT DISTINCT organisation_id FROM execution_targets WHERE status = 'running'`)
+	if err != nil {
+		return err
+	}
+	organisationIDs := []string{}
+	for rows.Next() {
+		var organisationID string
+		if err := rows.Scan(&organisationID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		organisationIDs = append(organisationIDs, organisationID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, organisationID := range organisationIDs {
+		if err := reconcileExpiredLeases(ctx, db, organisationID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func runDueSchedulesOnce(ctx context.Context, db *sql.DB) error {

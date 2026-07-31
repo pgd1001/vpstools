@@ -38,6 +38,9 @@ func testAPI(t *testing.T) (*sql.DB, *http.ServeMux, func()) {
 	t.Setenv("APP_ENV", "")
 	t.Setenv("ENVIRONMENT", "")
 	apiJobSigner = mustTestSigner(t)
+	// The reconcile throttle is process-global; reset it so tests do not
+	// inherit another test's timing.
+	claimReconcileThrottle = newReconcileThrottle()
 	db, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
 		t.Fatalf("db open: %v", err)
@@ -966,6 +969,10 @@ func TestExpiredLeaseAtAttemptLimitIsReconciled(t *testing.T) {
 	if _, err := db.Exec(`UPDATE execution_targets SET attempt = max_attempts, lease_expires_at = datetime('now','-1 second') WHERE id = ?`, claim.TargetID); err != nil {
 		t.Fatal(err)
 	}
+	// Reconciliation is throttled per organisation so runner polls stay cheap.
+	// Clear the throttle so the next claim performs it, which is what this test
+	// is about; the background scheduler covers the untriggered case.
+	claimReconcileThrottle.forget("org_demo")
 
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/jobs/next?runner_id=rnr_local", nil)
 	req.Header.Set("X-VPS-Runner-Token", "test-runner-token")
