@@ -173,10 +173,14 @@ func handleUpdateServer(w http.ResponseWriter, r *http.Request, serverID string)
 	}
 	var req struct {
 		Name, Hostname, PublicIP, PrivateIP, SSHUsername, Environment, Provider string
-		SSHCredentialRef                                                        string `json:"ssh_credential_ref"`
-		SSHHostKeyFinger                                                        string `json:"ssh_host_key_fingerprint"`
-		SSHPort                                                                 int
-		Tags                                                                    []tag `json:"tags"`
+		// Pointers so an omitted field preserves the stored value. Clearing a
+		// host key pin silently, because a client did not know to send it back,
+		// would turn every later connection to that server into an unverified
+		// one. Only an explicit null clears these.
+		SSHCredentialRef *string `json:"ssh_credential_ref"`
+		SSHHostKeyFinger *string `json:"ssh_host_key_fingerprint"`
+		SSHPort          int
+		Tags             []tag `json:"tags"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
@@ -193,7 +197,7 @@ func handleUpdateServer(w http.ResponseWriter, r *http.Request, serverID string)
 		writeJSON(w, 400, map[string]string{"error": "invalid environment"})
 		return
 	}
-	if err := validateSSHIdentity(req.SSHCredentialRef, req.SSHHostKeyFinger); err != nil {
+	if err := validateSSHIdentity(derefOrEmpty(req.SSHCredentialRef), derefOrEmpty(req.SSHHostKeyFinger)); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
@@ -204,7 +208,9 @@ func handleUpdateServer(w http.ResponseWriter, r *http.Request, serverID string)
 		return
 	}
 	defer tx.Rollback()
-	res, err := apiExec(r.Context(), tx, `UPDATE servers SET name=?, hostname=?, public_ip=?, private_ip=?, ssh_port=?, ssh_username=?, ssh_credential_ref=?, ssh_host_key_fingerprint=?, environment=?, provider=? WHERE id=? AND organisation_id=? AND status != 'archived'`, req.Name, sqlNullString(req.Hostname), sqlNullString(req.PublicIP), sqlNullString(req.PrivateIP), req.SSHPort, sqlNullString(req.SSHUsername), sqlNullString(req.SSHCredentialRef), sqlNullString(req.SSHHostKeyFinger), req.Environment, sqlNullString(req.Provider), serverID, actor.OrganisationID)
+	// COALESCE keeps the stored value when the request omitted the field, so a
+	// client that does not manage SSH identity cannot erase it by accident.
+	res, err := apiExec(r.Context(), tx, `UPDATE servers SET name=?, hostname=?, public_ip=?, private_ip=?, ssh_port=?, ssh_username=?, ssh_credential_ref=COALESCE(?, ssh_credential_ref), ssh_host_key_fingerprint=COALESCE(?, ssh_host_key_fingerprint), environment=?, provider=? WHERE id=? AND organisation_id=? AND status != 'archived'`, req.Name, sqlNullString(req.Hostname), sqlNullString(req.PublicIP), sqlNullString(req.PrivateIP), req.SSHPort, sqlNullString(req.SSHUsername), sqlNullOptionalString(req.SSHCredentialRef), sqlNullOptionalString(req.SSHHostKeyFinger), req.Environment, sqlNullString(req.Provider), serverID, actor.OrganisationID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to update server"})
 		return
@@ -388,6 +394,30 @@ func validateSSHIdentity(credentialRef, hostKeyFingerprint string) error {
 		return errors.New("ssh_host_key_fingerprint must be an OpenSSH SHA256 fingerprint, for example SHA256:abc...")
 	}
 	return nil
+}
+
+// derefOrEmpty reads an optional request field for validation. An omitted
+// field validates trivially because it leaves the stored value untouched.
+func derefOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+// sqlNullOptionalString distinguishes "not supplied", which must preserve the
+// stored value, from "supplied as empty", which deliberately clears it.
+func sqlNullOptionalString(value *string) any {
+	if value == nil {
+		return nil
+	}
+	if strings.TrimSpace(*value) == "" {
+		// An explicit empty value clears the column. COALESCE would keep the
+		// old value for a NULL, so the caller's intent to clear is carried as
+		// an empty string and normalised to NULL on read.
+		return ""
+	}
+	return strings.TrimSpace(*value)
 }
 
 func loadTags(ctx context.Context, db *sql.DB, orgID, serverID string) []tag {

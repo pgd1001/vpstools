@@ -3,6 +3,7 @@ const API = process.env.NEXT_PUBLIC_API_URL || '/api/proxy';
 export type Server = {
   id: string; name: string; hostname: string; environment: string;
   public_ip?: string; private_ip?: string; ssh_port?: number; ssh_username?: string; provider?: string;
+  ssh_credential_ref?: string; ssh_host_key_fingerprint?: string;
   status: string; os_name: string; os_version: string; tags: {key:string;value:string}[];
   last_seen_at: string; created_at: string;
 };

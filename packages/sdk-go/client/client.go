@@ -123,13 +123,13 @@ type ServerTag struct {
 }
 
 type Server struct {
-	ID          string      `json:"id"`
-	Name        string      `json:"name"`
-	Hostname    string      `json:"hostname"`
-	PublicIP    string      `json:"public_ip"`
-	PrivateIP   string      `json:"private_ip"`
-	SSHPort     int         `json:"ssh_port"`
-	SSHUsername string      `json:"ssh_username"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Hostname    string `json:"hostname"`
+	PublicIP    string `json:"public_ip"`
+	PrivateIP   string `json:"private_ip"`
+	SSHPort     int    `json:"ssh_port"`
+	SSHUsername string `json:"ssh_username"`
 	// SSHCredentialRef names the credential the runner should use for this
 	// server. It is a reference only; the key material never leaves the
 	// runner's own keystore.

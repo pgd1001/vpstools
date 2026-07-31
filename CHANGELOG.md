@@ -21,7 +21,7 @@ Changes after `0.1.0-beta.1` will be recorded here first. Once a change is ready
 
 ### Added
 
-- `vps server add --ssh-credential-ref` and `--ssh-host-key-fingerprint`, with the same fields on the server API, Go SDK, and server detail responses. The CLI warns at registration when either is missing, since the server cannot be executed against until both are recorded.
+- `vps server add --ssh-credential-ref` and `--ssh-host-key-fingerprint`, with the same fields on the server API, Go SDK, web console, and server detail responses. The CLI warns at registration when either is missing, and the web console server list marks any server that is not yet executable. A server update that omits these fields preserves the stored values, so a client that does not manage SSH identity cannot silently clear a host key pin.
 - `packages/sshcreds`, the runner-local keystore that resolves a credential reference to key material. References are validated before use, so a reference from the API cannot escape the keystore directory.
 - `svrtools_runner_jobs_rejected_total`, which counts jobs a runner refused because the signature did not verify. It is non-zero only when something is dispatching jobs the runner does not trust.
 - Schema parity is now derived from both dialects and compared in full, so a column added to SQLite or PostgreSQL and forgotten in the other fails the build.

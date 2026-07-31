@@ -91,6 +91,59 @@ func TestRegisteredSSHIdentityReachesDispatch(t *testing.T) {
 	}
 }
 
+// A client that does not manage SSH identity, such as the web console's server
+// form, must not silently clear the host key pin by omitting it. Losing the pin
+// would turn every later connection to that server into an unverified one.
+func TestPartialServerUpdatePreservesSSHIdentity(t *testing.T) {
+	_, mux, cleanup := testAPI(t)
+	defer cleanup()
+
+	fingerprint := "SHA256:" + strings.Repeat("C", 43)
+	create := doRequest(t, mux, http.MethodPost, "/api/v1/servers",
+		`{"name":"pinned","hostname":"pinned.example.com","ssh_credential_ref":"pinned",`+
+			`"ssh_host_key_fingerprint":"`+fingerprint+`","environment":"development"}`, "user_senior")
+	if create.Code != http.StatusCreated {
+		t.Fatalf("register server failed: %d %s", create.Code, create.Body.String())
+	}
+	var created struct {
+		ServerID string `json:"server_id"`
+	}
+	if err := json.Unmarshal(create.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	// An update that renames the server and says nothing about SSH identity.
+	update := doRequest(t, mux, http.MethodPatch, "/api/v1/servers/"+created.ServerID,
+		`{"Name":"pinned-renamed","Environment":"development"}`, "user_senior")
+	if update.Code != http.StatusOK {
+		t.Fatalf("update failed: %d %s", update.Code, update.Body.String())
+	}
+
+	detail := doRequest(t, mux, http.MethodGet, "/api/v1/servers/"+created.ServerID, "", "user_senior")
+	if detail.Code != http.StatusOK {
+		t.Fatalf("fetch failed: %d %s", detail.Code, detail.Body.String())
+	}
+	var fetched struct {
+		Server struct {
+			Name             string `json:"name"`
+			SSHCredentialRef string `json:"ssh_credential_ref"`
+			SSHHostKeyFinger string `json:"ssh_host_key_fingerprint"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(detail.Body.Bytes(), &fetched); err != nil {
+		t.Fatalf("decode server detail: %v", err)
+	}
+	if fetched.Server.Name != "pinned-renamed" {
+		t.Fatalf("the update did not apply, name is %q", fetched.Server.Name)
+	}
+	if fetched.Server.SSHHostKeyFinger != fingerprint {
+		t.Fatalf("the host key pin was lost by an unrelated update, got %q", fetched.Server.SSHHostKeyFinger)
+	}
+	if fetched.Server.SSHCredentialRef != "pinned" {
+		t.Fatalf("the credential reference was lost by an unrelated update, got %q", fetched.Server.SSHCredentialRef)
+	}
+}
+
 // A fingerprint that cannot be compared is worse than an obvious error: it
 // would look like the host was pinned when it was not. Malformed values are
 // therefore refused at the API boundary.
