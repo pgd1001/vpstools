@@ -1,6 +1,6 @@
 # Security and operations
 
-VPS Tools is designed around a control-plane trust boundary. The API authorises work, the runner executes an already-authorised job, and the audit trail records privileged actions. Operators should preserve that separation in every deployment.
+VPS Tools is designed around a control-plane trust boundary. The API authorises work, the runner executes an already-authorised job, and the audit trail records privileged actions. That separation is enforced, not just conventional: every dispatched job is signed by the API and verified by the runner before execution, and the endpoints a runner calls require a credential bound to that runner's identity. Operators should preserve the separation in every deployment.
 
 ## Deployment checklist
 
@@ -12,7 +12,8 @@ For a self-contained installation:
 - Use a stable `ARTIFACT_ENCRYPTION_KEY` and store it outside the repository.
 - Bind the API to localhost when only local clients need access. Put it behind TLS when accessed over a network.
 - Enable OIDC for shared environments. Development header identity is not an authentication system.
-- Set `VPS_ENV=production` in the API environment. Startup then rejects development identity and runner bypasses.
+- Set a strong `JOB_SIGNING_KEY` (at least 32 characters) and give the API and every runner the same value. The API signs each dispatched job over the command, host, port, user, timeout, and lease; the runner refuses anything it cannot verify. Treat it like a private key: rotate it by restarting both sides together, and watch `svrtools_runner_jobs_rejected_total`, which is non-zero only when something is dispatching jobs a runner does not trust.
+- Declare the environment explicitly. Anything that is not a recognised non-production name, including an unset value, is treated as production, which rejects development header identity.
 - Keep the web console and API on the configured origin. The web proxy rejects state-changing browser requests without a matching `Origin` header.
 - Schedule and test backups of both SQLite metadata and artefacts.
 

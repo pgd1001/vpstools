@@ -9,7 +9,8 @@
 
 - **Simulated SSH when Docker unavailable.** Set `SIMULATE=true` for local dev without real SSH target.
 - **Single runner.** The MVP supports one runner per organisation. Multiple runner federations not yet supported.
-- **Runner credentials are short-lived and runner-bound.** Registration credentials expire after one hour. Issuing a replacement or revoking its runner invalidates the previous credential. Secret-manager-backed provisioning and self-service credential rotation remain future work.
+- **Runner credentials are runner-bound.** A bootstrap registration credential is valid for one hour and is only good for the registration handshake, which exchanges it for a credential bound to that runner identity. The job endpoints (claim, renew, result, heartbeat) accept only the bound form, so one runner cannot act as another within an organisation. Bound credentials last 30 days and are replaced by re-registering; issuing a replacement or revoking the runner invalidates the previous credential. Secret-manager-backed provisioning and self-service rotation remain future work.
+- **Dispatched jobs are signed.** The API authenticates every job over the command, host, port, user, timeout, and lease, and the runner refuses any job it cannot verify, reporting the rejection instead of executing. `JOB_SIGNING_KEY` must be identical on both sides. Key rotation is a coordinated restart; overlapping key windows are not supported.
 - **JetStream is an optional notification bridge.** With `JOB_DISPATCH=jetstream`, durable pull consumers wake runners with metadata-only notifications. The API database lease remains authoritative and runners still claim through `GET /api/v1/jobs/next`, so duplicate delivery cannot create a second lease. A fully independent queue with separate scheduling and horizontally scaled worker control remains future work.
 - **No interactive SSH.** Only non-interactive command execution. No TTY, no session recording.
 - **Self-contained output storage is the default.** Large stdout/stderr is encrypted in the local artefact directory and referenced from SQLite. S3-compatible storage remains an optional extension for larger deployments.
@@ -57,7 +58,7 @@
 
 ## Web Console
 
-- **Development identity switching is not production authentication.** With `VPS_DEV_AUTH=true`, the web console uses the `X-VPS-User` header and local storage selector. Production deployments should use the OIDC login and session flow.
+- **Development identity switching is not production authentication.** With `VPS_DEV_AUTH=true`, the web console proxy sets the `X-VPS-User` header on behalf of the caller (overridable with `VPS_DEV_USER`) and strips any identity headers the browser supplied. It requires both `VPS_DEV_AUTH` and `NEXT_PUBLIC_DEV_AUTH`, and the API additionally refuses header identity outside an explicitly non-production environment. Production deployments should use the OIDC login and session flow.
 - **No SSR/SSG.** Client-side only. Data fetched on tab switch, no pre-rendering.
 - **No responsive design.** Optimized for desktop.
 
