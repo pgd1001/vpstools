@@ -6,6 +6,23 @@ All notable changes to VPS Tools are recorded here. The project follows Semantic
 
 Changes after `0.1.0-beta.1` will be recorded here first. Once a change is ready for a release, move it into a dated version section and create the matching Git tag.
 
+### Changed
+
+- **Breaking: `JOB_SIGNING_KEY` is now required.** The API signs every dispatched job over the command, host, port, user, timeout, and lease, and the runner refuses any job it cannot verify. The API and every runner must share the same key of at least 32 characters. Existing deployments must set it before upgrading; both processes exit at startup without it.
+- **Breaking: the runner job endpoints require a runner-bound credential.** Registration now exchanges the bootstrap credential for one bound to the runner identity, and claim, renew, result, and heartbeat accept only the bound form. An organisation-wide credential could previously claim work scoped to any runner in the organisation, which made runner scopes unenforceable.
+- **Breaking: the API no longer infers an identity.** A request with no credential is unauthenticated rather than resolved to a senior engineer, and a runner request with no credential no longer resolves to the demo organisation. Development header identity additionally requires an explicitly non-production environment; any unrecognised or unset environment name is now treated as production.
+
+### Fixed
+
+- Audit search silently dropped every event with no actor, which is all system-generated ones: runner registration, credential issuance, execution completion, and scheduled runs. Nullable columns are now coalesced, and an undecodable row returns an error rather than being skipped.
+- The web console proxy sent no identity in development mode, so every proxied request failed once the API stopped inferring one. It now names the actor explicitly and strips identity headers supplied by the caller.
+- SQLite read traffic queued behind the single writer, and lease reconciliation ran a full scan of an organisation's running targets on every job claim, so a handful of polling runners could saturate the API. Reads now use a separate WAL pool and reconciliation is throttled per organisation, with the embedded scheduler sweeping so abandoned work is still dead-lettered.
+
+### Added
+
+- `svrtools_runner_jobs_rejected_total`, which counts jobs a runner refused because the signature did not verify. It is non-zero only when something is dispatching jobs the runner does not trust.
+- Schema parity is now derived from both dialects and compared in full, so a column added to SQLite or PostgreSQL and forgotten in the other fails the build.
+
 ## [0.1.0-beta.1] - 2026-07-28
 
 This is the first named beta baseline for the implemented MVP. It consolidates the work completed from the Phase 0 architecture spike through the Phase 7 hardening work and the subsequent operations, backend, recovery, and AI additions.
