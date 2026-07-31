@@ -57,6 +57,15 @@ Separate control-plane failure from target failure. Confirm the runner reached t
 
 Do not rerun a failed command blindly. First determine whether it was never started, partially completed, or completed but reported an error. Use an idempotent recovery runbook where possible.
 
+## The runner refuses to connect to a server
+
+These refusals are deliberate and the execution never reached the target, so nothing on that host has changed.
+
+- *"no ssh host key fingerprint is recorded for this server"* means the server has no pinned host key. Record one with `ssh-keyscan -p <port> <host> | ssh-keygen -lf -` and set it on the server.
+- *"no ssh credential reference is recorded for this server"* means the server does not say which credential to use. Set `--ssh-credential-ref` to the name of a key file held by the runner.
+- *"ssh credential unavailable on this runner"* means the reference is recorded but this runner holds no matching file in `SSH_CREDENTIALS_DIR`. Provision the key on that runner; the control plane never holds it.
+- *"ssh host key verification failed"* means the host presented a different key than the one recorded. Treat this as potential interception until proven otherwise. If the host was legitimately rebuilt or rekeyed, confirm the new key through a trusted channel and then update the recorded fingerprint.
+
 ## Output or artefacts are missing
 
 Check the artefact directory, service-account permissions, encryption key, and manifest. A changed encryption key can make existing local artefacts unreadable. For S3, check object existence, checksum, bucket policy, lifecycle rules, and signed URL expiry.

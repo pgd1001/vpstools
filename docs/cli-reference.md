@@ -43,6 +43,7 @@ Use `--json` in deployment scripts and health gates. A failed identity check nor
 ```text
 vps server add <name> [--hostname host] [--environment development|staging|production]
   [--ssh-port 22] [--ssh-user root] [--provider provider]
+  [--ssh-credential-ref name] [--ssh-host-key-fingerprint SHA256:...]
   [--tags '[{"key":"role","value":"web"}]'] [--output table|json]
 vps server list [--environment production] [--tag-key role] [--tag-value web] [--output table|json]
 vps server inspect <server> [--output table|json]
@@ -50,6 +51,18 @@ vps server check <server> [--output table|json]
 ```
 
 Use `server:<id|name>` in later commands when you want to make the target type explicit.
+
+A server can only be executed against once it has both an SSH credential reference and a pinned host key fingerprint. The reference names a key file held in each runner's `SSH_CREDENTIALS_DIR`; the private key itself is never sent to the control plane. Obtain the fingerprint from the host and register it together:
+
+```bash
+ssh-keyscan -p 22 app.example.com | ssh-keygen -lf -
+vps server add app-prod --hostname app.example.com --environment production \
+  --ssh-user deploy \
+  --ssh-credential-ref app-prod \
+  --ssh-host-key-fingerprint SHA256:...
+```
+
+The runner refuses to connect to a server missing either value rather than connecting unverified, so `vps server add` warns when one is absent.
 
 ## Runners
 

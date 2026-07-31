@@ -73,7 +73,7 @@ $env:SIMULATE = "true"
 .\bin\runner.exe
 ```
 
-For real SSH, configure the runner's API URL, runner credential, SSH target details, and trusted known-hosts file. Do not disable host verification to make a connection work.
+For real SSH, configure the runner's API URL, runner credential, and `SSH_CREDENTIALS_DIR`, then record an SSH credential reference and host key fingerprint on every server you intend to execute against. There is no way to disable host verification: a server with no pinned key is refused rather than connected to unverified.
 
 ## Run the first task
 

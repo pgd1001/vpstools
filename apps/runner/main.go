@@ -447,7 +447,7 @@ func (j *job) claims() jobsign.Claims {
 func runTarget(ctx context.Context, keystore *sshcreds.Keystore, j *job, host string, port int, user string) sshx.Result {
 	if j.HostKeyFingerprint == "" {
 		return sshx.Result{
-			Error:    "refusing to connect: no ssh host key fingerprint is recorded for this server; record one with 'vps server update --ssh-host-key-fingerprint'",
+			Error:    "refusing to connect: no ssh host key fingerprint is recorded for this server; record one with 'ssh-keyscan -p <port> <host> | ssh-keygen -lf -' and set it on the server",
 			ExitCode: -1,
 		}
 	}
